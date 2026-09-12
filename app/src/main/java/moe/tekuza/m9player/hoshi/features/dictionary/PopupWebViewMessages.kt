@@ -312,12 +312,12 @@ internal class PopupWebViewBridge(
     fun lookupRedirect(query: String): Int {
         if (callbackHolder.isClosed()) return 0
         val lookupGeneration = callbackHolder.beginLookup()
-        Log.d(HOSHI_LOOKUP_POPUP_LOG_TAG, "lookupRedirect received query='${query.take(48)}'")
+        logDebug(HOSHI_LOOKUP_POPUP_LOG_TAG) { "lookupRedirect received query='${query.take(48)}'" }
         val results = callbackHolder.callbacks.onLookupRedirect(query)
         logDebug(HOSHI_LOOKUP_POPUP_LOG_TAG) {
             "lookupRedirect query='${query.take(32)}' resultCount=${results.size}"
         }
-        Log.d(HOSHI_LOOKUP_POPUP_LOG_TAG, "lookupRedirect completed query='${query.take(48)}' results=${results.size}")
+        logDebug(HOSHI_LOOKUP_POPUP_LOG_TAG) { "lookupRedirect completed query='${query.take(48)}' results=${results.size}" }
         if (results.isNotEmpty()) {
             val offset = currentSelectionOffset()
             val selection = ReaderSelectionData(
@@ -340,7 +340,7 @@ internal class PopupWebViewBridge(
         if (callbackHolder.isClosed()) return 0
         val payload = runCatching { JSONObject(message) }.getOrNull() ?: return 0
         val query = payload.optString("query").takeIf { it.isNotBlank() } ?: return 0
-        Log.d(HOSHI_LOOKUP_POPUP_LOG_TAG, "lookupRedirectAt received query='${query.take(48)}'")
+        logDebug(HOSHI_LOOKUP_POPUP_LOG_TAG) { "lookupRedirectAt received query='${query.take(48)}'" }
         val offset = currentSelectionOffset()
         val selection = payload.toSelectionData(offset.x, offset.y)?.copy(
             text = query,
@@ -353,7 +353,7 @@ internal class PopupWebViewBridge(
         logDebug(HOSHI_LOOKUP_POPUP_LOG_TAG) {
             "lookupRedirectAt query='${query.take(32)}' resultCount=${results.size} rect=${selection.rect.x},${selection.rect.y} ${selection.rect.width}x${selection.rect.height}"
         }
-        Log.d(HOSHI_LOOKUP_POPUP_LOG_TAG, "lookupRedirectAt completed query='${query.take(48)}' results=${results.size}")
+        logDebug(HOSHI_LOOKUP_POPUP_LOG_TAG) { "lookupRedirectAt completed query='${query.take(48)}' results=${results.size}" }
         if (results.isNotEmpty()) {
             mainHandler.post {
                 if (!callbackHolder.isLookupActive(lookupGeneration)) return@post
@@ -393,7 +393,7 @@ internal class PopupWebViewBridge(
             }
             "swipeDismiss" -> mainHandler.post(callbacks.onSwipeDismiss)
             "contentReady" -> mainHandler.post {
-                Log.d(HOSHI_LOOKUP_POPUP_LOG_TAG, "contentReady received")
+                logDebug(HOSHI_LOOKUP_POPUP_LOG_TAG) { "contentReady received" }
                 val gate = contentReadyGate
                 if (gate != null) {
                     gate.awaitReadyToDraw(webView, callbacks.onContentReady)
@@ -402,7 +402,7 @@ internal class PopupWebViewBridge(
                 }
             }
             "contentReadyToDraw" -> mainHandler.post {
-                Log.d(HOSHI_LOOKUP_POPUP_LOG_TAG, "contentReadyToDraw received")
+                logDebug(HOSHI_LOOKUP_POPUP_LOG_TAG) { "contentReadyToDraw received" }
                 if (contentReadyGate?.isClosed != true) callbacks.onContentReady()
             }
             "textSelected" -> payload.optJSONObject("body")?.let { body ->
@@ -422,13 +422,12 @@ internal class PopupWebViewBridge(
                     }
                     mainHandler.post {
                         if (contentReadyGate?.isClosed == true) return@post
-                        Log.d(
-                            HOSHI_LOOKUP_POPUP_LOG_TAG,
+                        logDebug(HOSHI_LOOKUP_POPUP_LOG_TAG) {
                             "textSelected dispatch text='${selection.text.take(48)}' sentenceLen=${selection.sentence.length} " +
-                                "sentenceOffset=${selection.sentenceOffset}"
-                        )
+                            "sentenceOffset=${selection.sentenceOffset}"
+                        }
                         val highlightCount = callbacks.onTextSelected(selection) ?: return@post
-                        Log.d(HOSHI_LOOKUP_POPUP_LOG_TAG, "textSelected handled highlightCount=$highlightCount")
+                        logDebug(HOSHI_LOOKUP_POPUP_LOG_TAG) { "textSelected handled highlightCount=$highlightCount" }
                         webView.evaluateJavascript("window.hoshiSelection.highlightSelection($highlightCount)", null)
                     }
                 }
@@ -438,7 +437,7 @@ internal class PopupWebViewBridge(
                 val forwardCount = body.optInt("forwardCount", 0).coerceAtLeast(0)
                 mainHandler.post {
                     if (!callbackHolder.isClosed()) {
-                        Log.d(HOSHI_LOOKUP_POPUP_LOG_TAG, "historyChanged back=$backCount forward=$forwardCount")
+                        logDebug(HOSHI_LOOKUP_POPUP_LOG_TAG) { "historyChanged back=$backCount forward=$forwardCount" }
                         callbacks.onHistoryChanged(backCount, forwardCount)
                     }
                 }

@@ -7,13 +7,10 @@ import android.net.Uri
 import android.os.SystemClock
 import android.provider.OpenableColumns
 import android.util.Log
-import android.util.JsonReader
-import android.util.JsonToken
 import moe.tekuza.m9player.hoshi.dictionary.HoshiDictionaryQuerySession
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
-import java.io.StringReader
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
@@ -34,40 +31,7 @@ private const val HOSHI_IMPORT_PERF_LOG_TAG = "HoshiImportPerf"
 private const val HOSHI_IMPORT_ARCHIVE_MAX_BYTES = 2L * 1024L * 1024L * 1024L
 private const val HOSHI_IMPORT_COPY_BUFFER_BYTES = 256 * 1024
 
-private val NORMALIZE_WHITESPACE_REGEX = Regex("\\s+")
-private val STRIP_HTML_TAGS_REGEX = Regex("<[^>]+>")
-private val LOOKS_LIKE_HTML_REGEX = Regex("<\\s*/?\\s*[a-zA-Z][^>]*>")
-private val CAMEL_CASE_BOUNDARY_REGEX = Regex("([a-z])([A-Z])")
-private val MARKDOWN_IMAGE_REGEX = Regex("!\\[([^\\]]*)\\]\\(([^)\\s]+)\\)")
-private val MARKDOWN_LINK_REGEX = Regex("\\[([^\\]]+)\\]\\(([^)\\s]+)\\)")
-private val PLAIN_URL_REGEX = Regex("https?://[^\\s<]+")
 private val DICTIONARY_STORAGE_SAFE_KEY_REGEX = Regex("[^A-Za-z0-9._-]")
-private val HTML_TAG_NAME_SANITIZE_REGEX = Regex("[^a-z0-9-]")
-private val CSS_SIZE_UNIT_REGEX = Regex("^[a-z%]+$")
-private val CSS_NUMBER_REGEX = Regex("^[+-]?(?:\\d+\\.?\\d*|\\.\\d+)$")
-private val DANGEROUS_HTML_BLOCK_REGEX =
-    Regex("(?is)<\\s*(script|style|iframe|object|embed|form|textarea|select|button|svg|math)\\b[^>]*>.*?<\\s*/\\s*\\1\\s*>")
-private val DANGEROUS_HTML_TAG_REGEX =
-    Regex("(?is)<\\s*/?\\s*(script|style|link|meta|iframe|object|embed|form|input|button|textarea|select|option|base|svg|math)\\b[^>]*>")
-private val HTML_EVENT_ATTRIBUTE_REGEX =
-    Regex("(?is)\\s+on[a-z0-9_-]+\\s*=\\s*(\"[^\"]*\"|'[^']*'|[^\\s>]+)")
-private val HTML_SRCDOC_ATTRIBUTE_REGEX =
-    Regex("(?is)\\s+srcdoc\\s*=\\s*(\"[^\"]*\"|'[^']*'|[^\\s>]+)")
-private val HTML_DANGEROUS_URL_ATTRIBUTE_REGEX =
-    Regex("(?is)\\s+(href|src|xlink:href)\\s*=\\s*(\"\\s*(?:javascript:|vbscript:|data:text/html)[^\"]*\"|'\\s*(?:javascript:|vbscript:|data:text/html)[^']*'|(?:javascript:|vbscript:|data:text/html)[^\\s>]*)")
-private val STRUCTURED_ALLOWED_HTML_TAGS = setOf(
-    "a", "b", "blockquote", "br", "code", "dd", "del", "details", "dfn", "div", "dl", "dt",
-    "em", "i", "img", "ins", "kbd", "li", "mark", "ol", "p", "pre", "rp", "rt", "ruby",
-    "s", "samp", "small", "span", "strong", "sub", "summary", "sup", "table", "tbody",
-    "td", "tfoot", "th", "thead", "tr", "u", "ul", "var"
-)
-private val DANGEROUS_INLINE_STYLE_TOKENS = listOf(
-    "javascript:",
-    "vbscript:",
-    "data:text/html",
-    "expression(",
-    "-moz-binding"
-)
 private var hoshiLookupPreparedKey: String? = null
 private val hoshiLookupPreparedLock = Any()
 
@@ -206,7 +170,6 @@ private fun clearHoshiLookupPreparation() {
 
 internal fun invalidateDictionaryLookupCaches() {
     clearHoshiLookupPreparation()
-    HoshiNativeBridge.clearLookupCache()
 }
 
 private data class HoshiDictionaryBinding(
@@ -362,7 +325,6 @@ internal fun deleteDictionaryStorage(context: Context, cacheKey: String): Boolea
     val storageDeleted = deleteDictionaryStorageDir(context, cacheKey)
     if (storageDeleted) {
         clearHoshiLookupPreparation()
-        HoshiNativeBridge.clearLookupCache()
     }
     return storageDeleted
 }
@@ -387,7 +349,6 @@ internal fun importDictionaryFromZip(
         onProgress = onProgress
     )
     clearHoshiLookupPreparation()
-    HoshiNativeBridge.clearLookupCache()
     return imported
 }
 
@@ -448,7 +409,6 @@ private fun importDictionaryZipWithHoshi(
 
         onProgress?.invoke(DictionaryImportProgress(stage = "导入辞典，可能需要几分钟", current = 0, total = 0))
         onProgress?.invoke(DictionaryImportProgress(stage = "整理辞典", current = 95, total = 100))
-        HoshiNativeBridge.clearLookupCache()
         clearHoshiLookupPreparation()
         val lowRamImport = context.getSystemService(ActivityManager::class.java)?.isLowRamDevice != false
         val nativeStartNs = SystemClock.elapsedRealtimeNanos()
@@ -503,7 +463,6 @@ private fun importDictionaryZipWithHoshi(
             .coerceAtMost(Int.MAX_VALUE.toLong())
             .toInt()
 
-        HoshiNativeBridge.clearLookupCache()
         onProgress?.invoke(DictionaryImportProgress(stage = "完成", current = 100, total = 100))
         val totalMs = (SystemClock.elapsedRealtimeNanos() - totalStartNs) / 1_000_000L
         Log.i(
@@ -537,349 +496,6 @@ private fun queryDictionaryImportSize(contentResolver: ContentResolver, uri: Uri
     }.getOrDefault(-1L)
 }
 
-internal fun glossaryRawToDefinitionHtmlSql(glossaryRaw: String): String {
-    val trimmed = glossaryRaw.trim()
-    if (trimmed.isBlank()) return ""
-    val parsedDefinition = runCatching {
-        val reader = JsonReader(StringReader(trimmed))
-        reader.isLenient = true
-        val value = readJsonValueSql(reader)
-        extractGlossaryFromRawValueSql(value).firstOrNull().orEmpty()
-    }.getOrNull()
-
-    return parsedDefinition ?: normalizeDefinitionForDisplaySql(trimmed)
-}
-
-private fun readJsonValueSql(reader: JsonReader): Any? {
-    return when (reader.peek()) {
-        JsonToken.BEGIN_ARRAY -> {
-            val list = mutableListOf<Any?>()
-            reader.beginArray()
-            while (reader.hasNext()) {
-                list += readJsonValueSql(reader)
-            }
-            reader.endArray()
-            list
-        }
-
-        JsonToken.BEGIN_OBJECT -> {
-            val map = linkedMapOf<String, Any?>()
-            reader.beginObject()
-            while (reader.hasNext()) {
-                val key = reader.nextName()
-                map[key] = readJsonValueSql(reader)
-            }
-            reader.endObject()
-            map
-        }
-
-        JsonToken.STRING -> reader.nextString()
-        JsonToken.NUMBER -> reader.nextString()
-        JsonToken.BOOLEAN -> reader.nextBoolean()
-        JsonToken.NULL -> {
-            reader.nextNull()
-            null
-        }
-
-        else -> {
-            reader.skipValue()
-            null
-        }
-    }
-}
-
-private fun extractGlossaryFromRawValueSql(value: Any?): List<String> {
-    val definitions = mutableListOf<String>()
-    fun collect(raw: Any?) {
-        if (definitions.size >= 2) return
-        val text = extractTextSnippetSql(raw)
-        if (!text.isNullOrBlank()) definitions += text
-    }
-
-    when (value) {
-        is List<*> -> value.forEach(::collect)
-        else -> collect(value)
-    }
-    return compactDefinitionsSql(definitions)
-}
-
-private fun extractTextSnippetSql(value: Any?): String? {
-    if (value == null) return null
-    val raw = when (value) {
-        is String -> value
-        is Number, is Boolean -> value.toString()
-        is List<*> -> buildString {
-            value.forEach { child ->
-                val text = extractTextSnippetSql(child) ?: return@forEach
-                append(text)
-            }
-        }
-
-        is Map<*, *> -> structuredMapToHtmlSql(value)
-        else -> value.toString()
-    }.trim()
-    if (raw.isBlank()) return null
-    return clampDefinitionLengthForStorageSql(normalizeDefinitionForDisplaySql(raw))
-}
-
-private fun structuredMapToHtmlSql(value: Map<*, *>): String {
-    fun mapString(key: String): String = value[key]?.toString().orEmpty()
-
-    val type = mapString("type").trim().lowercase(Locale.ROOT)
-    if (type == "image") {
-        val path = listOf("path", "src", "url")
-            .map { mapString(it).trim() }
-            .firstOrNull { it.isNotBlank() }
-            .orEmpty()
-        if (path.isBlank() || !isSafeDictionaryHtmlUrlSql(path)) return ""
-        val dataAttributes = extractStructuredDataAttributesSql(value["data"]).toMutableMap()
-        val explicitClass = mapString("class").trim()
-        if (dataAttributes["class"].isNullOrBlank() && explicitClass.isNotBlank()) {
-            dataAttributes["class"] = explicitClass
-        }
-        logDebug("HoshiLookupPopup") {
-            "structured image(sql) dict=${mapString("dictionary").takeIf { it.isNotBlank() } ?: mapString("dict")} " +
-                "path=${path.take(64)} class=${explicitClass.ifBlank { dataAttributes["class"].orEmpty() }} " +
-                "dataKeys=${dataAttributes.keys.joinToString(",")} styleLen=${styleValueToCssSql(value["style"]).length} " +
-                "lang=${mapString("lang").takeIf { it.isNotBlank() } ?: ""}"
-        }
-        val dataScAttrs = buildStructuredDataScAttributesSql(dataAttributes)
-        val styleAttr = mergeInlineStyleSql(
-            styleValueToCssSql(value["style"]),
-            supplementalInlineStyleSql(value, "img")
-        ).takeIf { it.isNotBlank() }?.let(::sanitizeInlineStyleSql)?.let {
-            " style=\"${escapeHtmlAttributeSql(it)}\""
-        } ?: ""
-        val langAttr = mapString("lang").trim().takeIf { it.isNotBlank() }?.let {
-            " lang=\"${escapeHtmlAttributeSql(it)}\""
-        } ?: ""
-        val inlineAttrs = buildInlineHtmlAttributesSql(value)
-        return "<img$dataScAttrs$langAttr$styleAttr$inlineAttrs>"
-    }
-
-    val tagRaw = mapString("tag").trim().lowercase(Locale.ROOT)
-    val content = extractTextSnippetSql(value["content"]).orEmpty()
-    if (tagRaw.isNotBlank()) {
-        val tag = tagRaw.replace(HTML_TAG_NAME_SANITIZE_REGEX, "")
-        if (tag.isBlank() || tag !in STRUCTURED_ALLOWED_HTML_TAGS) return content
-
-        val dataAttributes = extractStructuredDataAttributesSql(value["data"]).toMutableMap()
-        val explicitClass = mapString("class").trim()
-        if (dataAttributes["class"].isNullOrBlank() && explicitClass.isNotBlank()) {
-            dataAttributes["class"] = explicitClass
-        }
-        val dataScAttrs = buildStructuredDataScAttributesSql(dataAttributes)
-        val langAttr = mapString("lang").trim().takeIf { it.isNotBlank() }?.let {
-            " lang=\"${escapeHtmlAttributeSql(it)}\""
-        } ?: ""
-        val styleAttr = mergeInlineStyleSql(
-            styleValueToCssSql(value["style"]),
-            supplementalInlineStyleSql(value, tag)
-        ).takeIf { it.isNotBlank() }?.let(::sanitizeInlineStyleSql)?.let {
-            " style=\"${escapeHtmlAttributeSql(it)}\""
-        } ?: ""
-        val inlineAttrs = buildInlineHtmlAttributesSql(value)
-        return if (isVoidHtmlTagSql(tag)) {
-            "<$tag$dataScAttrs$langAttr$styleAttr$inlineAttrs>"
-        } else {
-            "<$tag$dataScAttrs$langAttr$styleAttr$inlineAttrs>$content</$tag>"
-        }
-    }
-
-    if (content.isNotBlank()) return content
-
-    val textValue = listOf("text", "value")
-        .map { mapString(it) }
-        .firstOrNull { it.isNotBlank() }
-        .orEmpty()
-    if (textValue.isNotBlank()) return textValue
-
-    val fallback = value.values
-        .mapNotNull { extractTextSnippetSql(it) }
-        .filter { it.isNotBlank() }
-    return fallback.joinToString("")
-}
-
-private fun extractStructuredDataAttributesSql(rawData: Any?): Map<String, String> {
-    val attributes = linkedMapOf<String, String>()
-
-    fun putAttribute(rawKey: String?, rawValue: Any?) {
-        val key = normalizeStructuredDataKeySql(rawKey)
-        if (key.isBlank()) return
-        val value = when (rawValue) {
-            null -> ""
-            is String -> rawValue.trim()
-            is Number, is Boolean -> rawValue.toString()
-            else -> rawValue.toString().trim()
-        }
-        attributes[key] = value
-    }
-
-    when (rawData) {
-        is Map<*, *> -> rawData.forEach { (key, value) ->
-            putAttribute(key?.toString(), value)
-        }
-
-        is String -> {
-            val trimmed = rawData.trim()
-            if (trimmed.startsWith("@{") && trimmed.endsWith("}")) {
-                val body = trimmed.substring(2, trimmed.length - 1)
-                body.split(';').forEach { token ->
-                    val part = token.trim()
-                    if (part.isBlank()) return@forEach
-                    val separator = part.indexOf('=')
-                    if (separator < 0) {
-                        putAttribute(part, "")
-                    } else {
-                        putAttribute(part.substring(0, separator), part.substring(separator + 1))
-                    }
-                }
-            }
-        }
-    }
-
-    return attributes
-}
-
-private fun normalizeStructuredDataKeySql(rawKey: String?): String {
-    val base = rawKey
-        ?.trim()
-        .orEmpty()
-    if (base.isBlank()) return ""
-
-    return when (base.lowercase(Locale.ROOT)) {
-        "sc-class", "scclass", "class" -> "class"
-        // Yomitan dictionary packs commonly use dic-item while CSS targets dic_item.
-        "dic-item" -> "dic_item"
-        else -> base
-    }
-}
-
-private fun buildStructuredDataScAttributesSql(data: Map<String, String>): String {
-    if (data.isEmpty()) return ""
-    val classAttr = data["class"]?.trim().takeIf { !it.isNullOrBlank() }
-    val dataAttrs = data.entries.joinToString(separator = "") { (key, value) ->
-        val escapedValue = escapeHtmlAttributeSql(value)
-        buildString {
-            append(" data-sc-$key=\"$escapedValue\"")
-            append(" data-sc$key=\"$escapedValue\"")
-        }
-    }
-    return buildString {
-        if (!classAttr.isNullOrBlank()) {
-            append(" class=\"${escapeHtmlAttributeSql(classAttr)}\"")
-        }
-        append(dataAttrs)
-    }
-}
-
-private fun isVoidHtmlTagSql(tag: String): Boolean {
-    return tag in setOf("area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr")
-}
-
-private fun buildInlineHtmlAttributesSql(value: Map<*, *>): String {
-    val attrs = linkedMapOf<String, String>()
-    val tag = value["tag"]?.toString()?.trim()?.lowercase(Locale.ROOT).orEmpty()
-    val suppressWidthHeightAttr = tag == "img" && !value["sizeUnits"]?.toString().isNullOrBlank()
-    val src = listOf("src", "path", "url")
-        .asSequence()
-        .map { key -> value[key]?.toString()?.trim().orEmpty() }
-        .firstOrNull { it.isNotBlank() }
-        .orEmpty()
-    if (src.isNotBlank() && isSafeDictionaryHtmlUrlSql(src)) attrs["src"] = src
-    val allowed = if (suppressWidthHeightAttr) {
-        listOf("href", "alt", "title", "target", "rel", "colspan", "rowspan")
-    } else {
-        listOf("href", "alt", "title", "target", "rel", "width", "height", "colspan", "rowspan")
-    }
-    allowed.forEach { key ->
-        val raw = value[key]?.toString()?.trim().orEmpty()
-        if ((key == "href" || key == "src") && !isSafeDictionaryHtmlUrlSql(raw)) return@forEach
-        if (raw.isNotBlank()) attrs[key] = raw
-    }
-    return attrs.entries.joinToString(separator = "") { (key, raw) ->
-        " $key=\"${escapeHtmlAttributeSql(raw)}\""
-    }
-}
-
-private fun supplementalInlineStyleSql(value: Map<*, *>, tag: String): String {
-    if (tag != "img") return ""
-    val unit = normalizeCssUnitSql(value["sizeUnits"]?.toString().orEmpty()) ?: return ""
-    val width = toCssLengthSql(value["width"]?.toString().orEmpty(), unit)
-    val height = toCssLengthSql(value["height"]?.toString().orEmpty(), unit)
-    val verticalAlign = value["verticalAlign"]?.toString()?.trim().orEmpty()
-
-    val styles = mutableListOf<String>()
-    if (width.isNotBlank()) styles += "width: $width"
-    if (height.isNotBlank()) styles += "height: $height"
-    if (verticalAlign.isNotBlank()) styles += "vertical-align: $verticalAlign"
-    return styles.joinToString("; ")
-}
-
-private fun normalizeCssUnitSql(rawUnit: String): String? {
-    val unit = rawUnit.trim().lowercase(Locale.ROOT)
-    if (unit.isBlank()) return null
-    return if (unit.matches(CSS_SIZE_UNIT_REGEX)) unit else null
-}
-
-private fun toCssLengthSql(raw: String, unit: String): String {
-    val text = raw.trim()
-    if (text.isBlank()) return ""
-    return if (text.matches(CSS_NUMBER_REGEX)) "$text$unit" else text
-}
-
-private fun mergeInlineStyleSql(base: String, extra: String): String {
-    val parts = listOf(base.trim().trimEnd(';'), extra.trim().trimEnd(';'))
-        .filter { it.isNotBlank() }
-    return parts.joinToString("; ")
-}
-
-private fun styleValueToCssSql(value: Any?): String {
-    return when (value) {
-        null -> ""
-        is String -> value.trim()
-        is Map<*, *> -> {
-            val parts = mutableListOf<String>()
-            value.forEach { (key, raw) ->
-                val k = key?.toString()?.trim().orEmpty()
-                val v = raw?.toString()?.trim().orEmpty()
-                if (k.isBlank() || v.isBlank()) return@forEach
-                parts += "${camelToKebabSql(k)}: $v"
-            }
-            parts.joinToString("; ")
-        }
-
-        else -> value.toString().trim()
-    }
-}
-
-private fun camelToKebabSql(value: String): String {
-    return value
-        .replace(CAMEL_CASE_BOUNDARY_REGEX, "$1-$2")
-        .lowercase(Locale.ROOT)
-}
-
-private fun compactDefinitionsSql(rawDefinitions: List<String>): List<String> {
-    return rawDefinitions
-        .map(::normalizeDefinitionForDisplaySql)
-        .filter { it.isNotBlank() && isLikelyDefinitionSql(it) }
-        .map(::clampDefinitionLengthForStorageSql)
-        .distinct()
-        .take(2)
-}
-
-private fun normalizeDefinitionForDisplaySql(raw: String): String {
-    val trimmed = raw.trim()
-    if (trimmed.isBlank()) return ""
-    return if (looksLikeHtmlSql(trimmed)) sanitizeDictionaryDefinitionHtmlSql(trimmed) else plainDefinitionToHtmlSql(trimmed)
-}
-
-private fun clampDefinitionLengthForStorageSql(value: String): String {
-    val trimmed = value.trim()
-    if (trimmed.isBlank()) return ""
-    return if (looksLikeHtmlSql(trimmed)) sanitizeDictionaryDefinitionHtmlSql(trimmed) else trimmed.take(3200)
-}
-
 internal fun lookupDictionarySourceUriByCacheKey(context: Context, cacheKey: String): String? {
     if (cacheKey.isBlank()) return null
     return loadPersistedImports(context)
@@ -888,145 +504,4 @@ internal fun lookupDictionarySourceUriByCacheKey(context: Context, cacheKey: Str
         ?.uri
         ?.trim()
         ?.takeIf { it.isNotBlank() }
-}
-
-private fun looksLikeHtmlSql(text: String): Boolean {
-    return LOOKS_LIKE_HTML_REGEX.containsMatchIn(text)
-}
-
-private fun sanitizeDictionaryDefinitionHtmlSql(raw: String): String {
-    return raw
-        .replace(DANGEROUS_HTML_BLOCK_REGEX, "")
-        .replace(DANGEROUS_HTML_TAG_REGEX, "")
-        .replace(HTML_EVENT_ATTRIBUTE_REGEX, "")
-        .replace(HTML_SRCDOC_ATTRIBUTE_REGEX, "")
-        .replace(HTML_DANGEROUS_URL_ATTRIBUTE_REGEX, "")
-        .trim()
-}
-
-private fun sanitizeInlineStyleSql(raw: String): String? {
-    val style = raw.trim()
-    if (style.isBlank()) return null
-    val lower = style.lowercase(Locale.ROOT)
-    if (DANGEROUS_INLINE_STYLE_TOKENS.any { lower.contains(it) }) return null
-    return style.take(2000)
-}
-
-private fun isSafeDictionaryHtmlUrlSql(raw: String): Boolean {
-    val value = raw.trim()
-    if (value.isBlank()) return false
-    val lower = value.lowercase(Locale.ROOT)
-    if (
-        lower.startsWith("javascript:") ||
-        lower.startsWith("vbscript:") ||
-        lower.startsWith("data:text/html")
-    ) {
-        return false
-    }
-    if (lower.startsWith("data:")) return lower.startsWith("data:image/")
-    val scheme = value.substringBefore(':', missingDelimiterValue = "")
-    if (scheme == value) return true
-    return scheme.lowercase(Locale.ROOT) in setOf("http", "https", "dictres", "image", "mailto", "tel")
-}
-
-private fun isLikelyDefinitionSql(text: String): Boolean {
-    val plain = stripHtmlTagsSql(text)
-    if (plain.length < 2) return false
-    if (plain.all { it.isDigit() }) return false
-    return true
-}
-
-private fun plainDefinitionToHtmlSql(raw: String): String {
-    val normalized = raw
-        .replace("\r\n", "\n")
-        .replace('\r', '\n')
-        .trim()
-    if (normalized.isBlank()) return ""
-    val linked = linkifyPlainTextWithMarkdownSql(normalized)
-    return linked.replace("\n", "<br/>")
-}
-
-private fun linkifyPlainTextWithMarkdownSql(text: String): String {
-    val out = StringBuilder()
-    var cursor = 0
-
-    data class Token(val start: Int, val end: Int, val html: String)
-
-    fun sanitizeUrlOrNull(raw: String): String? {
-        val candidate = raw.trim().trim('"', '\'')
-        if (candidate.isBlank()) return null
-        val lower = candidate.lowercase(Locale.ROOT)
-        if (lower.startsWith("javascript:")) return null
-        return candidate
-    }
-
-    val tokens = mutableListOf<Token>()
-
-    MARKDOWN_IMAGE_REGEX.findAll(text).forEach { match ->
-        val alt = match.groupValues[1]
-        val src = sanitizeUrlOrNull(match.groupValues[2]) ?: return@forEach
-        tokens += Token(
-            start = match.range.first,
-            end = match.range.last + 1,
-            html = "<img src=\"${escapeHtmlAttributeSql(src)}\" alt=\"${escapeHtmlAttributeSql(alt)}\" />"
-        )
-    }
-    MARKDOWN_LINK_REGEX.findAll(text).forEach { match ->
-        val label = match.groupValues[1]
-        val href = sanitizeUrlOrNull(match.groupValues[2]) ?: return@forEach
-        tokens += Token(
-            start = match.range.first,
-            end = match.range.last + 1,
-            html = "<a href=\"${escapeHtmlAttributeSql(href)}\">${escapeHtmlTextSql(label)}</a>"
-        )
-    }
-
-    val occupied = tokens.sortedBy { it.start }
-    PLAIN_URL_REGEX.findAll(text).forEach { match ->
-        val start = match.range.first
-        val end = match.range.last + 1
-        if (occupied.any { start < it.end && end > it.start }) return@forEach
-        val href = sanitizeUrlOrNull(match.value) ?: return@forEach
-        val safeHref = escapeHtmlAttributeSql(href)
-        val safeLabel = escapeHtmlTextSql(href)
-        tokens += Token(start = start, end = end, html = "<a href=\"$safeHref\">$safeLabel</a>")
-    }
-
-    tokens
-        .sortedBy { it.start }
-        .forEach { token ->
-            if (token.start < cursor) return@forEach
-            if (token.start > cursor) {
-                out.append(escapeHtmlTextSql(text.substring(cursor, token.start)))
-            }
-            out.append(token.html)
-            cursor = token.end
-        }
-
-    if (cursor < text.length) {
-        out.append(escapeHtmlTextSql(text.substring(cursor)))
-    }
-    return out.toString()
-}
-
-private fun stripHtmlTagsSql(value: String): String {
-    return value
-        .replace(STRIP_HTML_TAGS_REGEX, " ")
-        .replace(NORMALIZE_WHITESPACE_REGEX, " ")
-        .trim()
-}
-
-private fun escapeHtmlAttributeSql(value: String): String {
-    return value
-        .replace("&", "&amp;")
-        .replace("\"", "&quot;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-}
-
-private fun escapeHtmlTextSql(value: String): String {
-    return value
-        .replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
 }

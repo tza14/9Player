@@ -27,13 +27,29 @@ internal data class EbookDocument(
     val chapters: List<EbookChapter>
 )
 
+/**
+ * EPUB 目录（ncx/nav）里的一条：标题 + 目标文件 + 锚点。
+ * 同一文件可能有多条、用锚点区分小节 —— 解析时按锚点把它切成多章。
+ */
+internal data class EpubTocEntry(
+    val title: String,
+    val path: String,
+    val fragment: String = ""
+)
+
 internal data class EbookChapter(
     val title: String,
     val text: String,
     val sourcePath: String? = null,
     val images: Map<Int, EbookImageRef> = emptyMap(),
     val rubySpans: List<EbookRubySpan> = emptyList(),
-    val isVolume: Boolean = false
+    val isVolume: Boolean = false,
+    /**
+     * 标题是否来自目录条目或正文标题元素（h1-h3）。
+     * false 表示只是 `<title>` 兜底 —— calibre 常常把它写成 part0012 这种文件名，
+     * 这种页不是真正的章节，解析时会并入相邻章节（见 mergeSpinePartsIntoChapters）。
+     */
+    val titleFromMarkup: Boolean = true
 )
 
 /**
@@ -70,12 +86,27 @@ internal data class EbookRubySegment(
     val text: String
 )
 
+/**
+ * 一张图在电子书里是"怎么排的"，决定听读时是否要在它上面停下来：
+ * - [INLINE]：写在有正文的章节里（可能是正文中段的插画，也可能是章节开头的题图）；
+ * - [ILLUSTRATION_PAGE]：来自"纯图片 spine 页"（整页只有图、没有正文）且这页不被目录指向
+ *   —— 出版方专门为这张插图排的一页，是最典型的"停下来看看"的对象；
+ * - [SECTION_TITLE_PAGE]：来自"纯图片 spine 页"但该页被目录条目指向（= 章节题图页/表纸），
+ *   它是章节的排版开头，不是插图，不该触发遇图暂停。
+ */
+internal enum class EbookImageOrigin {
+    INLINE,
+    ILLUSTRATION_PAGE,
+    SECTION_TITLE_PAGE
+}
+
 internal data class EbookImageRef(
     val path: String,
     val altText: String,
     val mediaType: String?,
     val bytes: ByteArray? = null,
-    val filePath: String? = null
+    val filePath: String? = null,
+    val origin: EbookImageOrigin = EbookImageOrigin.INLINE
 ) {
     fun readBytes(): ByteArray? =
         bytes ?: filePath?.let { path -> File(path).takeIf { it.isFile }?.readBytes() }
@@ -369,17 +400,15 @@ private fun loadEpubDocumentFromZip(
             }
         }
     }
-    Log.d(
-        EBOOK_READER_CORE_LOG_TAG,
+    logDebug(EBOOK_READER_CORE_LOG_TAG) {
         "loadEpubDocument zipScan=${SystemClock.elapsedRealtime() - zipStartMs}ms " +
-            "entries=$entryCount readerEntries=${entries.size} htmlEntries=$htmlEntryCount " +
-            "imageEntries=$imageEntryCount readerBytes=$readerBytes imageBytes=$imageBytes uri=$uri"
-    )
+        "entries=$entryCount readerEntries=${entries.size} htmlEntries=$htmlEntryCount " +
+        "imageEntries=$imageEntryCount readerBytes=$readerBytes imageBytes=$imageBytes uri=$uri"
+    }
     if (entries.isEmpty()) {
-        Log.d(
-            EBOOK_READER_CORE_LOG_TAG,
+        logDebug(EBOOK_READER_CORE_LOG_TAG) {
             "loadEpubDocument empty total=${SystemClock.elapsedRealtime() - startMs}ms uri=$uri"
-        )
+        }
         return EbookDocument(fallbackTitle, "EPUB", listOf(EbookChapter(fallbackTitle, "")))
     }
     val container = entries["META-INF/container.xml"]?.toString(StandardCharsets.UTF_8)
@@ -392,35 +421,39 @@ private fun loadEpubDocumentFromZip(
     val basePath = opfPath.substringBeforeLast('/', missingDelimiterValue = "")
     val title = opf.title.ifBlank { fallbackTitle }
     val epubImages = buildEpubImageMap(entries, opf.manifest, basePath)
-    val tocTitles = buildEpubTocTitleMap(entries, opf, basePath, preferredCharsetName)
-    val chapters = opf.spineIds.mapIndexedNotNull { index, id ->
-        val item = opf.manifest[id] ?: return@mapIndexedNotNull null
-        val path = resolveEpubPath(basePath, item.href)
-        val bytes = entries[path] ?: return@mapIndexedNotNull null
-        val html = bytes.decodeTextFile(preferredCharsetName)
-        buildEpubChapterFromHtml(
-            html = html,
-            path = path,
-            title = tocTitles.titleForPath(path)
-                ?: fallbackEpubChapterTitle(html, isFirstSpineItem = index == 0),
-            imageResources = epubImages
-        ).takeIf { it.text.isNotBlank() || it.isVolume }
-    }.ifEmpty {
-        htmlEntries(entries).mapIndexed { index, (path, bytes) ->
+    val tocEntries = buildEpubTocEntries(entries, opf, basePath, preferredCharsetName)
+    val chapters = mergeSpinePartsIntoChapters(
+        opf.spineIds.mapIndexedNotNull { index, id ->
+            val item = opf.manifest[id] ?: return@mapIndexedNotNull null
+            val path = resolveEpubPath(basePath, item.href)
+            val bytes = entries[path] ?: return@mapIndexedNotNull null
             val html = bytes.decodeTextFile(preferredCharsetName)
-            buildEpubChapterFromHtml(
+            buildEpubChaptersFromHtml(
                 html = html,
                 path = path,
-                title = fallbackEpubChapterTitle(html, isFirstSpineItem = index == 0),
-                imageResources = epubImages
+                imageResources = epubImages,
+                tocEntriesForFile = tocEntries.filter { it.path == path },
+                fallbackTitle = fallbackEpubChapterTitle(html, isFirstSpineItem = index == 0),
+                isFirstSpineItem = index == 0
             )
-        }.filter { it.text.isNotBlank() || it.isVolume }
-    }
-    Log.d(
-        EBOOK_READER_CORE_LOG_TAG,
-        "loadEpubDocument parsed total=${SystemClock.elapsedRealtime() - startMs}ms " +
-            "chapters=${chapters.size} images=${epubImages.size} title=$title"
+        }.flatten().ifEmpty {
+            htmlEntries(entries).mapIndexed { index, (path, bytes) ->
+                val html = bytes.decodeTextFile(preferredCharsetName)
+                buildEpubChaptersFromHtml(
+                    html = html,
+                    path = path,
+                    imageResources = epubImages,
+                    tocEntriesForFile = emptyList(),
+                    fallbackTitle = fallbackEpubChapterTitle(html, isFirstSpineItem = index == 0),
+                    isFirstSpineItem = index == 0
+                )
+            }.flatten().filter { it.text.isNotBlank() || it.isVolume }
+        }
     )
+    logDebug(EBOOK_READER_CORE_LOG_TAG) {
+        "loadEpubDocument parsed total=${SystemClock.elapsedRealtime() - startMs}ms " +
+        "chapters=${chapters.size} images=${epubImages.size} title=$title"
+    }
     return EbookDocument(
         title = title,
         format = "EPUB",
@@ -451,36 +484,40 @@ private fun loadEpubDocumentFromCache(
     val basePath = opfPath.substringBeforeLast('/', missingDelimiterValue = "")
     val title = opf.title.ifBlank { fallbackTitle }
     val epubImages = buildEpubImageMapFromCache(root, opf.manifest, basePath)
-    val tocTitles = buildEpubTocTitleMapFromCache(root, opf, basePath, preferredCharsetName)
-    val chapters = opf.spineIds.mapIndexedNotNull { index, id ->
-        val item = opf.manifest[id] ?: return@mapIndexedNotNull null
-        val path = resolveEpubPath(basePath, item.href)
-        val file = root.resolveSafeEpubPath(path)?.takeIf { it.isFile } ?: return@mapIndexedNotNull null
-        val html = file.readBytes().decodeTextFile(preferredCharsetName)
-        buildEpubChapterFromHtml(
-            html = html,
-            path = path,
-            title = tocTitles.titleForPath(path)
-                ?: fallbackEpubChapterTitle(html, isFirstSpineItem = index == 0),
-            imageResources = epubImages
-        ).takeIf { it.text.isNotBlank() || it.isVolume }
-    }.ifEmpty {
-        htmlFiles(root).mapIndexed { index, file ->
-            val path = file.relativeTo(root).invariantSeparatorsPath
+    val tocEntries = buildEpubTocEntriesFromCache(root, opf, basePath, preferredCharsetName)
+    val chapters = mergeSpinePartsIntoChapters(
+        opf.spineIds.mapIndexedNotNull { index, id ->
+            val item = opf.manifest[id] ?: return@mapIndexedNotNull null
+            val path = resolveEpubPath(basePath, item.href)
+            val file = root.resolveSafeEpubPath(path)?.takeIf { it.isFile } ?: return@mapIndexedNotNull null
             val html = file.readBytes().decodeTextFile(preferredCharsetName)
-            buildEpubChapterFromHtml(
+            buildEpubChaptersFromHtml(
                 html = html,
                 path = path,
-                title = fallbackEpubChapterTitle(html, isFirstSpineItem = index == 0),
-                imageResources = epubImages
+                imageResources = epubImages,
+                tocEntriesForFile = tocEntries.filter { it.path == path },
+                fallbackTitle = fallbackEpubChapterTitle(html, isFirstSpineItem = index == 0),
+                isFirstSpineItem = index == 0
             )
-        }.filter { it.text.isNotBlank() || it.isVolume }
-    }
-    Log.d(
-        EBOOK_READER_CORE_LOG_TAG,
-        "loadEpubDocument cacheParsed total=${SystemClock.elapsedRealtime() - startMs}ms " +
-            "chapters=${chapters.size} images=${epubImages.size} root=${root.name}"
+        }.flatten().ifEmpty {
+            htmlFiles(root).mapIndexed { index, file ->
+                val path = file.relativeTo(root).invariantSeparatorsPath
+                val html = file.readBytes().decodeTextFile(preferredCharsetName)
+                buildEpubChaptersFromHtml(
+                    html = html,
+                    path = path,
+                    imageResources = epubImages,
+                    tocEntriesForFile = emptyList(),
+                    fallbackTitle = fallbackEpubChapterTitle(html, isFirstSpineItem = index == 0),
+                    isFirstSpineItem = index == 0
+                )
+            }.flatten().filter { it.text.isNotBlank() || it.isVolume }
+        }
     )
+    logDebug(EBOOK_READER_CORE_LOG_TAG) {
+        "loadEpubDocument cacheParsed total=${SystemClock.elapsedRealtime() - startMs}ms " +
+        "chapters=${chapters.size} images=${epubImages.size} root=${root.name}"
+    }
     return EbookDocument(
         title = title,
         format = "EPUB",
@@ -494,15 +531,19 @@ private fun fallbackHtmlEpub(
     preferredCharsetName: String?
 ): EbookDocument {
     val epubImages = buildEpubImageMap(entries, emptyMap(), "")
-    val chapters = htmlEntries(entries).mapIndexed { index, (path, bytes) ->
-        val html = bytes.decodeTextFile(preferredCharsetName)
-        buildEpubChapterFromHtml(
-            html = html,
-            path = path,
-            title = fallbackEpubChapterTitle(html, isFirstSpineItem = index == 0),
-            imageResources = epubImages
-        )
-    }.filter { it.text.isNotBlank() }
+    val chapters = mergeSpinePartsIntoChapters(
+        htmlEntries(entries).mapIndexed { index, (path, bytes) ->
+            val html = bytes.decodeTextFile(preferredCharsetName)
+            buildEpubChaptersFromHtml(
+                html = html,
+                path = path,
+                imageResources = epubImages,
+                tocEntriesForFile = emptyList(),
+                fallbackTitle = fallbackEpubChapterTitle(html, isFirstSpineItem = index == 0),
+                isFirstSpineItem = index == 0
+            )
+        }.flatten().filter { it.text.isNotBlank() }
+    )
     return EbookDocument(fallbackTitle, "EPUB", chapters.ifEmpty { listOf(EbookChapter(fallbackTitle, "")) })
 }
 
@@ -512,16 +553,20 @@ private fun fallbackHtmlEpubFromCache(
     preferredCharsetName: String?
 ): EbookDocument {
     val epubImages = buildEpubImageMapFromCache(root, emptyMap(), "")
-    val chapters = htmlFiles(root).mapIndexed { index, file ->
-        val path = file.relativeTo(root).invariantSeparatorsPath
-        val html = file.readBytes().decodeTextFile(preferredCharsetName)
-        buildEpubChapterFromHtml(
-            html = html,
-            path = path,
-            title = fallbackEpubChapterTitle(html, isFirstSpineItem = index == 0),
-            imageResources = epubImages
-        )
-    }.filter { it.text.isNotBlank() }
+    val chapters = mergeSpinePartsIntoChapters(
+        htmlFiles(root).mapIndexed { index, file ->
+            val path = file.relativeTo(root).invariantSeparatorsPath
+            val html = file.readBytes().decodeTextFile(preferredCharsetName)
+            buildEpubChaptersFromHtml(
+                html = html,
+                path = path,
+                imageResources = epubImages,
+                tocEntriesForFile = emptyList(),
+                fallbackTitle = fallbackEpubChapterTitle(html, isFirstSpineItem = index == 0),
+                isFirstSpineItem = index == 0
+            )
+        }.flatten().filter { it.text.isNotBlank() }
+    )
     return EbookDocument(fallbackTitle, "EPUB", chapters.ifEmpty { listOf(EbookChapter(fallbackTitle, "")) })
 }
 
@@ -529,7 +574,8 @@ private fun buildEpubChapterFromHtml(
     html: String,
     path: String,
     title: String,
-    imageResources: Map<String, EpubImageResource>
+    imageResources: Map<String, EpubImageResource>,
+    titleFromMarkup: Boolean
 ): EbookChapter {
     val content = htmlToReaderContent(
         html = html,
@@ -543,13 +589,302 @@ private fun buildEpubChapterFromHtml(
         sourcePath = path,
         images = content.images,
         rubySpans = content.rubySpans,
-        isVolume = content.text.isBlank() && title.isVolumeTitle()
+        isVolume = content.text.isBlank() && title.isVolumeTitle(),
+        titleFromMarkup = titleFromMarkup
     )
 }
+
+/**
+ * 把一个 spine 项的 xhtml 变成一章或多章。
+ *
+ * 目录里可能有多条指向**同一个文件**、用锚点区分小节的条目（例：無職転生 的
+ * part0009.xhtml 里 #a5HS/#a5HT/#a5HU 分别是 第一話/第二話/第三話）。这种就按锚点在
+ * html 里的位置把 html 切成多段、各自解析成章节（legado 的做法），标题取各自的目录条目。
+ *
+ * 关键：切分在 **html 层**做，不是先转成正文再按字符偏移切。这样每段正文里的图片位置与
+ * 注音 span 偏移都是各自独立算出来的，不会出现整体平移错位（我们为此专门修过 bug）。
+ *
+ * 锚点之前的那一段没有目录条目 → 标题退化成 <title>（part0009 这种文件名）→ 会被
+ * [mergeSpinePartsIntoChapters] 当成"无标题页"并进前一章，正好让上一节（如 プロローグ）
+ * 的正文接上。
+ */
+private fun buildEpubChaptersFromHtml(
+    html: String,
+    path: String,
+    imageResources: Map<String, EpubImageResource>,
+    tocEntriesForFile: List<EpubTocEntry>,
+    fallbackTitle: String,
+    isFirstSpineItem: Boolean
+): List<EbookChapter> {
+    // 只有**带锚点**的条目才对应一段；不带锚点的条目（例：part0007 的「第一章 幼年期」）
+    // 是整文件的标题，用来给"锚点之前那一段"命名。
+    val anchoredEntries = tocEntriesForFile.filter { it.fragment.isNotBlank() }
+    val anchors = anchoredEntries.map { it.fragment }
+    val fileEntry = tocEntriesForFile.firstOrNull { it.fragment.isBlank() }
+    val segments = splitHtmlAtAnchors(html, anchors)
+    if (anchors.isEmpty() || segments.size != anchors.size + 1) {
+        // 没有可用的锚点位置：整个文件一章，行为与以前一致
+        val chapter = buildEpubChapterFromHtml(
+            html = html,
+            path = path,
+            title = fileEntry?.title ?: tocEntriesForFile.firstOrNull()?.title ?: fallbackTitle,
+            imageResources = imageResources,
+            titleFromMarkup = tocEntriesForFile.isNotEmpty() || extractHtmlHeading(html) != null
+        )
+        val kept = chapter
+            .markImageOrigin(isSectionTitlePage = tocEntriesForFile.isNotEmpty())
+            .takeIf { it.text.isNotBlank() || it.isVolume }
+        return listOfNotNull(kept)
+    }
+
+    val chapters = mutableListOf<EbookChapter>()
+    val leadingHtml = segments.first()
+    val leading = buildEpubChapterFromHtml(
+        html = leadingHtml,
+        path = path,
+        title = fileEntry?.title
+            ?: fallbackEpubChapterTitle(leadingHtml, isFirstSpineItem = isFirstSpineItem),
+        imageResources = imageResources,
+        titleFromMarkup = fileEntry != null || extractHtmlHeading(leadingHtml) != null
+    )
+    if (leading.text.isNotBlank() || leading.isVolume) {
+        chapters += leading.markImageOrigin(isSectionTitlePage = fileEntry != null)
+    }
+    anchoredEntries.forEachIndexed { index, entry ->
+        val segmentHtml = segments[index + 1]
+        val chapter = buildEpubChapterFromHtml(
+            html = segmentHtml,
+            path = path,
+            title = entry.title,
+            imageResources = imageResources,
+            titleFromMarkup = true
+        )
+        if (chapter.text.isNotBlank() || chapter.isVolume) {
+            chapters += chapter.markImageOrigin(isSectionTitlePage = true)
+        }
+    }
+    return chapters
+}
+
+/**
+ * 按目录锚点把一份 xhtml 切成多段，返回 [锚点之前的正文, 锚点1 起, 锚点2 起, …]。
+ * 找不到位置的锚点会被忽略（切出来的段数与可用锚点数不一致时，调用方退回"整文件一章"）。
+ */
+internal fun splitHtmlAtAnchors(html: String, anchors: List<String>): List<String> {
+    val cuts = anchors.mapNotNull { anchor -> anchorElementStart(html, anchor) }
+        .filter { it in 1 until html.length }
+        .distinct()
+        .sorted()
+    if (cuts.isEmpty()) return listOf(html)
+    val segments = mutableListOf<String>()
+    var start = 0
+    cuts.forEach { cut ->
+        segments += html.substring(start, cut)
+        start = cut
+    }
+    segments += html.substring(start)
+    return segments
+}
+
+/**
+ * 找到包含锚点 `id="X"` 的那个元素的起始位置，用来断开 html。
+ * 从锚点往前找最近的开始标签，取"在锚点之后才闭合"的最外层那个（限制在**一段距离内**，
+ * 避免一直回溯到 body/html），这样每段的标签是平衡的，也不会把上一段的样式包住。
+ */
+private fun anchorElementStart(html: String, anchor: String): Int? {
+    val idIndex = listOf("id=\"$anchor\"", "id='$anchor'")
+        .map { html.indexOf(it) }
+        .filter { it >= 0 }
+        .minOrNull() ?: return null
+    val anchorTagEnd = html.indexOf('>', idIndex).takeIf { it >= 0 } ?: return null
+    var cursor = anchorTagEnd
+    var best: Int? = null
+    while (true) {
+        val tagStart = html.lastIndexOf('<', cursor - 1).takeIf { it >= 0 } ?: break
+        if (anchorTagEnd - tagStart > ANCHOR_LOOKBACK_LIMIT) break
+        val match = HTML_BLOCK_TAG_REGEX.find(html, tagStart)?.takeIf { it.range.first == tagStart }
+        if (match != null) {
+            val name = match.groupValues[1].lowercase()
+            val openEnd = html.indexOf('>', tagStart).takeIf { it >= 0 } ?: break
+            val openTag = html.substring(tagStart, openEnd + 1)
+            val selfClosing = openTag.trimEnd().endsWith("/>")
+            val closeIndex = html.indexOf("</$name", openEnd)
+            if (selfClosing || (closeIndex > anchorTagEnd)) {
+                best = tagStart
+            }
+        }
+        cursor = tagStart
+    }
+    return best
+}
+
+private const val ANCHOR_LOOKBACK_LIMIT = 400
+private val HTML_BLOCK_TAG_REGEX = Regex("(?i)<(div|section|article|p|h[1-6]|li|blockquote|td|tr|table)\\b")
+
 
 private fun fallbackEpubChapterTitle(html: String, isFirstSpineItem: Boolean): String {
     val title = extractHtmlTitle(html)
     return if (title.isBlank() && isFirstSpineItem) "Cover" else title
+}
+
+/**
+ * 把「不是真正章节」的 spine 页并入相邻章节，避免目录里出现 part0012 这种条目。
+ *
+ * 两类这样的页：
+ * 1. **纯图片页**（很多 EPUB 把每一话的扉絵/卷首口絵做成独立 xhtml）：并入**后面第一个**
+ *    正文章节的开头（扉絵该在的位置）；后面没有正文章节时（卷末插图）并入前一章末尾。
+ * 2. **无标题页**（标题只是 calibre 的 `<title>` part0012 这类文件名，且没有目录条目、
+ *    没有 h1-h3 标题）：这类是书名页/题词/正文续篇/作者简介等，并入**前一章**末尾；
+ *    前面还没有正文章节时并入后一章开头。
+ * 3. 既没有正文也没有图片的空页（封面/书名页）直接丢掉。
+ *
+ * 图片与注音 span 的位置是按章节正文的字符偏移记录的，拼接时必须整体平移，
+ * 否则插图会画到错误的行上。
+ *
+ * 守卫：如果这本书的"可信标题"覆盖率过低（例如 nav 只标了头几章、后面全是 calibre
+ * 拆分文件的正文），说明标题信息不可信，此时**不做任何合并**，否则会把后面的正文
+ * 全部并进最后一章，目录直接缩水。
+ */
+internal fun mergeSpinePartsIntoChapters(chapters: List<EbookChapter>): List<EbookChapter> {
+    if (chapters.isEmpty()) return chapters
+    // 守卫要按**文件**算，不能按章节算：按目录锚点切章之后，每个文件都会多出若干
+    // "锚点之前的续段"（它们本来就没有目录条目），按章节算会把覆盖率压到半数以下，
+    // 于是整本书都不敢合并了。同一个 sourcePath 的段落归为一组。
+    val textFileGroups = chapters
+        .filterNot { it.hasNoReaderText() && it.images.isNotEmpty() }
+        .groupBy { it.sourcePath ?: it.title }
+    val titledFileCount = textFileGroups.count { (_, group) -> group.any { it.titleFromMarkup } }
+    if (titledFileCount * 2 < textFileGroups.size) return chapters
+
+    val result = mutableListOf<EbookChapter>()
+    val pending = mutableListOf<EbookChapter>()
+    chapters.forEach { chapter ->
+        when {
+            // 既没有正文也没有图片的空页（封面/书名页等）：丢掉
+            chapter.hasNoReaderText() && chapter.images.isEmpty() && !chapter.isVolume -> Unit
+            // 纯图片页：攒起来，并入后面第一个正文章节的开头
+            chapter.hasNoReaderText() && chapter.images.isNotEmpty() -> pending += chapter
+            // 无标题页（partXXXX）：并入前一章末尾
+            chapter.hasGeneratedTitle() -> {
+                val previous = result.lastOrNull()
+                if (previous == null) {
+                    pending += chapter
+                } else {
+                    result[result.lastIndex] =
+                        mergeChapterParts(listOf(previous) + pending + chapter, previous)
+                    pending.clear()
+                }
+            }
+            pending.isEmpty() -> result += chapter
+            else -> {
+                // 待并入的纯图片页若带目录/标题元素标题，它就是这一章的开头（章节题图页）：
+                // 身份取它，标题才会是目录里的章节名，而不是后面正文文件的 <title>
+                // （很多书的正文文件 <title> 写的是书名，例如「とあるスイーツの店にて」这一章）。
+                val identity = pending.firstOrNull { it.titleFromMarkup } ?: chapter
+                result += mergeChapterParts(pending + chapter, identity)
+                pending.clear()
+            }
+        }
+    }
+    if (pending.isNotEmpty()) {
+        val previous = result.lastOrNull()
+        if (previous == null) {
+            result += pending.toList()
+        } else {
+            result[result.lastIndex] = mergeChapterParts(listOf(previous) + pending, previous)
+        }
+        pending.clear()
+    }
+    return result
+}
+
+/**
+ * 是否是「文件名式标题」的页：标题只是 `<title>` 兜底（calibre 写成的 part0012 这种），
+ * 不是来自目录条目或正文标题元素。这种页不是真正的章节。
+ */
+private fun EbookChapter.hasGeneratedTitle(): Boolean {
+    if (titleFromMarkup) return false
+    val trimmed = title.trim()
+    // 连 <title> 都没有的页：同样不该单独成章
+    if (trimmed.isEmpty()) return true
+    if (GENERATED_CHAPTER_TITLE_PATTERN.matches(trimmed)) return true
+    val fileStem = sourcePath?.substringAfterLast('/')?.substringBeforeLast('.')
+    return fileStem != null && trimmed.equals(fileStem, ignoreCase = true)
+}
+
+/** calibre 等工具拆文件时生成的标题样式：part0004 / text0012 / chapter3 … */
+private val GENERATED_CHAPTER_TITLE_PATTERN = Regex(
+    pattern = "^(part|text|split|index|chapter|ch|sec|section|page|pg|p|c)[-_]?\\d+$",
+    option = RegexOption.IGNORE_CASE
+)
+
+/** 判断章节正文是否只有图片占位符与空白（即这一页只有插图） */
+internal fun EbookChapter.hasNoReaderText(): Boolean {
+    var index = 0
+    while (index < text.length) {
+        val codePoint = text.codePointAt(index)
+        if (codePoint != EBOOK_IMAGE_MARKER.code && !Character.isWhitespace(codePoint)) return false
+        index += Character.charCount(codePoint)
+    }
+    return true
+}
+
+/**
+ * 给这一章的图打上来源标记（见 [EbookImageOrigin]）。
+ * [isSectionTitlePage] = 该 spine 项被目录条目指向（这一页就是某个章节的开头，即题图页）。
+ *
+ * 判定只看"这一页有没有正文"，与图片长什么样无关：
+ * 有正文 → 图都是章节内部的图；没有正文 → 整页是出版方为图排的一页。
+ */
+internal fun EbookChapter.markImageOrigin(isSectionTitlePage: Boolean): EbookChapter {
+    if (images.isEmpty()) return this
+    val origin = when {
+        !hasNoReaderText() -> EbookImageOrigin.INLINE
+        isSectionTitlePage -> EbookImageOrigin.SECTION_TITLE_PAGE
+        else -> EbookImageOrigin.ILLUSTRATION_PAGE
+    }
+    if (images.values.all { it.origin == origin }) return this
+    return copy(images = images.mapValues { (_, image) -> image.copy(origin = origin) })
+}
+
+/**
+ * 按顺序拼接多个片段为一张章节卡片，章节身份（标题/来源路径/卷页标记）取 [identity]。
+ * 图片与注音 span 的偏移量随拼接位置整体平移。
+ */
+private fun mergeChapterParts(parts: List<EbookChapter>, identity: EbookChapter): EbookChapter {
+    val builder = StringBuilder()
+    val images = linkedMapOf<Int, EbookImageRef>()
+    val rubySpans = mutableListOf<EbookRubySpan>()
+    parts.forEach { part ->
+        if (builder.isNotEmpty() && part.text.isNotEmpty()) {
+            builder.append("\n\n")
+        }
+        val offset = builder.length
+        part.images.forEach { (position, image) -> images[position + offset] = image }
+        part.rubySpans.forEach { span -> rubySpans += span.shiftedBy(offset) }
+        builder.append(part.text)
+    }
+    return identity.copy(
+        text = builder.toString(),
+        images = images,
+        rubySpans = rubySpans
+    )
+}
+
+/**
+ * 平移注音 span 的位置。
+ *
+ * 注意：只平移 span 自身的 [EbookRubySpan.start]/[EbookRubySpan.end]，
+ * **segment 的 baseStart/baseEnd 不能动** —— 它们是相对 span.start 的偏移
+ * （见 RubyPlacement.absoluteStart = span.start + segment.baseStart）。
+ * 一起平移会让注音多偏一份，画到后面好几个字上。
+ */
+private fun EbookRubySpan.shiftedBy(offset: Int): EbookRubySpan {
+    if (offset == 0) return this
+    return copy(
+        start = start + offset,
+        end = end + offset
+    )
 }
 
 private fun htmlEntries(entries: Map<String, ByteArray>): List<Pair<String, ByteArray>> {
@@ -656,18 +991,18 @@ private fun parseOpf(xml: String): OpfData {
     return OpfData(title = title, manifest = manifest, spineIds = readableSpine.ifEmpty { spine })
 }
 
-private fun buildEpubTocTitleMap(
+private fun buildEpubTocEntries(
     entries: Map<String, ByteArray>,
     opf: OpfData,
     opfBasePath: String,
     preferredCharsetName: String?
-): Map<String, String> {
+): List<EpubTocEntry> {
     val navItem = opf.manifest.values.firstOrNull { item ->
         item.properties
             ?.split(Regex("\\s+"))
             ?.any { it.equals("nav", ignoreCase = true) } == true
     }
-    val navTitles = navItem
+    val navEntries = navItem
         ?.let { item -> resolveEpubPath(opfBasePath, item.href) }
         ?.let { path ->
             entries[path]
@@ -680,7 +1015,7 @@ private fun buildEpubTocTitleMap(
         mediaType.contains("dtbncx", ignoreCase = true) ||
             item.href.endsWith(".ncx", ignoreCase = true)
     }
-    val ncxTitles = ncxItem
+    val ncxEntries = ncxItem
         ?.let { item -> resolveEpubPath(opfBasePath, item.href) }
         ?.let { path ->
             entries[path]
@@ -688,22 +1023,22 @@ private fun buildEpubTocTitleMap(
                 ?.let { xml -> parseNcxToc(xml, path.substringBeforeLast('/', missingDelimiterValue = "")) }
         }
         .orEmpty()
-    return ncxTitles + navTitles
+    return ncxEntries + navEntries
 }
 
-private fun buildEpubTocTitleMapFromCache(
+private fun buildEpubTocEntriesFromCache(
     root: File,
     opf: OpfData,
     opfBasePath: String,
     preferredCharsetName: String?
-): Map<String, String> {
+): List<EpubTocEntry> {
     fun readText(path: String): String? =
         root.resolveSafeEpubPath(path)
             ?.takeIf { it.isFile }
             ?.readBytes()
             ?.decodeTextFile(preferredCharsetName)
 
-    val navTitles = opf.manifest.values.firstOrNull { item ->
+    val navEntries = opf.manifest.values.firstOrNull { item ->
         item.properties
             ?.split(Regex("\\s+"))
             ?.any { it.equals("nav", ignoreCase = true) } == true
@@ -712,7 +1047,7 @@ private fun buildEpubTocTitleMapFromCache(
         ?.let { path -> readText(path)?.let { html -> parseNavHtmlToc(html, path.substringBeforeLast('/', missingDelimiterValue = "")) } }
         .orEmpty()
 
-    val ncxTitles = opf.manifest.values.firstOrNull { item ->
+    val ncxEntries = opf.manifest.values.firstOrNull { item ->
         val mediaType = item.mediaType.orEmpty()
         mediaType.contains("dtbncx", ignoreCase = true) ||
             item.href.endsWith(".ncx", ignoreCase = true)
@@ -720,13 +1055,13 @@ private fun buildEpubTocTitleMapFromCache(
         ?.let { item -> resolveEpubPath(opfBasePath, item.href) }
         ?.let { path -> readText(path)?.let { xml -> parseNcxToc(xml, path.substringBeforeLast('/', missingDelimiterValue = "")) } }
         .orEmpty()
-    return ncxTitles + navTitles
+    return ncxEntries + navEntries
 }
 
-private fun parseNcxToc(xml: String, opfBasePath: String): Map<String, String> {
+private fun parseNcxToc(xml: String, opfBasePath: String): List<EpubTocEntry> {
     val parser = Xml.newPullParser()
     parser.setInput(ByteArrayInputStream(xml.toByteArray(StandardCharsets.UTF_8)), "UTF-8")
-    val titles = linkedMapOf<String, String>()
+    val entries = mutableListOf<EpubTocEntry>()
     var inNavPoint = false
     var inNavLabel = false
     var inText = false
@@ -755,7 +1090,7 @@ private fun parseNcxToc(xml: String, opfBasePath: String): Map<String, String> {
                 "navPoint" -> {
                     val title = currentTitle.cleanTocTitle()
                     if (title.isNotBlank() && currentSrc.isNotBlank()) {
-                        titles[resolveEpubPath(opfBasePath, currentSrc)] = title
+                        tocEntryOf(opfBasePath, currentSrc, title)?.let { entries += it }
                     }
                     inNavPoint = false
                     inNavLabel = false
@@ -764,10 +1099,10 @@ private fun parseNcxToc(xml: String, opfBasePath: String): Map<String, String> {
             }
         }
     }
-    return titles
+    return entries
 }
 
-private fun parseNavHtmlToc(html: String, opfBasePath: String): Map<String, String> {
+private fun parseNavHtmlToc(html: String, opfBasePath: String): List<EpubTocEntry> {
     val navBlock = Regex("""(?is)<nav\b(?=[^>]*(?:epub:type|type)\s*=\s*['"]?toc\b)[^>]*>(.*?)</nav>""")
         .find(html)
         ?.groupValues
@@ -782,16 +1117,24 @@ private fun parseNavHtmlToc(html: String, opfBasePath: String): Map<String, Stri
             val title = Html.fromHtml(match.groupValues[3], Html.FROM_HTML_MODE_LEGACY)
                 .toString()
                 .cleanTocTitle()
-            if (href.isBlank() || title.isBlank()) null else resolveEpubPath(opfBasePath, href) to title
+            if (href.isBlank() || title.isBlank()) null else tocEntryOf(opfBasePath, href, title)
         }
-        .toMap()
+        .toList()
 }
 
-private fun Map<String, String>.titleForPath(path: String): String? {
-    this[path]?.let { return it }
-    return entries.firstOrNull { (href, _) ->
-        href.substringBefore('#') == path
-    }?.value
+/** 把目录里的 src（可能带 #锚点）解析成"文件路径 + 锚点" */
+private fun tocEntryOf(opfBasePath: String, src: String, title: String): EpubTocEntry? {
+    val resolved = resolveEpubPath(opfBasePath, src)
+    if (resolved.isBlank()) return null
+    val path = resolved.substringBefore('#')
+    val fragment = resolved.substringAfter('#', "")
+        .trim()
+        .let { fragment ->
+            runCatching { java.net.URLDecoder.decode(fragment, "UTF-8") }.getOrDefault(fragment)
+        }
+        .takeIf { it.isNotBlank() }
+        .orEmpty()
+    return EpubTocEntry(title = title, path = path, fragment = fragment)
 }
 
 private fun String.cleanTocTitle(): String {
@@ -923,6 +1266,30 @@ internal fun Int.isReaderChar(): Boolean =
 
 internal const val EBOOK_IMAGE_MARKER: Char = '\uFFFC'
 
+/** 句首可能出现的引号/括号：扩句时"句子开头"要连它们一起算 */
+private const val SENTENCE_LEADING_MARKS = "「『（(［[｛{〈《【〔“‘\"'"
+
+/** 句尾可能出现的标点：扩句时"句子结尾"要连它们一起算 */
+private const val SENTENCE_TRAILING_MARKS = "」』）)］]｝}〉》】〕。、，．：；！？…‥—―～〜”’\"'"
+
+/**
+ * 把 SRT 匹配到的范围扩成"带引号的整句"。
+ *
+ * 匹配是拿「可读字符」去比对的（[isReaderChar] 不含 CJK 标点），所以
+ * 「戦闘用しかないのは、…理由もあります」这种 cue 匹配到的范围是从 `戦` 开始、
+ * 到 `す` 结束，句首的 `「` 与句尾的 `」` 都不在范围内。
+ * 直接拿它当"句子边界"，「句子不跨页」就会把开引号单独留在上一页 —— 所以这里
+ * 按正文把两端扩到引号/括号之外。
+ */
+internal fun expandCueRangeToSentence(text: String, start: Int, end: Int): Pair<Int, Int> {
+    if (text.isEmpty()) return start to end
+    var from = start.coerceIn(0, text.length)
+    var to = end.coerceIn(from, text.length)
+    while (from > 0 && text[from - 1] in SENTENCE_LEADING_MARKS) from -= 1
+    while (to < text.length && text[to] in SENTENCE_TRAILING_MARKS) to += 1
+    return from to to
+}
+
 private data class HtmlImageTag(
     val src: String,
     val altText: String
@@ -1016,8 +1383,11 @@ private fun htmlToReaderContent(
     imageResources: Map<String, EpubImageResource>,
     chapterTitle: String
 ): ReaderHtmlContent {
-    var body = Regex("(?is)<body[^>]*>(.*?)</body>").find(html)?.groupValues?.getOrNull(1) ?: html
+    // 按目录锚点切开的分段可能没有 </body>（正文被切在中间），所以闭合标签是可选的：
+    // 否则会回退成整段 html，把 <head><title> 的文字（很多书里是书名）漏进正文。
+    var body = Regex("(?is)<body[^>]*>(.*?)(?:</body>|$)").find(html)?.groupValues?.getOrNull(1) ?: html
     body = Regex("(?is)<(script|style)[^>]*>.*?</\\1>").replace(body, "")
+    body = Regex("(?is)<head\\b[^>]*>.*?</head>").replace(body, "")
     // 章级标题元素（h1/h2）从正文剥离：章节标题只由阅读器头部
     // （PageView.bodyTitleView）显示一次，避免与章节标题重复显示两次。
     // 参考实现 legado 会剥离全部 h1-h6；这里只剥 h1/h2，保留 h3+ 小节标题。
@@ -1366,9 +1736,16 @@ private fun NormalizedTextMap.lastMappedBefore(rawEnd: Int): Int? {
     return null
 }
 
+private fun extractHtmlHeading(html: String): String? {
+    return Regex("(?is)<h[1-3][^>]*>(.*?)</h[1-3]>").find(html)?.groupValues?.getOrNull(1)
+        ?.replace(Regex("<[^>]+>"), "")
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() }
+}
+
 private fun extractHtmlTitle(html: String): String {
-    val heading = Regex("(?is)<h[1-3][^>]*>(.*?)</h[1-3]>").find(html)?.groupValues?.getOrNull(1)
-    val title = heading ?: Regex("(?is)<title[^>]*>(.*?)</title>").find(html)?.groupValues?.getOrNull(1)
+    val title = extractHtmlHeading(html)
+        ?: Regex("(?is)<title[^>]*>(.*?)</title>").find(html)?.groupValues?.getOrNull(1)
     return title
         ?.replace(Regex("<[^>]+>"), "")
         ?.trim()

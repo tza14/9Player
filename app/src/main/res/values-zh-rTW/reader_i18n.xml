@@ -141,9 +141,9 @@
     <string name="reader_search_result_current">搜尋結果: %1$d/%2$d / 目前章節: %3$s</string>
     <string name="reader_search_result_none">暫無結果</string>
     <string name="reader_search_result_total">搜尋結果: %1$d</string>
-    <string name="reader_search_results_action">◇\n結果</string>
-    <string name="reader_search_main_menu_action">◇\n主選單</string>
-    <string name="reader_search_exit_action">◇\n退出</string>
+    <string name="reader_search_results_action">結果</string>
+    <string name="reader_search_main_menu_action">主選單</string>
+    <string name="reader_search_exit_action">退出</string>
     <string name="reader_catalog_not_ready">目錄還沒載入完成</string>
     <string name="reader_catalog_title_chapters">目錄</string>
     <string name="reader_catalog_title_bookmarks">書籤</string>

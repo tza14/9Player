@@ -309,11 +309,10 @@ class BookReaderActivity : AppCompatActivity() {
         floatingOverlayStartJob?.cancel()
         val overlayEnabled = settings.floatingOverlayEnabled || settings.floatingOverlaySubtitleEnabled
         val playing = BookReaderFloatingBridge.isPlaying()
-        Log.d(
-            FLOATING_OVERLAY_EXIT_LOG_TAG,
+        logDebug(FLOATING_OVERLAY_EXIT_LOG_TAG) {
             "BookReader onStop changing=$isChangingConfigurations overlayEnabled=$overlayEnabled " +
-                "showOnReaderExit=${settings.floatingOverlayShowOnReaderExit} playing=$playing"
-        )
+            "showOnReaderExit=${settings.floatingOverlayShowOnReaderExit} playing=$playing"
+        }
         if (isChangingConfigurations || !overlayEnabled || !playing) return
 
         floatingOverlayStartJob = lifecycleScope.launch {
@@ -326,15 +325,14 @@ class BookReaderActivity : AppCompatActivity() {
             val shouldShowAfterReaderExit =
                 (refreshed.floatingOverlayShowOnReaderExit || !appForeground) && !readerOrPlayerVisible
             val stillPlaying = BookReaderFloatingBridge.isPlaying()
-            Log.d(
-                FLOATING_OVERLAY_EXIT_LOG_TAG,
+            logDebug(FLOATING_OVERLAY_EXIT_LOG_TAG) {
                 "BookReader delayed overlayEnabled=$refreshedOverlayEnabled appForeground=$appForeground " +
-                    "showOnReaderExit=${refreshed.floatingOverlayShowOnReaderExit} " +
-                    "readerOrPlayerVisible=$readerOrPlayerVisible shouldShow=$shouldShowAfterReaderExit " +
-                    "playing=$stillPlaying"
-            )
+                "showOnReaderExit=${refreshed.floatingOverlayShowOnReaderExit} " +
+                "readerOrPlayerVisible=$readerOrPlayerVisible shouldShow=$shouldShowAfterReaderExit " +
+                "playing=$stillPlaying"
+            }
             if (refreshedOverlayEnabled && shouldShowAfterReaderExit && stillPlaying) {
-                Log.d(FLOATING_OVERLAY_EXIT_LOG_TAG, "BookReader starting overlay service")
+                logDebug(FLOATING_OVERLAY_EXIT_LOG_TAG) { "BookReader starting overlay service" }
                 startAudiobookFloatingOverlayService(this@BookReaderActivity)
             }
         }
@@ -843,10 +841,9 @@ private fun BookReaderScreen(
             override fun onResume(owner: LifecycleOwner) {
                 val updated = loadAudiobookSettingsConfig(context)
                 if (updated != audiobookSettings) {
-                    Log.d(
-                        BOOK_UI_MODE_LOG_TAG,
+                    logDebug(BOOK_UI_MODE_LOG_TAG) {
                         "settings refreshed: writingMode=${updated.bookSubtitleWritingMode}, activeTop=${updated.activeCueDisplayAtTop}, globalFont=${updated.subtitleGlobalFontEnabled}, customFont=${updated.subtitleCustomFontUri != null}"
-                    )
+                    }
                 }
                 audiobookSettings = updated
                 readerUiLayoutConfig = loadBookReaderUiLayoutConfig(
@@ -1160,12 +1157,11 @@ private fun BookReaderScreen(
             else -> sessionPositionMs
         }
         val forceSeekOnSameAudio = !keepLiveSession && restoredSnapshotPositionMs != null
-        Log.d(
-            BOOK_READER_BACK_LOG_TAG,
+        logDebug(BOOK_READER_BACK_LOG_TAG) {
             "restoreAudio sameAudio=$sameSharedAudio keepLive=$keepLiveSession " +
-                "forceSeek=$forceSeekOnSameAudio snapshot=$restoredSnapshotPositionMs " +
-                "session=$sessionPositionMs target=$restoredPositionMs"
-        )
+            "forceSeek=$forceSeekOnSameAudio snapshot=$restoredSnapshotPositionMs " +
+            "session=$sessionPositionMs target=$restoredPositionMs"
+        }
         BookReaderPlaybackSession.prepareAudioIfNeeded(
             context = context,
             audioUri = selectedAudio,
@@ -1267,10 +1263,9 @@ private fun BookReaderScreen(
         }
     }
     LaunchedEffect(visibleSelectedRange, activeCueIndex, readerUiWritingMode, lyricsMode) {
-        Log.d(
-            BOOK_LOOKUP_SELECTION_LOG_TAG,
+        logDebug(BOOK_LOOKUP_SELECTION_LOG_TAG) {
             "visibleRange activeCue=$activeCueIndex mode=$readerUiWritingMode lyrics=$lyricsMode range=${formatRangeForLog(visibleSelectedRange)}"
-        )
+        }
     }
     LaunchedEffect(activeCueIndex, visibleSelectedRange, lyricsMode) {
         if (visibleSelectedRange == null) {
@@ -1310,13 +1305,12 @@ private fun BookReaderScreen(
         { source: String ->
             val current = positionMs.coerceAtLeast(0L)
             val total = if (player.duration > 0L) player.duration else durationMs.coerceAtLeast(0L)
-            Log.d(
-                BOOK_READER_BACK_LOG_TAG,
+            logDebug(BOOK_READER_BACK_LOG_TAG) {
                 "backToMain source=$source hoshiLookupVisible=${hoshiLookupPopups.isNotEmpty()} " +
-                    "hoshiLookupLayers=${hoshiLookupPopups.size} playing=${player.isPlaying} " +
-                    "statePositionMs=$current playerPositionMs=${player.currentPosition.coerceAtLeast(0L)} " +
-                    "durationMs=$total"
-            )
+                "hoshiLookupLayers=${hoshiLookupPopups.size} playing=${player.isPlaying} " +
+                "statePositionMs=$current playerPositionMs=${player.currentPosition.coerceAtLeast(0L)} " +
+                "durationMs=$total"
+            }
             onBack(current, total)
         }
     }
@@ -1887,11 +1881,10 @@ private fun BookReaderScreen(
             player.seekTo(target)
             positionMs = target
             val total = if (player.duration > 0L) player.duration else durationMs.coerceAtLeast(0L)
-            Log.d(
-                BOOK_READER_SEEK_LOG_TAG,
+            logDebug(BOOK_READER_SEEK_LOG_TAG) {
                 "seekToManual targetMs=$target beforePlayerMs=$beforeSeekPositionMs " +
-                    "statePositionMs=$positionMs durationMs=$total keyPresent=${playbackPositionKey.isNotBlank()}"
-            )
+                "statePositionMs=$positionMs durationMs=$total keyPresent=${playbackPositionKey.isNotBlank()}"
+            }
             if (playbackPositionKey.isNotBlank() && total > 0L) {
                 scope.launch(Dispatchers.IO) {
                     val normalized = normalizeBookReaderPlaybackPosition(target, total)
@@ -1901,10 +1894,9 @@ private fun BookReaderScreen(
                         positionMs = normalized,
                         durationMs = total
                     )
-                    Log.d(
-                        BOOK_READER_SEEK_LOG_TAG,
+                    logDebug(BOOK_READER_SEEK_LOG_TAG) {
                         "seekToManual saved positionMs=$normalized durationMs=$total"
-                    )
+                    }
                 }
             }
         }
@@ -1915,11 +1907,10 @@ private fun BookReaderScreen(
 
     fun jumpToAdjacentCue(step: Int) {
         val configuredStepMillis = loadAudiobookSettingsConfig(context).seekStepMillis
-        Log.d(
-            BOOK_READER_SEEK_LOG_TAG,
+        logDebug(BOOK_READER_SEEK_LOG_TAG) {
             "jumpAdjacent step=$step mode=$effectiveAdjacentJumpMode configuredStepMs=$configuredStepMillis " +
-                "position=$positionMs cueIndex=$playbackCueIndex"
-        )
+            "position=$positionMs cueIndex=$playbackCueIndex"
+        }
         if (effectiveAdjacentJumpMode == AdjacentJumpMode.DURATION) {
             val delta = if (step < 0) -configuredStepMillis else configuredStepMillis
             seekToManual(positionMs + delta)
@@ -2179,15 +2170,13 @@ private fun BookReaderScreen(
             resumePlaybackAfterLookupDismiss = false
         }
         val rect = selection.rect
-        Log.d(
-            BOOK_LOOKUP_SELECTION_LOG_TAG,
+        logDebug(BOOK_LOOKUP_SELECTION_LOG_TAG) {
             "hoshi popup start cueIndex=$resolvedCueIndex textLen=${selection.text.length} rect=${rect.x.toInt()},${rect.y.toInt()} ${rect.width.toInt()}x${rect.height.toInt()} normalizedOffset=${selection.normalizedOffset} sentenceOffset=${selection.sentenceOffset}"
-        )
+        }
         val preparedDictionaryCount = bookHoshiLookupSession.ensurePrepared().size
-        Log.d(
-            BOOK_LOOKUP_SELECTION_LOG_TAG,
+        logDebug(BOOK_LOOKUP_SELECTION_LOG_TAG) {
             "hoshi popup prepared dictCount=$preparedDictionaryCount query='${selection.text.take(32)}'"
-        )
+        }
         val options = LookupPopupOptions(
             isVertical = false,
             isFullWidth = audiobookSettings.lookupRootFullWidthEnabled,
@@ -2212,16 +2201,14 @@ private fun BookReaderScreen(
         if (popup == null) {
             hoshiLookupPopups.clear()
             clearHoshiLookupSelection()
-            Log.d(
-                BOOK_LOOKUP_SELECTION_LOG_TAG,
+            logDebug(BOOK_LOOKUP_SELECTION_LOG_TAG) {
                 "hoshi popup empty cueIndex=$resolvedCueIndex query='${selection.text.take(32)}' sentenceOffset=${selection.sentenceOffset} elapsedMs=${(SystemClock.elapsedRealtimeNanos() - popupStartNs) / 1_000_000L}"
-            )
+            }
             return
         }
-        Log.d(
-            "HoshiLookupPopup",
+        logDebug("HoshiLookupPopup") {
             "book root popup built query='${selection.text.take(32)}' results=${popup.first.state.results.size} cueIndex=$resolvedCueIndex"
-        )
+        }
         hoshiLookupPopups.clear()
         val popupSelection = popup.first.state.selection
         val popupSelectionStart = popupSelection.sentenceOffset
@@ -2247,10 +2234,9 @@ private fun BookReaderScreen(
         } else {
             null
         }
-        Log.d(
-            BOOK_LOOKUP_SELECTION_LOG_TAG,
+        logDebug(BOOK_LOOKUP_SELECTION_LOG_TAG) {
             "hoshi popup ready cueIndex=$resolvedCueIndex elapsedMs=${(SystemClock.elapsedRealtimeNanos() - popupStartNs) / 1_000_000L}"
-        )
+        }
     }
 
     fun triggerPopupLookup(cue: ReaderSubtitleCue, offset: Int, anchor: ReaderLookupAnchor?) {
@@ -2292,23 +2278,21 @@ private fun BookReaderScreen(
 
     fun exportBookHoshiLookupEntryToAnkiAsync(content: String, onComplete: (Boolean) -> Unit) {
         scope.launch {
-            Log.d(
-                "AnkiExportDebug",
+            logDebug("AnkiExportDebug") {
                 "bookHoshiExport rawContentLen=${content.length} rawPrefix=${content.take(120)}"
-            )
+            }
             val success = runCatching {
                 val payload = runCatching { JSONObject(content) }.getOrNull() ?: run {
-                    Log.d("AnkiExportDebug", "bookHoshiExport payloadParseFailed")
+                    logDebug("AnkiExportDebug") { "bookHoshiExport payloadParseFailed" }
                     return@runCatching false
                 }
                 val expression = payload.optString("expression").trim().ifBlank {
                     payload.optString("matched").trim()
                 }
                 if (expression.isBlank()) {
-                    Log.d(
-                        "AnkiExportDebug",
+                    logDebug("AnkiExportDebug") {
                         "bookHoshiExport expressionBlank payloadKeys=${payload.keys().asSequence().joinToString(",")}"
-                    )
+                    }
                     return@runCatching false
                 }
                 val reading = payload.optString("reading").trim().takeIf { it.isNotBlank() }
@@ -2366,14 +2350,13 @@ private fun BookReaderScreen(
                         )
                     }
                     ?: baseCue
-                Log.d(
-                    "AnkiExportDebug",
+                logDebug("AnkiExportDebug") {
                     "bookHoshiExport payload expression=$expression reading=${reading.orEmpty()} dict=$primaryDictionaryName " +
-                        "glossaryLen=${glossary.length} frequencyLen=${frequency.length} pitchLen=${pitch.length} " +
-                        "popupSelectionLen=${popupSelectionText.orEmpty().length} " +
-                        "sentenceLen=${sentenceSelection.text.length} cueRange=${sentenceSelection.cueRange} " +
-                        "cue=${exportCue.text.take(48)}"
-                )
+                    "glossaryLen=${glossary.length} frequencyLen=${frequency.length} pitchLen=${pitch.length} " +
+                    "popupSelectionLen=${popupSelectionText.orEmpty().length} " +
+                    "sentenceLen=${sentenceSelection.text.length} cueRange=${sentenceSelection.cueRange} " +
+                    "cue=${exportCue.text.take(48)}"
+                }
                 consumeCueRangeSelection()
                 val exportResult = withContext(Dispatchers.IO) {
                     val preparedLookupAudio = prepareLookupAudioForAnkiExport(
@@ -2412,10 +2395,9 @@ private fun BookReaderScreen(
                     }
                 }
                 val message = ankiExportResultMessage(context, exportResult)
-                Log.d(
-                    "AnkiExportDebug",
+                logDebug("AnkiExportDebug") {
                     "bookHoshiExport result=${exportResult.javaClass.simpleName} message=${message.take(220)}"
-                )
+                }
                 if (message.isNotBlank() && exportResult !is AnkiExportResult.DuplicateSkipped) {
                     Toast.makeText(
                         context,
@@ -2473,11 +2455,10 @@ private fun BookReaderScreen(
         if (playbackCueIndex !in cues.indices) null else handleControlOverlayTap()
     }
     val latestWearableAdjacentSeek = rememberUpdatedState<(Int) -> Unit> { step ->
-        Log.d(
-            BOOK_READER_SEEK_LOG_TAG,
+        logDebug(BOOK_READER_SEEK_LOG_TAG) {
             "wearableAdjacent step=$step mode=$effectiveAdjacentJumpMode configuredStepMs=" +
-                "${loadAudiobookSettingsConfig(context).seekStepMillis}"
-        )
+            "${loadAudiobookSettingsConfig(context).seekStepMillis}"
+        }
         jumpToAdjacentCue(step)
     }
     val latestWearableSleepTimer = rememberUpdatedState<(Int) -> Boolean> { minutes ->
@@ -3238,11 +3219,11 @@ private fun BookReaderScreen(
                                         if (readerUiWritingMode == FloatingSubtitleWritingMode.VERTICAL_RTL) {
                                             uiTestLayoutModeVertical = next
                                             saveUiTestLayoutModeVertical(context, next)
-                                            Log.d(BOOK_UI_MODE_LOG_TAG, "vertical layout mode -> $next")
+                                            logDebug(BOOK_UI_MODE_LOG_TAG) { "vertical layout mode -> $next" }
                                         } else {
                                             uiTestLayoutModeHorizontal = next
                                             saveUiTestLayoutModeHorizontal(context, next)
-                                            Log.d(BOOK_UI_MODE_LOG_TAG, "horizontal layout mode -> $next")
+                                            logDebug(BOOK_UI_MODE_LOG_TAG) { "horizontal layout mode -> $next" }
                                         }
                                         topActionsExpanded = false
                                     }
@@ -3273,7 +3254,7 @@ private fun BookReaderScreen(
                                     text = { Text(stringResource(R.string.audiobook_overlay_subtitle_writing_mode_horizontal)) },
                                     onClick = {
                                         readerUiWritingMode = FloatingSubtitleWritingMode.HORIZONTAL
-                                        Log.d(BOOK_UI_MODE_LOG_TAG, "writing mode -> HORIZONTAL")
+                                        logDebug(BOOK_UI_MODE_LOG_TAG) { "writing mode -> HORIZONTAL" }
                                         topActionsExpanded = false
                                     }
                                 )
@@ -3281,7 +3262,7 @@ private fun BookReaderScreen(
                                     text = { Text(stringResource(R.string.audiobook_overlay_subtitle_writing_mode_vertical_rtl)) },
                                     onClick = {
                                         readerUiWritingMode = FloatingSubtitleWritingMode.VERTICAL_RTL
-                                        Log.d(BOOK_UI_MODE_LOG_TAG, "writing mode -> VERTICAL_RTL")
+                                        logDebug(BOOK_UI_MODE_LOG_TAG) { "writing mode -> VERTICAL_RTL" }
                                         topActionsExpanded = false
                                     }
                                 )
@@ -3531,10 +3512,9 @@ private fun BookReaderScreen(
                                                             },
                                                             onTextTap = { offset, anchor ->
                                                                 if (cueRangeSelectionMode) return@VerticalLookupClickableSubtitle
-                                                                Log.d(
-                                                                    BOOK_LOOKUP_SELECTION_LOG_TAG,
+                                                                logDebug(BOOK_LOOKUP_SELECTION_LOG_TAG) {
                                                                     "verticalNativeTap(list) cueIndex=$index offset=$offset range=${formatRangeForLog(visibleSelectedRange)} anchor=${anchor.boundingRectOrNull()?.let { "${it.left.toInt()},${it.top.toInt()},${it.right.toInt()},${it.bottom.toInt()}" } ?: "null"}"
-                                                                )
+                                                                }
                                                                 triggerPopupLookup(cue, offset, anchor)
                                                             }
                                                         )
@@ -3716,10 +3696,9 @@ private fun BookReaderScreen(
                                             },
                                             onTextTap = { offset, anchor ->
                                                 if (cueRangeSelectionMode) return@VerticalLookupClickableSubtitle
-                                                Log.d(
-                                                    BOOK_LOOKUP_SELECTION_LOG_TAG,
+                                                logDebug(BOOK_LOOKUP_SELECTION_LOG_TAG) {
                                                     "verticalNativeTap(active) cueIndex=$activeCueIndex offset=$offset range=${formatRangeForLog(visibleSelectedRange)} anchor=${anchor.boundingRectOrNull()?.let { "${it.left.toInt()},${it.top.toInt()},${it.right.toInt()},${it.bottom.toInt()}" } ?: "null"}"
-                                                )
+                                                }
                                                 triggerPopupLookup(activeCue, offset, anchor)
                                             }
                                         )
@@ -4210,19 +4189,17 @@ private fun BookReaderScreen(
             }
         },
         lookupChildPopup = { selection ->
-            Log.d(
-                "AnkiExportDebug",
+            logDebug("AnkiExportDebug") {
                 "bookHoshi lookupChildPopup request text='${selection.text.take(24)}' sentenceOffset=${selection.sentenceOffset} hasResults=${hoshiLookupPopups.isNotEmpty()} stackSize=${hoshiLookupPopups.size}"
-            )
+            }
             val popup = bookHoshiLookupSession.createPopup(
                 selection = selection,
                 options = bookHoshiPopupOptions,
             )
             if (popup == null) {
-                Log.d(
-                    "AnkiExportDebug",
+                logDebug("AnkiExportDebug") {
                     "bookHoshi lookupChildPopup empty text='${selection.text.take(24)}'"
-                )
+                }
             }
             popup
         },
@@ -4238,10 +4215,9 @@ private fun BookReaderScreen(
             beginHoshiCueRangeSelection(reopenLookupPopupAfterSelection = true)
         },
         onMineEntryAsync = { content, onComplete ->
-            Log.d(
-                "AnkiExportDebug",
+            logDebug("AnkiExportDebug") {
                 "bookHoshi onMineEntry contentSize=${content.length} selectionCueIndex=$hoshiLookupSelectionCueIndex activeCueIndex=$activeCueIndex"
-            )
+            }
             exportBookHoshiLookupEntryToAnkiAsync(content, onComplete)
         },
         onDuplicateCheckAsync = { expression, onComplete -> checkBookAnkiDuplicateAsync(expression, onComplete) },
@@ -4257,10 +4233,9 @@ private fun BookReaderScreen(
             }
         },
         onCloseAll = {
-            Log.d(
-                "AnkiExportDebug",
+            logDebug("AnkiExportDebug") {
                 "bookHoshi onCloseAll stackSize=${hoshiLookupPopups.size} topIndex=${hoshiLookupPopups.lastIndex}"
-            )
+            }
             closeHoshiLookupPopup()
         },
         modifier = Modifier.fillMaxSize(),
@@ -5084,10 +5059,9 @@ private fun ReaderLookupClickableSubtitle(
                             )
                         )
                     )
-                    Log.d(
-                        BOOK_LOOKUP_ANCHOR_LOG_TAG,
+                    logDebug(BOOK_LOOKUP_ANCHOR_LOG_TAG) {
                         "tap offset=$offset tap=${tapOffset.x.roundToInt()},${tapOffset.y.roundToInt()} box=${formatRectForLog(anchor.boundingRectOrNull())} scrollX=${scrollState.value}"
-                    )
+                    }
                     onTextTap(offset, anchor)
                 }
             },
@@ -5416,10 +5390,9 @@ private class VerticalLookupSubtitleView(context: Context) : android.view.View(c
                 val finalOffset = resolved.sourceOffset
                 val rectInWindow = resolved.rectInWindow
                 val tappedChar = content.getOrNull(finalOffset)?.toString().orEmpty()
-                Log.d(
-                    BOOK_LOOKUP_SELECTION_LOG_TAG,
+                logDebug(BOOK_LOOKUP_SELECTION_LOG_TAG) {
                     "verticalViewTap x=${event.x.roundToInt()} y=${event.y.roundToInt()} row=${resolved.row} col=${resolved.column} logical=${resolved.logical} displayOffset=$finalOffset char='$tappedChar' rect=${rectInWindow.left.roundToInt()},${rectInWindow.top.roundToInt()},${rectInWindow.right.roundToInt()},${rectInWindow.bottom.roundToInt()}"
-                )
+                }
                 if (BOOK_VERTICAL_TAP_DEBUG_OVERLAY) {
                     debugLastTap = resolved
                     invalidate()
@@ -5708,10 +5681,9 @@ private class VerticalLookupSubtitleView(context: Context) : android.view.View(c
         val signature = "${width}x$height|${paint.textSize.roundToInt()}|${paint.typeface?.hashCode() ?: 0}|$rowsPerColumn|$dynamicRows|$dynamicColumns|${content.length}"
         if (signature == lastLayoutMetricsSignature) return
         lastLayoutMetricsSignature = signature
-        Log.d(
-            BOOK_LOOKUP_SELECTION_LOG_TAG,
+        logDebug(BOOK_LOOKUP_SELECTION_LOG_TAG) {
             "verticalLayoutMetrics view=${width}x$height textSize=${paint.textSize.roundToInt()} hintRows=$rowsPerColumn dynamicRows=$dynamicRows columns=$dynamicColumns contentLen=${content.length}"
-        )
+        }
     }
 
     private fun logSelectionDebugIfNeeded(
@@ -5725,10 +5697,9 @@ private class VerticalLookupSubtitleView(context: Context) : android.view.View(c
         val preview = content
             .replace("\n", "↩")
             .let { if (it.length > 120) it.take(120) + "…" else it }
-        Log.d(
-            BOOK_LOOKUP_SELECTION_LOG_TAG,
+        logDebug(BOOK_LOOKUP_SELECTION_LOG_TAG) {
             "verticalSelectionDebug range=${range.first}..${range.last} rows=${model.maxRows} cols=${model.columnCount} view=${width}x$height cell=${model.cellWidth.roundToInt()}x${model.cellHeight.roundToInt()} mapperLen=${model.cells.size} contentLen=${content.length} preview='$preview' cells=${selectedCells.joinToString(" | ")}"
-        )
+        }
     }
 }
 

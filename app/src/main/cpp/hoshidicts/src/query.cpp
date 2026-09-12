@@ -365,7 +365,6 @@ void DictionaryQuery::query_pitch(std::vector<TermResult>& terms) const {
       auto count = read_val<uint32_t>(index_addr);
 
       std::vector<int> pitch_positions;
-      std::vector<std::string> transcriptions;
       for (uint32_t i = 0; i < count; i++) {
         auto offset = read_val<uint64_t>(index_addr);
         const uint8_t* blob_addr = data->blobs.data + offset;
@@ -394,24 +393,12 @@ void DictionaryQuery::query_pitch(std::vector<TermResult>& terms) const {
             }
             pitch_positions.insert(pitch_positions.end(), parsed.pitches.begin(), parsed.pitches.end());
           }
-        } else if (mode == "ipa") {
-          auto transcriptions_data_size = read_val<uint32_t>(blob_addr);
-          std::string_view transcriptions_data = read_str(blob_addr, transcriptions_data_size);
-          if (yomitan_parser::parse_ipa(transcriptions_data, parsed)) {
-            if (!parsed.reading.empty() && parsed.reading != term.reading) {
-              continue;
-            }
-            for (std::string_view transcription : parsed.transcriptions) {
-              transcriptions.emplace_back(transcription);
-            }
-          }
         }
       }
-      if (!pitch_positions.empty() || !transcriptions.empty()) {
+      if (!pitch_positions.empty()) {
         term.pitches.emplace_back(PitchEntry{
             .dict_name = name,
             .pitch_positions = std::move(pitch_positions),
-            .transcriptions = std::move(transcriptions),
         });
       }
     }

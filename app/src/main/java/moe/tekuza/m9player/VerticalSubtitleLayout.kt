@@ -82,7 +82,7 @@ internal object VerticalSubtitleLayoutEngine {
         }
 
         fun rowSpanFor(tokenText: String): Int {
-            if (!VerticalTextGlyphEngine.isSidewaysAsciiToken(tokenText) ||
+            if (!isSidewaysAsciiText(tokenText) ||
                 VerticalTextGlyphEngine.isTateChuYokoToken(tokenText)
             ) {
                 return 1
@@ -148,7 +148,7 @@ internal object VerticalSubtitleLayoutEngine {
                 index += 1
                 continue
             }
-            if (VerticalTextGlyphEngine.isAsciiRunSpace(ch)) {
+            if (isAsciiRunSpaceChar(ch)) {
                 index += 1
                 continue
             }
@@ -323,7 +323,7 @@ internal object VerticalSubtitleLayoutEngine {
                 VerticalTextGlyphEngine.isTateChuYokoToken(cell.char) -> {
                     VerticalTextGlyphEngine.drawTateChuYoko(canvas, textPaint, cell.char, rect)
                 }
-                VerticalTextGlyphEngine.isSidewaysAsciiToken(cell.char) -> {
+                isSidewaysAsciiText(cell.char) -> {
                     VerticalTextGlyphEngine.drawLatinRun(canvas, textPaint, cell.char, rect)
                 }
                 else -> VerticalTextGlyphEngine.draw(canvas, textPaint, cell.char, rect)

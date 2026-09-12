@@ -203,12 +203,12 @@ class WearableBridgeService : Service() {
                     )
                 }
                 "SEEK_PREVIOUS" -> {
-                    Log.d(TAG, "received wearable seek step=-1")
+                    logDebug(TAG) { "received wearable seek step=-1" }
                     BookReaderFloatingBridge.seekAdjacent(applicationContext, -1)
                     send(nodeId, currentStateResponse(request, getString(R.string.wearable_status_seek_previous)))
                 }
                 "SEEK_NEXT" -> {
-                    Log.d(TAG, "received wearable seek step=1")
+                    logDebug(TAG) { "received wearable seek step=1" }
                     BookReaderFloatingBridge.seekAdjacent(applicationContext, 1)
                     send(nodeId, currentStateResponse(request, getString(R.string.wearable_status_seek_next)))
                 }

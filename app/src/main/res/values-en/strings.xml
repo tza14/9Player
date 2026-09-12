@@ -81,6 +81,11 @@
     <string name="settings_export_diagnostics_subtitle">Export version, device info, recent logs, and a settings summary</string>
     <string name="settings_export_diagnostics_subject">9Player diagnostics</string>
     <string name="settings_export_diagnostics_failed">Failed to export diagnostics.</string>
+    <string name="settings_export_diagnostics_download">Download</string>
+    <string name="settings_export_diagnostics_download_subtitle">Save to the system Downloads folder</string>
+    <string name="settings_export_diagnostics_share">Share</string>
+    <string name="settings_export_diagnostics_share_subtitle">Send the diagnostics file to another app</string>
+    <string name="settings_export_diagnostics_saved">Saved to Downloads: %1$s</string>
     <string name="settings_version_title">Version</string>
     <string name="settings_version_toast">Current version: %1$s</string>
     <string name="settings_open_link_failed">Could not open the link.</string>
@@ -124,6 +129,9 @@
     <string name="home_display_list">List</string>
     <string name="home_cover_aspect_book">Cover ratio: ~A4</string>
     <string name="home_cover_aspect_square">Cover ratio: square</string>
+    <string name="home_sort_recent">Recent</string>
+    <string name="home_sort_title">Title</string>
+    <string name="home_sort_manual">Manual</string>
     <string name="home_cover_adjust_title">Adjust cover</string>
     <string name="home_cover_adjust_reset">Reset</string>
     <string name="home_cover_adjust_scale">Scale</string>

@@ -2,7 +2,6 @@ package moe.tekuza.m9player
 
 import android.content.Context
 import android.os.Bundle
-import android.util.Log
 import androidx.appcompat.app.AppCompatActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -200,10 +199,9 @@ private fun AnkiSettingsScreen(onBack: () -> Unit) {
         if (currentModelName.isNotBlank() && ankiModelFields.isNotEmpty()) {
             ankiModelTemplateSnapshots[currentModelName] = ankiFieldTemplates.toMap()
         }
-        Log.d(
-            ANKI_CONFIG_LOG_TAG,
+        logDebug(ANKI_CONFIG_LOG_TAG) {
             "Settings persist request deck='$ankiDeckName' model='$ankiModelName' tagsLen=${ankiTagsInput.length} fieldCount=${ankiFieldTemplates.size} snapshotCount=${ankiModelTemplateSnapshots.size}"
-        )
+        }
         savePersistedAnkiConfig(
             context = context,
             config = buildPersistedAnkiConfig(
@@ -246,10 +244,9 @@ private fun AnkiSettingsScreen(onBack: () -> Unit) {
         ankiModelName = nextModelName
         val model = ankiModels.firstOrNull { it.name == nextModelName }
         val restoredTemplates = ankiModelTemplateSnapshots[nextModelName].orEmpty()
-        Log.d(
-            ANKI_CONFIG_LOG_TAG,
+        logDebug(ANKI_CONFIG_LOG_TAG) {
             "Settings select model='$nextModelName' previous='$previousModelName' found=${model != null} fieldCount=${model?.fields?.size ?: 0} restoredTemplateCount=${restoredTemplates.size}"
-        )
+        }
         syncTemplatesWithModelFields(
             fields = model?.fields ?: emptyList(),
             modelTemplates = restoredTemplates
@@ -291,28 +288,25 @@ private fun AnkiSettingsScreen(onBack: () -> Unit) {
                         ),
                         modelName = resolvedModelName
                     )
-                    Log.d(
-                        ANKI_CONFIG_LOG_TAG,
+                    logDebug(ANKI_CONFIG_LOG_TAG) {
                         "Settings refresh success currentDeck='$ankiDeckName' currentModel='$ankiModelName' resolvedDeck='${resolvedCatalog.selection.deckName}' resolvedModel='$resolvedModelName' modelInCatalog=$modelInCatalog modelCount=${resolvedCatalog.models.size}"
-                    )
+                    }
                     ankiDecks = resolvedCatalog.decks
                     ankiModels = resolvedCatalog.models
                     ankiDeckName = resolvedCatalog.selection.deckName
                     if (modelInCatalog) {
                         selectAnkiModel(resolvedModelName)
                     } else {
-                        Log.d(
-                            ANKI_CONFIG_LOG_TAG,
+                        logDebug(ANKI_CONFIG_LOG_TAG) {
                             "Settings refresh kept existing model='$ankiModelName' because it is not in catalog; snapshots and templates were not cleared"
-                        )
+                        }
                     }
                 }
                 is AnkiCatalogLoadResult.Failure -> {
                     ankiError = result.message
-                    Log.d(
-                        ANKI_CONFIG_LOG_TAG,
+                    logDebug(ANKI_CONFIG_LOG_TAG) {
                         "Settings refresh failed message='${result.message}'"
-                    )
+                    }
                 }
             }
         }

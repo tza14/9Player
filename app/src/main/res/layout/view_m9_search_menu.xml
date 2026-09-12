@@ -88,16 +88,22 @@
             android:gravity="center"
             android:orientation="horizontal">
 
+            <!-- 与 legado 的搜寻菜单一致：图标在上、文字在下（drawableTop + drawablePadding） -->
             <TextView
                 android:id="@+id/search_results"
                 android:layout_width="0dp"
                 android:layout_height="match_parent"
                 android:layout_weight="1"
                 android:background="@drawable/reader_menu_touch"
+                android:drawablePadding="3dp"
+                android:drawableTint="#2C241B"
+                android:includeFontPadding="false"
+                android:drawableTop="@drawable/reader_ic_toc"
                 android:gravity="center"
+                android:paddingTop="6dp"
                 android:text="@string/reader_search_results_action"
                 android:textColor="#2C241B"
-                android:textSize="12sp" />
+                android:textSize="11sp" />
 
             <TextView
                 android:id="@+id/search_main_menu"
@@ -105,10 +111,15 @@
                 android:layout_height="match_parent"
                 android:layout_weight="1"
                 android:background="@drawable/reader_menu_touch"
+                android:drawablePadding="3dp"
+                android:drawableTint="#2C241B"
+                android:includeFontPadding="false"
+                android:drawableTop="@drawable/reader_ic_menu"
                 android:gravity="center"
+                android:paddingTop="6dp"
                 android:text="@string/reader_search_main_menu_action"
                 android:textColor="#2C241B"
-                android:textSize="12sp" />
+                android:textSize="11sp" />
 
             <TextView
                 android:id="@+id/search_exit"
@@ -116,10 +127,15 @@
                 android:layout_height="match_parent"
                 android:layout_weight="1"
                 android:background="@drawable/reader_menu_touch"
+                android:drawablePadding="3dp"
+                android:drawableTint="#2C241B"
+                android:includeFontPadding="false"
+                android:drawableTop="@drawable/reader_ic_close"
                 android:gravity="center"
+                android:paddingTop="6dp"
                 android:text="@string/reader_search_exit_action"
                 android:textColor="#2C241B"
-                android:textSize="12sp" />
+                android:textSize="11sp" />
         </LinearLayout>
     </LinearLayout>
 </FrameLayout>

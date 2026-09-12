@@ -1,7 +1,6 @@
 package moe.tekuza.m9player
 
 import android.content.Context
-import android.util.Log
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -13,7 +12,13 @@ private const val LEGADO_READER_MATCH_VERSION = 1
 internal data class LegadoReaderMatchSnapshot(
     val matches: List<EbookCueMatch>,
     val unmatched: Int,
-    val totalCues: Int
+    val totalCues: Int,
+    /**
+     * 快照对应的书籍结构签名（章节数 + 总字数）。
+     * matches 里的 chapterIndex 是"第几章"，章节结构一变（例如把独立图片页并进相邻章节后）
+     * 旧快照就会指向别的章节，必须靠它判定失效并重新匹配。
+     */
+    val documentSignature: String = ""
 )
 
 internal fun loadLegadoReaderMatchSnapshotOrNull(
@@ -21,35 +26,33 @@ internal fun loadLegadoReaderMatchSnapshotOrNull(
     storeKey: String
 ): LegadoReaderMatchSnapshot? {
     if (storeKey.isBlank()) {
-        Log.d(LEGADO_READER_MATCH_LOG_TAG, "load skipped blank storeKey")
+        logDebug(LEGADO_READER_MATCH_LOG_TAG) { "load skipped blank storeKey" }
         return null
     }
     val raw = context.getSharedPreferences(LEGADO_READER_MATCH_PREFS, Context.MODE_PRIVATE)
         .getString(LEGADO_READER_MATCH_KEY, null)
         ?: run {
-            Log.d(LEGADO_READER_MATCH_LOG_TAG, "load miss no payload key=${storeKey.take(48)}")
+            logDebug(LEGADO_READER_MATCH_LOG_TAG) { "load miss no payload key=${storeKey.take(48)}" }
             return null
         }
     val root = runCatching { JSONObject(raw) }.getOrNull() ?: run {
-        Log.d(LEGADO_READER_MATCH_LOG_TAG, "load failed invalid json key=${storeKey.take(48)}")
+        logDebug(LEGADO_READER_MATCH_LOG_TAG) { "load failed invalid json key=${storeKey.take(48)}" }
         return null
     }
     if (root.optInt("version") != LEGADO_READER_MATCH_VERSION) {
-        Log.d(
-            LEGADO_READER_MATCH_LOG_TAG,
+        logDebug(LEGADO_READER_MATCH_LOG_TAG) {
             "load skipped version mismatch stored=${root.optInt("version")} expected=$LEGADO_READER_MATCH_VERSION key=${storeKey.take(48)}"
-        )
+        }
         return null
     }
     val snapshots = root.optJSONObject("snapshots") ?: run {
-        Log.d(
-            LEGADO_READER_MATCH_LOG_TAG,
+        logDebug(LEGADO_READER_MATCH_LOG_TAG) {
             "load skipped snapshots missing key=${storeKey.take(48)}"
-        )
+        }
         return null
     }
     val payload = snapshots.optJSONObject(storeKey) ?: run {
-        Log.d(LEGADO_READER_MATCH_LOG_TAG, "load miss snapshot entry key=${storeKey.take(48)}")
+        logDebug(LEGADO_READER_MATCH_LOG_TAG) { "load miss snapshot entry key=${storeKey.take(48)}" }
         return null
     }
     val matchesPayload = payload.optJSONArray("matches") ?: JSONArray()
@@ -73,22 +76,23 @@ internal fun loadLegadoReaderMatchSnapshotOrNull(
     }
     val totalCues = payload.optInt("totalCues", 0).coerceAtLeast(0)
     val unmatched = payload.optInt("unmatched", 0).coerceAtLeast(0)
+    val documentSignature = payload.optString("documentSignature", "")
     if (matches.isEmpty() || totalCues <= 0) {
-        Log.d(
-            LEGADO_READER_MATCH_LOG_TAG,
+        logDebug(LEGADO_READER_MATCH_LOG_TAG) {
             "load skipped empty snapshot matches=${matches.size} totalCues=$totalCues key=${storeKey.take(48)}"
-        )
+        }
         return null
     }
     val snapshot = LegadoReaderMatchSnapshot(
         matches = matches,
         unmatched = unmatched,
-        totalCues = totalCues
+        totalCues = totalCues,
+        documentSignature = documentSignature
     )
-    Log.d(
-        LEGADO_READER_MATCH_LOG_TAG,
-        "load hit matches=${snapshot.matches.size} totalCues=${snapshot.totalCues} unmatched=${snapshot.unmatched} key=${storeKey.take(48)}"
-    )
+    logDebug(LEGADO_READER_MATCH_LOG_TAG) {
+        "load hit matches=${snapshot.matches.size} totalCues=${snapshot.totalCues} unmatched=${snapshot.unmatched} " +
+        "signature=${snapshot.documentSignature} key=${storeKey.take(48)}"
+    }
     return snapshot
 }
 
@@ -98,7 +102,7 @@ internal fun saveLegadoReaderMatchSnapshot(
     snapshot: LegadoReaderMatchSnapshot
 ) {
     if (storeKey.isBlank()) {
-        Log.d(LEGADO_READER_MATCH_LOG_TAG, "save skipped blank storeKey")
+        logDebug(LEGADO_READER_MATCH_LOG_TAG) { "save skipped blank storeKey" }
         return
     }
     val prefs = context.getSharedPreferences(LEGADO_READER_MATCH_PREFS, Context.MODE_PRIVATE)
@@ -112,6 +116,7 @@ internal fun saveLegadoReaderMatchSnapshot(
         JSONObject().apply {
             put("unmatched", snapshot.unmatched.coerceAtLeast(0))
             put("totalCues", snapshot.totalCues.coerceAtLeast(0))
+            put("documentSignature", snapshot.documentSignature)
             put(
                 "matches",
                 JSONArray().apply {
@@ -133,8 +138,7 @@ internal fun saveLegadoReaderMatchSnapshot(
         .edit()
         .putString(LEGADO_READER_MATCH_KEY, root.toString())
         .apply()
-    Log.d(
-        LEGADO_READER_MATCH_LOG_TAG,
+    logDebug(LEGADO_READER_MATCH_LOG_TAG) {
         "save matches=${snapshot.matches.size} totalCues=${snapshot.totalCues} unmatched=${snapshot.unmatched} key=${storeKey.take(48)}"
-    )
+    }
 }

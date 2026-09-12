@@ -13,6 +13,46 @@ internal data class VerticalTextToken(
     val text: String
 )
 
+/** 語間の空白（ASCII の空白と NBSP）。 */
+internal fun isAsciiRunSpaceChar(ch: Char): Boolean = ch == ' ' || ch == '\u00A0'
+
+/** 横倒しで組む欧文のランに含められる文字：英数字・欧文の記号・語間の空白。 */
+internal fun isAsciiTextRunChar(ch: Char): Boolean = ch in '!'..'~' || isAsciiRunSpaceChar(ch)
+
+/**
+ * 横倒し（時計回り90度）で組む欧文の文字列か（JLREQ §3.2.6）。
+ * 句読点などの欧文記号もランに含める（"work," のように切らずに横倒しにするため）。
+ * 和文が混ざるトークンは false。
+ */
+internal fun isSidewaysAsciiText(text: String): Boolean {
+    val trimmed = text.trim()
+    if (trimmed.length <= 1) return false
+    if (trimmed.none { it.isLetterOrDigit() }) return false
+    return trimmed.all(::isAsciiTextRunChar)
+}
+
+/**
+ * [start] から続く欧文ランの終端（末尾の空白は含めない）。
+ * ランとして組めない場合（和文で始まる／英数字を含まない／1 文字だけ／2〜4 桁の数字）は
+ * [start] を返し、呼び出し側の通常処理（縦中横など）に任せる。
+ */
+internal fun asciiTextRunEnd(text: String, start: Int, end: Int): Int {
+    if (start >= end || !isAsciiTextRunChar(text[start])) return start
+    var cursor = start
+    var lastNonSpace = start
+    var hasLetterOrDigit = false
+    while (cursor < end && isAsciiTextRunChar(text[cursor])) {
+        if (text[cursor].isLetterOrDigit()) hasLetterOrDigit = true
+        if (!isAsciiRunSpaceChar(text[cursor])) lastNonSpace = cursor + 1
+        cursor += 1
+    }
+    if (!hasLetterOrDigit || lastNonSpace - start <= 1) return start
+    val run = text.substring(start, lastNonSpace)
+    // 2〜4 桁の数字は縦中横で組む（ここでランにしてしまうと横倒しになってしまう）
+    if (run.length in 2..4 && run.all { it.isDigit() }) return start
+    return lastNonSpace
+}
+
 internal object VerticalTextGlyphEngine {
     private data class RotationStyle(
         val degrees: Float,
@@ -150,17 +190,6 @@ internal object VerticalTextGlyphEngine {
         return ch == '\'' || ch == '-' || ch == '/' || ch == '.' || ch == '_' || ch == '+' || ch == '&'
     }
 
-    fun isAsciiRunSpace(ch: Char): Boolean {
-        return ch == ' ' || ch == '\u00A0'
-    }
-
-    fun isSidewaysAsciiToken(text: String): Boolean {
-        val trimmed = text.trim()
-        if (trimmed.length <= 1) return false
-        return trimmed.any { it.isLetterOrDigit() } &&
-            trimmed.all { isAsciiWordChar(it) || isAsciiJoiner(it) || isAsciiRunSpace(it) }
-    }
-
     fun nextVerticalTextToken(
         text: String,
         start: Int,
@@ -208,7 +237,7 @@ internal object VerticalTextGlyphEngine {
     }
 
     fun isTateChuYokoToken(text: String): Boolean {
-        val compact = text.trim().filterNot(::isAsciiRunSpace)
+        val compact = text.trim().filterNot(::isAsciiRunSpaceChar)
         if (compact.length !in 2..4 || !compact.all { it.isLetterOrDigit() }) return false
         return compact.all { it.isDigit() }
     }

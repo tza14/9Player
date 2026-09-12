@@ -5,6 +5,27 @@ import android.net.Uri
 import org.json.JSONArray
 import org.json.JSONObject
 
+/**
+ * 导出开始的调试日志行：**只记长度，绝不记查询词本身**。
+ *
+ * 参数是 Int（长度），编译器保证调用方传不进词本身——原先靠"源码里不许出现
+ * `term=${entry.term}`"这种字符串断言守，换个拼法就失效；现在由类型来堵。
+ */
+internal fun ankiExportStartLogLine(termLength: Int, dictionaryLength: Int): String {
+    return "sharedExport start termLength=$termLength dictionaryLength=$dictionaryLength"
+}
+
+/** 导出单条卡片的调试日志行：同上，只记长度与条目数，不记词、不记释义正文。 */
+internal fun ankiExportCardLogLine(
+    wordLength: Int,
+    primaryDictionaryLength: Int,
+    glossaryDictionaryCount: Int,
+    glossaryDefinitionCount: Int
+): String {
+    return "sharedExport card wordLength=$wordLength primaryDictionaryLength=$primaryDictionaryLength " +
+        "glossaryDictionaryCount=$glossaryDictionaryCount glossaryDefinitionCount=$glossaryDefinitionCount"
+}
+
 internal fun addLookupDefinitionToAnkiShared(
     context: Context,
     cueText: String,
@@ -23,7 +44,10 @@ internal fun addLookupDefinitionToAnkiShared(
     lookupTermOverride: String? = null
 ): AnkiExportResult {
     logDebug("AnkiExportDebug") {
-        "sharedExport start termLength=${entry.term.length} dictionaryLength=${entry.dictionary.length}"
+        ankiExportStartLogLine(
+            termLength = entry.term.length,
+            dictionaryLength = entry.dictionary.length
+        )
     }
     val persistedConfig = withAnkiStep("load-config") {
         loadPersistedAnkiConfig(context)
@@ -65,8 +89,12 @@ internal fun addLookupDefinitionToAnkiShared(
         requireCueAudioClip = audioUri != null && cueEndMs > cueStartMs
     )
     logDebug("AnkiExportDebug") {
-        "sharedExport card wordLength=${card.word.length} primaryDictionaryLength=${card.dictionaryName?.length ?: 0} " +
-            "glossaryDictionaryCount=${card.glossaryByDictionary.size} glossaryDefinitionCount=${card.glossaryByDictionary.sumOf { it.definitions.size }}"
+        ankiExportCardLogLine(
+            wordLength = card.word.length,
+            primaryDictionaryLength = card.dictionaryName?.length ?: 0,
+            glossaryDictionaryCount = card.glossaryByDictionary.size,
+            glossaryDefinitionCount = card.glossaryByDictionary.sumOf { it.definitions.size }
+        )
     }
 
     return withAnkiStep("export-note") {

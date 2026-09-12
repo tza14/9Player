@@ -8,6 +8,7 @@ import android.graphics.RectF
 import moe.tekuza.m9player.EbookRubyKind
 import moe.tekuza.m9player.EbookRubySpan
 import moe.tekuza.m9player.VerticalTextGlyphEngine
+import moe.tekuza.m9player.isSidewaysAsciiText
 import moe.tekuza.m9player.legado.reader.page.ContentTextView
 import moe.tekuza.m9player.legado.reader.M9LayoutMode
 import kotlin.math.max
@@ -63,7 +64,7 @@ internal data class TextColumn(
                         text = charData,
                         rect = rect
                     )
-                } else if (VerticalTextGlyphEngine.isSidewaysAsciiToken(charData)) {
+                } else if (isSidewaysAsciiText(charData)) {
                     VerticalTextGlyphEngine.drawLatinRun(
                         canvas = canvas,
                         sourcePaint = paint,
@@ -316,32 +317,51 @@ internal data class TextColumn(
     }
 
     private fun rubyOverhangBefore(line: TextLine, rubySize: Float): Float {
-        if (rubySpan?.segments?.isNotEmpty() == true) return rubySize * RubyLayoutEngine.SEGMENT_OVERHANG_EM
         val previous = line.columns
             .filterIsInstance<TextColumn>()
             .lastOrNull { it !== this && it.end <= start }
-            ?: return rubySize * RubyLayoutEngine.EDGE_OVERHANG_EM
-        return allowedRubyOverhang(previous.charData, rubySize)
+            ?: return rubySize * edgeRubyOverhangRatio()
+        return RubyLayoutEngine.rubyOverhang(
+            adjacent = previous.charData,
+            rubySize = rubySize,
+            segmented = isSegmentedRuby(),
+            insideBaseGroup = isInsideRubyBase(previous),
+            adjacentHasRuby = previous.hasRubyAnnotation()
+        )
     }
 
     private fun rubyOverhangAfter(line: TextLine, rubySize: Float): Float {
-        if (rubySpan?.segments?.isNotEmpty() == true) return rubySize * RubyLayoutEngine.SEGMENT_OVERHANG_EM
         val next = line.columns
             .filterIsInstance<TextColumn>()
             .firstOrNull { it !== this && it.start >= end }
-            ?: return rubySize * RubyLayoutEngine.EDGE_OVERHANG_EM
-        return allowedRubyOverhang(next.charData, rubySize)
+            ?: return rubySize * edgeRubyOverhangRatio()
+        return RubyLayoutEngine.rubyOverhang(
+            adjacent = next.charData,
+            rubySize = rubySize,
+            segmented = isSegmentedRuby(),
+            insideBaseGroup = isInsideRubyBase(next),
+            adjacentHasRuby = next.hasRubyAnnotation()
+        )
     }
 
-    private fun allowedRubyOverhang(adjacent: String, rubySize: Float): Float {
-        val first = adjacent.firstOrNull() ?: return 0f
-        return when {
-            isJapaneseIdeograph(first) -> 0f
-            first in RUBY_FULL_OVERHANG_CHARS -> rubySize
-            first in RUBY_PUNCTUATION_OVERHANG_CHARS -> rubySize * 0.5f
-            else -> rubySize * RubyLayoutEngine.EDGE_OVERHANG_EM
-        }
+    private fun isSegmentedRuby(): Boolean = rubySpan?.segments?.isNotEmpty() == true
+
+    /** 欄（行）の端で、掛かり先の文字が存在しないときの掛かり量。 */
+    private fun edgeRubyOverhangRatio(): Float = if (isSegmentedRuby()) {
+        RubyLayoutEngine.SEGMENT_OVERHANG_EM
+    } else {
+        RubyLayoutEngine.EDGE_OVERHANG_EM
     }
+
+    /** 隣の字がこのルビの親文字群の内側か（＝熟語ルビの内部か）。 */
+    private fun isInsideRubyBase(column: TextColumn): Boolean {
+        return rubySourceEnd > rubySourceStart &&
+            column.sourceStart >= rubySourceStart &&
+            column.sourceEnd <= rubySourceEnd
+    }
+
+    /** 隣の字自身にもルビが付いているか。 */
+    private fun TextColumn.hasRubyAnnotation(): Boolean = !rubyText.isNullOrBlank()
 
     private companion object {
         private fun isHorizontalDash(value: String): Boolean {
@@ -352,14 +372,6 @@ internal data class TextColumn(
             return value.length == 1 && value[0] in DASH_CHARS
         }
 
-        private fun isJapaneseIdeograph(char: Char): Boolean =
-            Character.UnicodeBlock.of(char) in setOf(
-                Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS,
-                Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS_EXTENSION_A,
-                Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS_EXTENSION_B,
-                Character.UnicodeBlock.CJK_COMPATIBILITY_IDEOGRAPHS
-            )
-
         private val DASH_CHARS = setOf(
             '\u2014',
             '\u2015',
@@ -368,18 +380,6 @@ internal data class TextColumn(
             '\u2501',
             '\u2E3A',
             '\u2E3B'
-        )
-
-        private val RUBY_FULL_OVERHANG_CHARS = setOf(
-            'ぁ', 'ぃ', 'ぅ', 'ぇ', 'ぉ', 'っ', 'ゃ', 'ゅ', 'ょ', 'ゎ',
-            'ァ', 'ィ', 'ゥ', 'ェ', 'ォ', 'ッ', 'ャ', 'ュ', 'ョ', 'ヮ',
-            'ー'
-        ) + ('ぁ'..'ん') + ('ァ'..'ヶ')
-
-        private val RUBY_PUNCTUATION_OVERHANG_CHARS = setOf(
-            '、', '。', '，', '．', '・', '：', '；', '！', '？',
-            '「', '『', '（', '《', '〈', '［', '〔',
-            '」', '』', '）', '》', '〉', '］', '〕'
         )
     }
 }

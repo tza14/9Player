@@ -43,7 +43,6 @@ struct FrequencyEntry {
 struct PitchEntry {
   std::string dict_name;
   std::vector<int> pitch_positions;
-  std::vector<std::string> transcriptions;
 };
 
 struct TermResult {

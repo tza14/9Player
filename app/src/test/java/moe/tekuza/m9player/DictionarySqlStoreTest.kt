@@ -46,28 +46,4 @@ class DictionarySqlStoreTest {
         }
     }
 
-    @Test
-    fun glossaryHtmlSanitizerRemovesExecutableHtml() {
-        val html = glossaryRawToDefinitionHtmlSql(
-            """<div onclick="mineEntry()">safe<script>bad()</script><a href="javascript:bad()">x</a><iframe srcdoc="<p>x</p>"></iframe></div>"""
-        )
-
-        assertTrue(html.contains("safe"))
-        assertFalse(html.contains("onclick", ignoreCase = true))
-        assertFalse(html.contains("<script", ignoreCase = true))
-        assertFalse(html.contains("javascript:", ignoreCase = true))
-        assertFalse(html.contains("<iframe", ignoreCase = true))
-        assertFalse(html.contains("srcdoc", ignoreCase = true))
-    }
-
-    @Test
-    fun structuredGlossaryRejectsDangerousTagsAndUrls() {
-        val script = glossaryRawToDefinitionHtmlSql("""{"tag":"script","content":"alert(1)"}""")
-        val image = glossaryRawToDefinitionHtmlSql("""{"type":"image","path":"javascript:alert(1)","content":"x"}""")
-
-        assertTrue(script.contains("alert(1)"))
-        assertFalse(script.contains("<script", ignoreCase = true))
-        assertFalse(image, image.contains("<img", ignoreCase = true))
-    }
-
 }

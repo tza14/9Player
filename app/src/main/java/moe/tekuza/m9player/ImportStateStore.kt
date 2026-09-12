@@ -53,6 +53,7 @@ internal data class PersistedImports(
     val selectedBookId: String? = null,
     val homeLibraryView: String = "BOOKSHELF",
     val homeCoverAspect: String = "SQUARE",
+    val homeLibrarySort: String = "RECENT",
     val dictionaries: List<PersistedDictionaryRef>
 )
 
@@ -194,6 +195,7 @@ internal fun loadPersistedImports(context: Context): PersistedImports {
         selectedBookId = obj.optString("selectedBookId").trim().ifBlank { null },
         homeLibraryView = obj.optString("homeLibraryView").trim().ifBlank { "BOOKSHELF" },
         homeCoverAspect = obj.optString("homeCoverAspect").trim().ifBlank { "SQUARE" },
+        homeLibrarySort = obj.optString("homeLibrarySort").trim().ifBlank { "RECENT" },
         dictionaries = dictionaries
     )
 }
@@ -242,6 +244,7 @@ internal fun savePersistedImports(context: Context, state: PersistedImports) {
         put("selectedBookId", state.selectedBookId ?: "")
         put("homeLibraryView", state.homeLibraryView)
         put("homeCoverAspect", state.homeCoverAspect)
+        put("homeLibrarySort", state.homeLibrarySort)
         put(
             "dictionaries",
             JSONArray().apply {

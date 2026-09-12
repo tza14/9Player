@@ -2,6 +2,7 @@ package moe.tekuza.m9player
 
 import android.app.Activity
 import android.content.ContentResolver
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
@@ -16,8 +17,10 @@ import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.os.ParcelFileDescriptor
 import android.provider.DocumentsContract
+import android.provider.MediaStore
 import android.util.Log
 import android.util.LruCache
 import android.widget.ImageView
@@ -30,6 +33,9 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateOffsetAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -44,6 +50,7 @@ import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.awaitLongPressOrCancellation
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Box
@@ -54,6 +61,9 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.WindowInsets
@@ -80,6 +90,7 @@ import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -93,6 +104,8 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableStateListOf
@@ -106,8 +119,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
@@ -115,6 +130,7 @@ import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
@@ -143,6 +159,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Book
 import androidx.compose.material.icons.outlined.Checklist
+import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.material.icons.outlined.ClosedCaption
 import androidx.compose.material.icons.outlined.Crop
 import androidx.compose.material.icons.outlined.Delete
@@ -161,7 +179,9 @@ import com.kyant.taglib.TagLib
 import moe.tekuza.m9player.ui.theme.TsetTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import moe.tekuza.m9player.hoshi.features.dictionary.LookupPopupHtml
@@ -177,8 +197,10 @@ import moe.tekuza.m9player.hoshi.features.reader.ReaderSelectionRect
 import de.manhhao.hoshi.LookupResult
 import org.json.JSONObject
 import java.io.File
+import java.io.IOException
 import java.io.InputStream
 import java.util.Locale
+import kotlin.math.abs
 import kotlin.math.roundToInt
 
 class MainActivity : AppCompatActivity() {
@@ -207,11 +229,10 @@ class MainActivity : AppCompatActivity() {
             (settings.floatingOverlayEnabled || settings.floatingOverlaySubtitleEnabled) &&
                 BookReaderFloatingBridge.currentAudioUri() != null &&
                 BookReaderFloatingBridge.isPlaying()
-        Log.d(
-            FLOATING_OVERLAY_EXIT_LOG_TAG,
+        logDebug(FLOATING_OVERLAY_EXIT_LOG_TAG) {
             "Main onStart keepOverlay=$keepOverlay audio=${BookReaderFloatingBridge.currentAudioUri() != null} " +
-                "playing=${BookReaderFloatingBridge.isPlaying()}"
-        )
+            "playing=${BookReaderFloatingBridge.isPlaying()}"
+        }
         if (!keepOverlay) {
             stopAudiobookFloatingOverlayService(this)
         }
@@ -302,6 +323,15 @@ private enum class MiningSection {
 private enum class HomeLibraryView {
     BOOKSHELF,
     LIST
+}
+
+internal enum class HomeLibrarySort {
+    /** 最近阅读：按最后播放/阅读时间倒序，未读的按书名垫底 */
+    RECENT,
+    /** 书名：按标题字母序 */
+    TITLE,
+    /** 手动：保持书架顺序，长按拖动调整 */
+    MANUAL
 }
 
 internal enum class HomeCoverAspect {
@@ -582,8 +612,23 @@ private data class ReturnedBookProgress(
     val durationMs: Long
 )
 
+// 书架排序菜单项的显示文案（枚举声明顺序即菜单顺序）。
+private fun homeSortLabelRes(sort: HomeLibrarySort): Int = when (sort) {
+    HomeLibrarySort.RECENT -> R.string.home_sort_recent
+    HomeLibrarySort.TITLE -> R.string.home_sort_title
+    HomeLibrarySort.MANUAL -> R.string.home_sort_manual
+}
+
+// 拖拽让位弹簧动画：目标为 0 时自动回到原位（松手落位/取消后平滑归位）。
 @Composable
-@OptIn(ExperimentalFoundationApi::class)
+private fun animateDragDisplacement(target: Offset): Offset = animateOffsetAsState(
+    targetValue = target,
+    animationSpec = spring(stiffness = Spring.StiffnessMediumLow),
+    label = "shelfDragDisplacement"
+).value
+
+@Composable
+@OptIn(ExperimentalFoundationApi::class, ExperimentalLayoutApi::class)
 @androidx.annotation.OptIn(markerClass = [UnstableApi::class])
 private fun ReaderSyncScreen() {
     val context = LocalContext.current
@@ -619,6 +664,7 @@ private fun ReaderSyncScreen() {
     var adjustingBookCoverId by remember { mutableStateOf<String?>(null) }
     var homeLibraryView by remember { mutableStateOf(HomeLibraryView.BOOKSHELF) }
     var homeCoverAspect by remember { mutableStateOf(HomeCoverAspect.BOOK) }
+    var homeLibrarySort by remember { mutableStateOf(HomeLibrarySort.RECENT) }
     var homeCoverFocusEditMode by remember { mutableStateOf(false) }
     var homeDisplayMenuExpanded by remember { mutableStateOf(false) }
     var addBookDialogVisible by remember { mutableStateOf(false) }
@@ -702,6 +748,7 @@ private fun ReaderSyncScreen() {
     var audiobookSettings by remember { mutableStateOf(loadAudiobookSettingsConfig(context)) }
     var versionTapCount by remember { mutableStateOf(0) }
     var showVersionEasterGif by remember { mutableStateOf(false) }
+    var diagnosticsExportSheetVisible by remember { mutableStateOf(false) }
 
     var positionMs by remember { mutableStateOf(0L) }
     var durationMs by remember { mutableStateOf(0L) }
@@ -1036,12 +1083,11 @@ private fun ReaderSyncScreen() {
             )
             val restorePositionMs = restoredSnapshot?.positionMs?.coerceAtLeast(0L) ?: 0L
             val alreadyPreparedForAudio = BookReaderPlaybackSession.currentAudioUri() == selectedAudio.toString()
-            Log.d(
-                MAIN_READER_RESTORE_LOG_TAG,
+            logDebug(MAIN_READER_RESTORE_LOG_TAG) {
                 "prewarm positionMs=$restorePositionMs " +
-                    "durationMs=${restoredSnapshot?.durationMs ?: 0L} updatedAt=${restoredSnapshot?.updatedAtMs ?: 0L} " +
-                    "sameAudio=$alreadyPreparedForAudio"
-            )
+                "durationMs=${restoredSnapshot?.durationMs ?: 0L} updatedAt=${restoredSnapshot?.updatedAtMs ?: 0L} " +
+                "sameAudio=$alreadyPreparedForAudio"
+            }
             BookReaderPlaybackSession.prepareAudioIfNeeded(
                 context = context,
                 audioUri = selectedAudio,
@@ -1057,11 +1103,10 @@ private fun ReaderSyncScreen() {
             )
         }
         val restorePositionMs = restoredSnapshot?.positionMs?.coerceAtLeast(0L) ?: 0L
-        Log.d(
-            MAIN_READER_RESTORE_LOG_TAG,
+        logDebug(MAIN_READER_RESTORE_LOG_TAG) {
             "mainPlayerPrepare positionMs=$restorePositionMs " +
-                "durationMs=${restoredSnapshot?.durationMs ?: 0L} updatedAt=${restoredSnapshot?.updatedAtMs ?: 0L}"
-        )
+            "durationMs=${restoredSnapshot?.durationMs ?: 0L} updatedAt=${restoredSnapshot?.updatedAtMs ?: 0L}"
+        }
         player.setMediaItem(MediaItem.fromUri(selectedAudio))
         player.prepare()
         player.pause()
@@ -1177,6 +1222,7 @@ private fun ReaderSyncScreen() {
                 selectedBookId = selectedBookId,
                 homeLibraryView = homeLibraryView.name,
                 homeCoverAspect = homeCoverAspect.name,
+                homeLibrarySort = homeLibrarySort.name,
                 dictionaries = dictionaryRefsOverride
             )
         )
@@ -1184,7 +1230,8 @@ private fun ReaderSyncScreen() {
 
     fun persistHomeDisplaySettings(
         nextView: HomeLibraryView = homeLibraryView,
-        nextAspect: HomeCoverAspect = homeCoverAspect
+        nextAspect: HomeCoverAspect = homeCoverAspect,
+        nextSort: HomeLibrarySort = homeLibrarySort
     ) {
         scope.launch(Dispatchers.IO) {
             val previous = loadPersistedImports(context)
@@ -1192,7 +1239,8 @@ private fun ReaderSyncScreen() {
                 context = context,
                 state = previous.copy(
                     homeLibraryView = nextView.name,
-                    homeCoverAspect = nextAspect.name
+                    homeCoverAspect = nextAspect.name,
+                    homeLibrarySort = nextSort.name
                 )
             )
         }
@@ -1236,10 +1284,9 @@ private fun ReaderSyncScreen() {
     }
 
     fun persistAnkiConfig() {
-        Log.d(
-            ANKI_CONFIG_LOG_TAG,
+        logDebug(ANKI_CONFIG_LOG_TAG) {
             "MainActivity persist request deck='$ankiDeckName' model='$ankiModelName' tagsLen=${ankiTagsInput.length} fieldCount=${ankiFieldTemplates.size}"
-        )
+        }
         savePersistedAnkiConfig(
             context = context,
             config = buildPersistedAnkiConfig(
@@ -1255,10 +1302,9 @@ private fun ReaderSyncScreen() {
         val modelChanged = ankiModelName != modelName
         ankiModelName = modelName
         val model = ankiModels.firstOrNull { it.name == modelName }
-        Log.d(
-            ANKI_CONFIG_LOG_TAG,
+        logDebug(ANKI_CONFIG_LOG_TAG) {
             "MainActivity select model='$modelName' modelChanged=$modelChanged found=${model != null} fieldCount=${model?.fields?.size ?: 0}"
-        )
+        }
         syncAnkiFieldTemplates(
             target = ankiFieldTemplates,
             fields = model?.fields ?: emptyList(),
@@ -1269,7 +1315,7 @@ private fun ReaderSyncScreen() {
 
     fun refreshAnkiCatalog() {
         ankiAvailabilityUiMessage(context, requirePermission = true)?.let { availabilityMessage ->
-            Log.d(ANKI_CONFIG_LOG_TAG, "MainActivity refresh unavailable message='$availabilityMessage'")
+            logDebug(ANKI_CONFIG_LOG_TAG) { "MainActivity refresh unavailable message='$availabilityMessage'" }
             ankiModels = emptyList()
             return
         }
@@ -1294,26 +1340,23 @@ private fun ReaderSyncScreen() {
                         ),
                         modelName = resolvedModelName
                     )
-                    Log.d(
-                        ANKI_CONFIG_LOG_TAG,
+                    logDebug(ANKI_CONFIG_LOG_TAG) {
                         "MainActivity refresh success currentDeck='$ankiDeckName' currentModel='$ankiModelName' resolvedDeck='${resolvedCatalog.selection.deckName}' resolvedModel='$resolvedModelName' modelInCatalog=$modelInCatalog modelCount=${resolvedCatalog.models.size}"
-                    )
+                    }
                     ankiModels = resolvedCatalog.models
                     ankiDeckName = resolvedCatalog.selection.deckName
                     if (modelInCatalog) {
                         selectAnkiModel(resolvedModelName)
                     } else {
-                        Log.d(
-                            ANKI_CONFIG_LOG_TAG,
+                        logDebug(ANKI_CONFIG_LOG_TAG) {
                             "MainActivity refresh kept existing model='$ankiModelName' because it is not in catalog; templates were not cleared"
-                        )
+                        }
                     }
                 }
                 is AnkiCatalogLoadResult.Failure -> {
-                    Log.d(
-                        ANKI_CONFIG_LOG_TAG,
+                    logDebug(ANKI_CONFIG_LOG_TAG) {
                         "MainActivity refresh failed message='${result.message}'"
-                    )
+                    }
                 }
             }
         }
@@ -1496,7 +1539,13 @@ private fun ReaderSyncScreen() {
     }
 
     fun upsertReaderBook(book: ReaderBook, activate: Boolean) {
-        readerBooks = listOf(book) + readerBooks.filterNot { it.id == book.id }
+        // 保持列表存储顺序稳定（手动排序的依据）：已存在则原位更新，新书追加到末尾。
+        // 「最近阅读」排序由播放快照时间驱动，不再依赖把书提前。
+        readerBooks = if (readerBooks.any { it.id == book.id }) {
+            readerBooks.map { if (it.id == book.id) book else it }
+        } else {
+            readerBooks + book
+        }
         if (activate) {
             activateReaderBook(book, persist = true)
         }
@@ -1542,11 +1591,10 @@ private fun ReaderSyncScreen() {
     fun deleteSelectedBooks(removeIds: Set<String>, deleteSourceFiles: Boolean) {
         if (removeIds.isEmpty()) return
         val deletingBooks = readerBooks.filter { it.id in removeIds }
-        Log.d(
-            BOOK_DELETE_LOG_TAG,
+        logDebug(BOOK_DELETE_LOG_TAG) {
             "deleteSelected count=${removeIds.size} matched=${deletingBooks.size} " +
-                "deleteSourceFiles=$deleteSourceFiles ids=${removeIds.joinToString(separator = ",") { it.take(12) }}"
-        )
+            "deleteSourceFiles=$deleteSourceFiles ids=${removeIds.joinToString(separator = ",") { it.take(12) }}"
+        }
         if (!deleteSourceFiles) {
             val archiveRootUri = addBookFolderUri
             removeBooksFromShelf(removeIds)
@@ -1564,11 +1612,10 @@ private fun ReaderSyncScreen() {
                 }
                 val archiveCopyFailures = archiveResults.sumOf { it.fileCopyFailures }
                 val archiveDeleteFailures = archiveResults.sumOf { it.fileDeleteFailures }
-                Log.d(
-                    BOOK_DELETE_LOG_TAG,
+                logDebug(BOOK_DELETE_LOG_TAG) {
                     "deleteSelected archiveResult archiveCopyFailures=$archiveCopyFailures " +
-                        "archiveDeleteFailures=$archiveDeleteFailures"
-                )
+                    "archiveDeleteFailures=$archiveDeleteFailures"
+                }
                 if (archiveCopyFailures == 0 && archiveDeleteFailures == 0) {
                     exportStatus = null
                     Toast.makeText(
@@ -1602,11 +1649,10 @@ private fun ReaderSyncScreen() {
         val folderDeleteFailures = deleteResults.count { it.folderDeleteAttempted && !it.folderDeleteSucceeded }
         val fileDeleteFailures = deleteResults.sumOf { it.fileDeleteFailures }
         val deletedFolders = deleteResults.count { it.folderDeleteSucceeded }
-        Log.d(
-            BOOK_DELETE_LOG_TAG,
+        logDebug(BOOK_DELETE_LOG_TAG) {
             "deleteSelected result folderFailures=$folderDeleteFailures fileFailures=$fileDeleteFailures " +
-                "deletedFolders=$deletedFolders"
-        )
+            "deletedFolders=$deletedFolders"
+        }
         removeBooksFromShelf(removeIds)
         exportStatus = if (folderDeleteFailures == 0 && fileDeleteFailures == 0) {
             if (deletedFolders > 0) {
@@ -1664,14 +1710,13 @@ private fun ReaderSyncScreen() {
         val pickedEbookName = addBookEbookName
         val pickedEbookFormat = addBookEbookFormat
         val deleteSourceFilesForAutoMove = shouldAutoMove
-        Log.d(
-            BOOK_IMPORT_MOVE_LOG_TAG,
+        logDebug(BOOK_IMPORT_MOVE_LOG_TAG) {
             "confirm autoMove=$shouldAutoMove deleteSourceFiles=$deleteSourceFilesForAutoMove " +
-                "ebookOnly=$ebookOnlyImport " +
-                "root=${selectedFolder?.toString()?.take(96)} " +
-                "audio=${pickedAudio?.toString()?.take(96)} srt=${pickedSrt?.toString()?.take(96)} " +
-                "ebook=${pickedEbook?.toString()?.take(96)}"
-        )
+            "ebookOnly=$ebookOnlyImport " +
+            "root=${selectedFolder?.toString()?.take(96)} " +
+            "audio=${pickedAudio?.toString()?.take(96)} srt=${pickedSrt?.toString()?.take(96)} " +
+            "ebook=${pickedEbook?.toString()?.take(96)}"
+        }
         scope.launch {
             srtLoading = true
             srtError = null
@@ -2004,6 +2049,13 @@ private fun ReaderSyncScreen() {
             HomeCoverAspect.SQUARE.name -> HomeCoverAspect.SQUARE
             else -> HomeCoverAspect.BOOK
         }
+        homeLibrarySort = when (persisted.homeLibrarySort.uppercase(Locale.ROOT)) {
+            HomeLibrarySort.RECENT.name -> HomeLibrarySort.RECENT
+            HomeLibrarySort.TITLE.name -> HomeLibrarySort.TITLE
+            HomeLibrarySort.MANUAL.name -> HomeLibrarySort.MANUAL
+            // 空值/未知值（含旧版本没写过这一项的情况）→ 默认"最近"
+            else -> HomeLibrarySort.RECENT
+        }
 
         if (persisted.books.isNotEmpty()) {
             srtLoading = true
@@ -2274,7 +2326,7 @@ private fun ReaderSyncScreen() {
                 dictionaryFirstLayerResults = emptyList()
                 dictionaryFirstLayerClearSelectionSignal += 1
                 clearMainHoshiChildPopups()
-                Log.d("MainHoshiResultPopup", "dictionary first-layer empty query='${query.take(32)}'")
+                logDebug("MainHoshiResultPopup") { "dictionary first-layer empty query='${query.take(32)}'" }
                 return@runCatching
             }
             dictionaryFirstLayerResults = popup.first.state.results
@@ -2289,7 +2341,7 @@ private fun ReaderSyncScreen() {
             mainHoshiLookupAudioUri = audioUri
             mainHoshiLookupTitle = query
             recordStatisticsLookup(context, currentStatisticsBookKey())
-            Log.d("MainHoshiResultPopup", "dictionary first-layer applied query='${query.take(32)}' results=${popup.first.state.results.size}")
+            logDebug("MainHoshiResultPopup") { "dictionary first-layer applied query='${query.take(32)}' results=${popup.first.state.results.size}" }
         }.onFailure { error ->
             dictionaryFirstLayerHtml = ""
             dictionaryFirstLayerResults = emptyList()
@@ -2314,7 +2366,7 @@ private fun ReaderSyncScreen() {
                 collectionFirstLayerResults = emptyList()
                 collectionFirstLayerClearSelectionSignal += 1
                 exportStatus = context.getString(R.string.bookreader_lookup_failed)
-                Log.d("MainHoshiResultPopup", "collection first-layer empty query='${query.take(32)}'")
+                logDebug("MainHoshiResultPopup") { "collection first-layer empty query='${query.take(32)}'" }
                 return@runCatching
             }
             val matchedText = popup.first.state.results.firstOrNull()?.matched ?: query
@@ -2333,7 +2385,7 @@ private fun ReaderSyncScreen() {
             mainHoshiLookupAudioUri = audioForExport
             mainHoshiLookupTitle = query
             recordStatisticsLookup(context, currentStatisticsBookKey())
-            Log.d("MainHoshiResultPopup", "collection first-layer applied query='${query.take(32)}' results=${popup.first.state.results.size}")
+            logDebug("MainHoshiResultPopup") { "collection first-layer applied query='${query.take(32)}' results=${popup.first.state.results.size}" }
         }.onFailure { error ->
             collectionFirstLayerHtml = ""
             collectionFirstLayerResults = emptyList()
@@ -2350,16 +2402,15 @@ private fun ReaderSyncScreen() {
         titleForExport: String,
         showRangeSelection: Boolean = false
     ): Boolean {
-        Log.d(
-            "MainHoshiResultPopup",
+        logDebug("MainHoshiResultPopup") {
             "showMainHoshiLookup start text='${selection.text.take(32)}' range=${selectedRange ?: "null"} rect=${selection.rect.x},${selection.rect.y} ${selection.rect.width}x${selection.rect.height} showRange=$showRangeSelection"
-        )
+        }
         val popup = mainHoshiLookupSession.createPopup(
             selection = selection,
             options = mainHoshiLookupOptions(showRangeSelection = showRangeSelection),
         )
         if (popup == null) {
-            Log.d("MainHoshiResultPopup", "showMainHoshiLookup empty text='${selection.text.take(32)}'")
+            logDebug("MainHoshiResultPopup") { "showMainHoshiLookup empty text='${selection.text.take(32)}'" }
             return false
         }
         mainHoshiLookupPopups.clear()
@@ -2369,35 +2420,32 @@ private fun ReaderSyncScreen() {
         mainHoshiLookupAudioUri = audioForExport
         mainHoshiLookupTitle = titleForExport.ifBlank { selection.text }
         recordStatisticsLookup(context, currentStatisticsBookKey())
-        Log.d(
-            "MainHoshiResultPopup",
+        logDebug("MainHoshiResultPopup") {
             "showMainHoshiLookup applied text='${selection.text.take(32)}' popupCount=${mainHoshiLookupPopups.size}"
-        )
+        }
         return true
     }
 
     fun pushMainHoshiRecursiveLookup(selection: ReaderSelectionData): Boolean {
-        Log.d(
-            "MainHoshiResultPopup",
+        logDebug("MainHoshiResultPopup") {
             "pushRecursiveLookup start currentSize=${mainHoshiLookupPopups.size} text='${selection.text.take(48)}' " +
-                "sentenceLen=${selection.sentence.length} sentenceOffset=${selection.sentenceOffset} " +
-                "rect=${selection.rect.x},${selection.rect.y} ${selection.rect.width}x${selection.rect.height}"
-        )
+            "sentenceLen=${selection.sentence.length} sentenceOffset=${selection.sentenceOffset} " +
+            "rect=${selection.rect.x},${selection.rect.y} ${selection.rect.width}x${selection.rect.height}"
+        }
         val popup = mainHoshiLookupSession.createPopup(
             selection = selection,
             options = mainHoshiLookupOptions(showRangeSelection = false),
         )
         if (popup == null) {
-            Log.d("MainHoshiResultPopup", "pushRecursiveLookup empty text='${selection.text.take(32)}'")
+            logDebug("MainHoshiResultPopup") { "pushRecursiveLookup empty text='${selection.text.take(32)}'" }
             return false
         }
         mainHoshiLookupPopups.clear()
         mainHoshiLookupPopups.add(popup.first)
-        Log.d(
-            "MainHoshiResultPopup",
+        logDebug("MainHoshiResultPopup") {
             "pushRecursiveLookup applied text='${selection.text.take(48)}' popupId=${popup.first.id} " +
-                "results=${popup.first.state.results.size} popupCount=${mainHoshiLookupPopups.size}"
-        )
+            "results=${popup.first.state.results.size} popupCount=${mainHoshiLookupPopups.size}"
+        }
         return true
     }
 
@@ -2470,23 +2518,21 @@ private fun ReaderSyncScreen() {
 
     fun exportMainHoshiLookupEntryToAnkiAsync(content: String, onComplete: (Boolean) -> Unit) {
         scope.launch {
-            android.util.Log.d(
-                "AnkiExportDebug",
+            logDebug("AnkiExportDebug") {
                 "mainHoshiExport rawContentLen=${content.length} rawPrefix=${content.take(120)}"
-            )
+            }
             val success = runCatching {
                 val payload = runCatching { JSONObject(content) }.getOrNull() ?: run {
-                    android.util.Log.d("AnkiExportDebug", "mainHoshiExport payloadParseFailed")
+                    logDebug("AnkiExportDebug") { "mainHoshiExport payloadParseFailed" }
                     return@runCatching false
                 }
                 val expression = payload.optString("expression").trim().ifBlank {
                     payload.optString("matched").trim()
                 }
                 if (expression.isBlank()) {
-                    android.util.Log.d(
-                        "AnkiExportDebug",
+                    logDebug("AnkiExportDebug") {
                         "mainHoshiExport expressionBlank payloadKeys=${payload.keys().asSequence().joinToString(",")}"
-                    )
+                    }
                     return@runCatching false
                 }
                 val reading = payload.optString("reading").trim().takeIf { it.isNotBlank() }
@@ -2515,13 +2561,12 @@ private fun ReaderSyncScreen() {
                 // currently selected book audio as a cue source, otherwise the
                 // Anki exporter tries to cut a synthetic 0ms..0ms clip.
                 val exportAudioUri = sourceCue?.let { mainHoshiLookupAudioUri }
-                android.util.Log.d(
-                    "AnkiExportDebug",
+                logDebug("AnkiExportDebug") {
                     "mainHoshiExport payload expression=$expression reading=${reading.orEmpty()} dict=$primaryDictionaryName " +
-                        "glossaryLen=${glossary.length} frequencyLen=${frequency.length} pitchLen=${pitch.length} " +
-                        "popupSelectionLen=${popupSelectionText.orEmpty().length} audioUri=${exportAudioUri?.toString().orEmpty()} " +
-                        "lookupCue=${sourceCue?.text.orEmpty().take(48)}"
-                )
+                    "glossaryLen=${glossary.length} frequencyLen=${frequency.length} pitchLen=${pitch.length} " +
+                    "popupSelectionLen=${popupSelectionText.orEmpty().length} audioUri=${exportAudioUri?.toString().orEmpty()} " +
+                    "lookupCue=${sourceCue?.text.orEmpty().take(48)}"
+                }
                 val exportResult = withContext(Dispatchers.IO) {
                     val preparedLookupAudio = prepareLookupAudioForAnkiExport(
                         context = context,
@@ -2559,10 +2604,9 @@ private fun ReaderSyncScreen() {
                     }
                 }
                 val message = ankiExportResultMessage(context, exportResult)
-                android.util.Log.d(
-                    "AnkiExportDebug",
+                logDebug("AnkiExportDebug") {
                     "mainHoshiExport result=${exportResult.javaClass.simpleName} message=${message.take(220)}"
-                )
+                }
                 if (message.isNotBlank() && exportResult !is AnkiExportResult.DuplicateSkipped) {
                     Toast.makeText(
                         context,
@@ -2682,6 +2726,21 @@ private fun ReaderSyncScreen() {
     }
     val mainPageScrollState = rememberScrollState()
     val dictionaryManagerScrollState = rememberScrollState()
+    // 首页内容视口（窗口坐标），供手动排序拖拽到边缘时自动滚动使用。
+    var shelfViewportBounds by remember { mutableStateOf<Rect?>(null) }
+    // 滚动内容列的 LayoutCoordinates：卡片槽位与手指位置都换算到它的本地
+    // （内容）坐标系。内容坐标对滚动/视口裁剪免疫，卡片滚出视口仍真实，
+    // 而窗口坐标(boundsInWindow)在卡片离开视口后会退化（裁剪/归零）。
+    var shelfColumnCoords by remember { mutableStateOf<LayoutCoordinates?>(null) }
+    // 观察器最新记录：手指在内容坐标系中的位置，及其所在帧的滚动值。
+    // 手指静止而页面自动滚动时，真实内容位置 = dragFingerContent.y
+    // + (当前scroll - dragFingerScrollAnchor)。
+    var dragFingerContent by remember { mutableStateOf(Offset.Zero) }
+    var dragFingerScrollAnchor by remember { mutableFloatStateOf(0f) }
+    // 书架手动排序可用的总开关（观察器与手势共用）。
+    val manualSortTrackEnabled = homeLibrarySort == HomeLibrarySort.MANUAL &&
+        !isBookSelectionMode &&
+        !homeCoverFocusEditMode
 
     Scaffold(
         modifier = Modifier.fillMaxSize(),
@@ -2776,11 +2835,36 @@ private fun ReaderSyncScreen() {
                         baseModifier.verticalScroll(mainPageScrollState)
                     }
                 }
+                .onGloballyPositioned {
+                    shelfViewportBounds = it.boundsInWindow()
+                    shelfColumnCoords = it
+                }
+                // 手动排序拖拽观察器：不消费任何事件，仅把手指位置换算进内容坐标。
+                // 挂在滚动内容列节点上：该节点在内容滚动/视口裁剪时保持真实局部坐标
+                // （卡片节点滚出视口后会退化，不能作为拖拽几何来源）。
+                .pointerInput(manualSortTrackEnabled) {
+                    if (manualSortTrackEnabled) {
+                        awaitEachGesture {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            dragFingerContent = down.position
+                            dragFingerScrollAnchor = mainPageScrollState.value.toFloat()
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                val change = event.changes.firstOrNull {
+                                    it.id == down.id && it.pressed
+                                }
+                                if (change == null) break
+                                dragFingerContent = change.position
+                                dragFingerScrollAnchor = mainPageScrollState.value.toFloat()
+                            }
+                        }
+                    }
+                }
             Column(
                 modifier = mainContentModifier,
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-            Text("⑨Player", style = MaterialTheme.typography.titleLarge)
+            Text(stringResource(R.string.app_name), style = MaterialTheme.typography.titleLarge)
 
             val adjustingBook = adjustingBookCoverId?.let { bookId ->
                 readerBooks.firstOrNull { it.id == bookId }
@@ -3528,6 +3612,318 @@ private fun ReaderSyncScreen() {
             }
 
             if (activeSection == MiningSection.MAIN) {
+                // 书架排序：最近阅读（播放快照时间） / 书名 / 手动（存储顺序）
+                val displayedBooks = remember(readerBooks, homeLibrarySort, readerBookPlaybackSnapshots) {
+                    when (homeLibrarySort) {
+                        HomeLibrarySort.TITLE -> readerBooks.sortedWith(
+                            compareBy({ it.title.lowercase(Locale.ROOT) }, { it.id })
+                        )
+                        HomeLibrarySort.RECENT -> {
+                            val (touched, untouched) = readerBooks.partition {
+                                readerBookPlaybackSnapshots[it.id] != null
+                            }
+                            touched.sortedByDescending {
+                                readerBookPlaybackSnapshots[it.id]?.updatedAtMs ?: 0L
+                            } + untouched.sortedBy { it.title.lowercase(Locale.ROOT) }
+                        }
+                        HomeLibrarySort.MANUAL -> readerBooks
+                    }
+                }
+                // ---- 手动排序拖拽（MANUAL 模式；延迟落位模型）----
+                // 拖动中不改列表顺序：只记录「起点/目标槽位」，其它卡片弹簧让位显示空隙，
+                // 松手才一次性落位并持久化（与词典列表拖拽同款模型）。
+                // 几何量全部使用「内容坐标系」（见 shelfColumnCoords / dragFingerContent）：
+                // 卡片槽位与手指位置对页面滚动免疫，卡片滚出视口也保持真实，
+                // 避免了窗口坐标在视口外退化(裁剪/(0,0))导致的目标错乱与反向拖回失效。
+                var draggingBookId by remember { mutableStateOf<String?>(null) }
+                // 抓取点：长按时手指相对被拖卡片槽位的偏移（内容坐标，拖动期间恒定）。
+                var dragPressStart by remember { mutableStateOf(Offset.Zero) }
+                var dragStartIndex by remember { mutableIntStateOf(-1) }
+                var dragTargetIndex by remember { mutableIntStateOf(-1) }
+                // 拖动期间其它卡片的让位位移（只作用于视觉，不改布局/列表）。
+                val dragDisplacementMap = remember { mutableStateMapOf<String, Offset>() }
+                // 卡片实际槽位（内容坐标矩形，由 onGloballyPositioned 换算；随布局刷新）。
+                val shelfCardBounds = remember { mutableStateMapOf<String, Rect>() }
+                // 拖到视口边缘自动滚动：边缘检测带宽度（px）
+                val dragAutoScrollEdgePx = with(LocalDensity.current) { 72.dp.toPx() }
+
+                fun resetDragStates() {
+                    draggingBookId = null
+                    dragPressStart = Offset.Zero
+                    dragStartIndex = -1
+                    dragTargetIndex = -1
+                    dragDisplacementMap.clear()
+                }
+
+                // 手指当前的真实内容位置：观察器值 + 观察器之后发生的滚动增量。
+                // （dragFingerContent/dragFingerScrollAnchor 由 mainContentModifier 上的
+                // 观察器按事件写入，见其上方的 pointerInput。）
+                fun currentFingerContent(): Offset = Offset(
+                    dragFingerContent.x,
+                    dragFingerContent.y + (mainPageScrollState.value - dragFingerScrollAnchor)
+                )
+
+                // 手指相对视口顶部的内容行距（窗口坐标意义）：内容 y - 滚动值。
+                fun fingerViewportRelativeY(): Float =
+                    currentFingerContent().y - mainPageScrollState.value
+
+                // 让位位移：起点与目标之间(不含被拖卡片)的其它卡片，向空出的方向平移一个槽位。
+                fun rebuildDisplacementMap() {
+                    val draggedId = draggingBookId ?: return
+                    val start = dragStartIndex
+                    val target = dragTargetIndex
+                    if (start < 0 || target < 0) return
+                    val order = displayedBooks
+                    val updates = mutableMapOf<String, Offset>()
+                    // 两支互为镜像：取"另一侧相邻槽位"的位置做对齐（往下拖取前一个槽位，
+                    // 往上拖取后一个槽位），所以统一成 neighbor = i - step。
+                    val step = if (target > start) 1 else -1
+                    val firstIndex = if (step == 1) start + 1 else target
+                    val lastIndex = if (step == 1) target else start - 1
+                    for (i in firstIndex..lastIndex) {
+                        val neighbor = i - step
+                        if (i !in order.indices || neighbor !in order.indices) continue
+                        val neighborTopLeft = shelfCardBounds[order[neighbor].id]?.topLeft ?: continue
+                        val cur = shelfCardBounds[order[i].id]?.topLeft ?: continue
+                        updates[order[i].id] = Offset(neighborTopLeft.x - cur.x, neighborTopLeft.y - cur.y)
+                    }
+                    dragDisplacementMap.clear()
+                    dragDisplacementMap.putAll(updates)
+                }
+
+                // 手指(拖影中心)落在哪个槽位，落点就定到哪个下标；无命中取最近槽位。
+                fun updateDragTarget() {
+                    val draggedId = draggingBookId ?: return
+                    val draggedSlot = shelfCardBounds[draggedId] ?: return
+                    val order = displayedBooks
+                    if (order.isEmpty()) return
+                    val center = currentFingerContent() - dragPressStart +
+                        Offset(draggedSlot.width / 2f, draggedSlot.height / 2f)
+                    var containsIdx = -1
+                    var best = dragStartIndex.coerceIn(order.indices)
+                    var bestDist = Float.POSITIVE_INFINITY
+                    for ((idx, book) in order.withIndex()) {
+                        val rect = shelfCardBounds[book.id] ?: continue
+                        if (rect.contains(center)) {
+                            containsIdx = idx
+                            break
+                        }
+                        val d = (rect.center - center).getDistance()
+                        if (d < bestDist) {
+                            bestDist = d
+                            best = idx
+                        }
+                    }
+                    val target = if (containsIdx >= 0) containsIdx else best
+                    if (target != dragTargetIndex) {
+                        dragTargetIndex = target
+                        rebuildDisplacementMap()
+                    }
+                }
+
+                // 松手落位：removeAt(起点) 后插入目标下标（与让位动画的终点一致）。
+                fun dropDragMove(fromId: String, targetIndex: Int) {
+                    val list = readerBooks.toMutableList()
+                    val from = list.indexOfFirst { it.id == fromId }
+                    if (from >= 0 && targetIndex in list.indices && targetIndex != from) {
+                        val item = list.removeAt(from)
+                        list.add(targetIndex, item)
+                        readerBooks = list
+                        persistImportState()
+                    }
+                }
+
+                /**
+                 * 手动排序长按手势（MANUAL 模式启用）：
+                 * 长按后移动 = 拖动重排；长按后原地抬起 = 重命名。
+                 * 与 combinedClickable 的点击共存（快速点击仍由它处理，长按回调在
+                 * 手动模式下置空，避免两个长按计时器同时触发）。
+                 */
+                fun Modifier.manualReorderDrag(bookId: String, onRename: () -> Unit): Modifier {
+                    if (!manualSortTrackEnabled) return this
+                    // key 必须包含列表本身：落位会更换 readerBooks/displayedBooks，
+                    // 若只按 size 键控，闭包里的 displayedBooks 会停留在旧顺序，
+                    // 使连续多次拖拽的目标下标与实际槽位错位。
+                    return this.pointerInput(bookId, manualSortTrackEnabled, displayedBooks) {
+                        val autoScrollEdgePx = dragAutoScrollEdgePx
+                        // 心跳（约 60fps）：手指贴近视口上/下边缘时自动滚动页面；
+                        // 滚动/停留期间持续按手指内容位置刷新落点与让位动画目标。
+                        coroutineScope {
+                            val tickerJob = launch {
+                                while (isActive) {
+                                    if (draggingBookId == bookId) {
+                                        val bounds = shelfViewportBounds
+                                        if (bounds != null && mainPageScrollState.maxValue > 0) {
+                                            val vpHeight = bounds.height
+                                            if (vpHeight > autoScrollEdgePx * 2) {
+                                                // 手指在内容坐标系；相对视口顶部的行距 = 内容y - scroll。
+                                                val relY = fingerViewportRelativeY()
+                                                val dir = when {
+                                                    relY < autoScrollEdgePx -> -1
+                                                    relY > vpHeight - autoScrollEdgePx -> 1
+                                                    else -> 0
+                                                }
+                                                if (dir != 0) {
+                                                    val canScroll = if (dir < 0) {
+                                                        mainPageScrollState.value > 0
+                                                    } else {
+                                                        mainPageScrollState.value < mainPageScrollState.maxValue
+                                                    }
+                                                    if (canScroll) {
+                                                        val frac = if (dir < 0) {
+                                                            ((autoScrollEdgePx - relY) / autoScrollEdgePx)
+                                                                .coerceIn(0f, 1f)
+                                                        } else {
+                                                            ((relY - (vpHeight - autoScrollEdgePx)) /
+                                                                autoScrollEdgePx).coerceIn(0f, 1f)
+                                                        }
+                                                        mainPageScrollState.scrollBy(dir * (8f + 26f * frac))
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        updateDragTarget()
+                                        delay(16)
+                                    } else {
+                                        delay(50)
+                                    }
+                                }
+                            }
+                            try {
+                                awaitEachGesture {
+                                    val down = awaitFirstDown(requireUnconsumed = false)
+                                        ?: return@awaitEachGesture
+                                    val longPress = awaitLongPressOrCancellation(down.id)
+                                        ?: return@awaitEachGesture
+                                    dragPressStart = longPress.position
+                                    var startedDrag = false
+                                    var slopAccum = Offset.Zero
+                                    var lastPos = longPress.position
+                                    var ended = false
+                                    try {
+                                        while (!ended) {
+                                            val event = awaitPointerEvent()
+                                            val change = event.changes.firstOrNull { it.id == down.id }
+                                            if (change == null || !change.pressed) {
+                                                // 长按已成立：吞掉抬起事件，避免 combinedClickable 的
+                                                // onClick 在重命名/拖拽结束后再次触发（如同时打开书籍）。
+                                                change?.consume()
+                                                ended = true
+                                                break
+                                            }
+                                            val pos = change.position
+                                            if (!startedDrag) {
+                                                val delta = pos - lastPos
+                                                lastPos = pos
+                                                slopAccum += delta
+                                                if (
+                                                    abs(slopAccum.x) > viewConfiguration.touchSlop ||
+                                                    abs(slopAccum.y) > viewConfiguration.touchSlop
+                                                ) {
+                                                    startedDrag = true
+                                                    draggingBookId = bookId
+                                                    val startIdx = displayedBooks.indexOfFirst { it.id == bookId }
+                                                    dragStartIndex = startIdx
+                                                    dragTargetIndex = startIdx
+                                                    dragDisplacementMap.clear()
+                                                }
+                                            }
+                                            if (startedDrag) {
+                                                // 手指位置由主列观察器（内容坐标，滚出视口仍可靠）维护。
+                                                change.consume()
+                                                updateDragTarget()
+                                            }
+                                        }
+                                        if (startedDrag) {
+                                            // 延迟落位：松手时一次性移动并持久化
+                                            if (dragTargetIndex != dragStartIndex) {
+                                                dropDragMove(bookId, dragTargetIndex)
+                                            }
+                                            resetDragStates()
+                                        } else if (ended) {
+                                            // 长按后原地抬起：重命名
+                                            dragPressStart = Offset.Zero
+                                            onRename()
+                                        }
+                                    } finally {
+                                        // 手势结束或协程被取消（如节点销毁）都清理拖拽态，避免拖影卡死。
+                                        if (draggingBookId == bookId) {
+                                            resetDragStates()
+                                        }
+                                    }
+                                }
+                            } finally {
+                                tickerJob.cancel()
+                            }
+                        }
+                    }
+                }
+
+                fun Modifier.dragVisual(bookId: String): Modifier {
+                    return if (draggingBookId == bookId) {
+                        this.offset {
+                            // 布局阶段实时跟手（内容坐标系）：拖影平移 = 手指当前内容位置
+                            // - 本卡内容槽位原点 - 抓取点。滚动/自动滚动下内容坐标恒定，
+                            // 无窗口坐标裁剪/退化问题，也不会与心跳差频抽搐。
+                            val origin = shelfCardBounds[bookId]?.topLeft ?: Offset.Zero
+                            val finger = currentFingerContent()
+                            IntOffset(
+                                (finger.x - origin.x - dragPressStart.x).roundToInt(),
+                                (finger.y - origin.y - dragPressStart.y).roundToInt()
+                            )
+                        }.alpha(0.92f)
+                    } else {
+                        this
+                    }
+                }
+
+                // 书架(FlowRow)/列表两视图共用的书籍卡片交互链：
+                // 置顶 + 点击/长按 + 内容坐标槽位记录 + 手动排序拖拽 + 拖影跟手 + 让位动画偏移。
+                // 顺序敏感，勿重排：槽位记录(onGloballyPositioned)必须在视觉 offset 外层，
+                // 否则矩形被位移污染；dragVisual 布局期跟手与心跳同相。sizing(.width/.fillMaxWidth)
+                // 由调用方放在链首。
+                fun Modifier.manualReorderCardChain(book: ReaderBook, dispAnim: Offset): Modifier =
+                    this
+                        .zIndex(if (draggingBookId == book.id) 1f else 0f)
+                        .combinedClickable(
+                            onClick = {
+                                if (isBookSelectionMode) {
+                                    toggleBookSelection(book.id)
+                                } else if (homeCoverFocusEditMode && homeCoverAspect == HomeCoverAspect.BOOK) {
+                                    // Cover focus edit mode only reacts to cover taps.
+                                } else {
+                                    openReaderBook(book, persist = true)
+                                }
+                            },
+                            onLongClick = {
+                                if (!manualSortTrackEnabled) {
+                                    requestRenameBook(book)
+                                }
+                            }
+                        )
+                        .onGloballyPositioned {
+                            // 内容坐标槽位：卡片相对内容列的位置，滚动/裁剪免疫，
+                            // 滚出视口也保持真实（窗口坐标会在视口外退化，勿用）。
+                            val colCoords = shelfColumnCoords
+                            if (colCoords != null) {
+                                val pf = colCoords.localPositionOf(it, Offset.Zero)
+                                shelfCardBounds[book.id] = Rect(
+                                    pf.x, pf.y,
+                                    pf.x + it.size.width, pf.y + it.size.height
+                                )
+                            } else {
+                                shelfCardBounds.remove(book.id)
+                            }
+                        }
+                        .manualReorderDrag(book.id) { requestRenameBook(book) }
+                        .dragVisual(book.id)
+                        .offset {
+                            IntOffset(
+                                dispAnim.x.roundToInt(),
+                                dispAnim.y.roundToInt()
+                            )
+                        }
+
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -3577,12 +3973,31 @@ private fun ReaderSyncScreen() {
                                 OutlinedButton(
                                     onClick = { homeDisplayMenuExpanded = true }
                                 ) {
-                                    Text(stringResource(R.string.home_display_menu))
+                                    Icon(
+                                        imageVector = Icons.Outlined.MoreHoriz,
+                                        contentDescription = stringResource(R.string.home_display_menu)
+                                    )
                                 }
                                 DropdownMenu(
                                     expanded = homeDisplayMenuExpanded,
                                     onDismissRequest = { homeDisplayMenuExpanded = false }
                                 ) {
+                                    HomeLibrarySort.entries.forEach { sort ->
+                                        DropdownMenuItem(
+                                            text = { Text(stringResource(homeSortLabelRes(sort))) },
+                                            leadingIcon = if (homeLibrarySort == sort) {
+                                                { Icon(Icons.Outlined.Check, contentDescription = null) }
+                                            } else {
+                                                null
+                                            },
+                                            onClick = {
+                                                homeLibrarySort = sort
+                                                persistHomeDisplaySettings(nextSort = sort)
+                                                homeDisplayMenuExpanded = false
+                                            }
+                                        )
+                                    }
+                                    HorizontalDivider()
                                     DropdownMenuItem(
                                         text = {
                                             Text(
@@ -3649,34 +4064,30 @@ private fun ReaderSyncScreen() {
                         }
                     }
                 } else if (homeLibraryView == HomeLibraryView.BOOKSHELF) {
-                    readerBooks.chunked(2).forEach { rowBooks ->
-                        Row(
+                    // 单一父容器 FlowRow（每行至多 2 本）：卡片跨行换位时按 key 在同一父容器内
+                    // 移动、节点不被销毁，长按拖拽可跨行连续进行；chunked(2)+多行 Row 会在
+                    // 跨行处重建节点导致手势中途断掉（表现为“没松手却自动松手”）。
+                    BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+                        val shelfCardWidth = (maxWidth - 12.dp) / 2
+                        FlowRow(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp),
+                            maxItemsInEachRow = 2
                         ) {
-                            rowBooks.forEach { book ->
+                            displayedBooks.forEach { book ->
                                 key(book.id, homeCoverAspect) {
                                 val selected = selectedBookId == book.id
                                 val multiSelected = selectedBookIds.contains(book.id)
                                 val playbackSnapshot = readerBookPlaybackSnapshots[book.id]
                                 val playbackPercent = playbackSnapshot?.progressPercent ?: 0
+                                // 拖拽让位：本卡片被让位时的弹簧位移动画（目标由 dragDisplacementMap 驱动）
+                                val dispTarget = dragDisplacementMap[book.id] ?: Offset.Zero
+                                val dispAnim = animateDragDisplacement(dispTarget)
                                 Card(
                                     modifier = Modifier
-                                        .weight(1f)
-                                        .combinedClickable(
-                                            onClick = {
-                                                if (isBookSelectionMode) {
-                                                    toggleBookSelection(book.id)
-                                                } else if (homeCoverFocusEditMode && homeCoverAspect == HomeCoverAspect.BOOK) {
-                                                    // Cover focus edit mode only reacts to cover taps.
-                                                } else {
-                                                    openReaderBook(book, persist = true)
-                                                }
-                                            },
-                                            onLongClick = {
-                                                requestRenameBook(book)
-                                            }
-                                        ),
+                                        .width(shelfCardWidth)
+                                        .manualReorderCardChain(book, dispAnim),
                                     colors = CardDefaults.cardColors(
                                         containerColor = Color.Transparent
                                     )
@@ -3839,14 +4250,11 @@ private fun ReaderSyncScreen() {
                                     }
                                 }
                                 }
-                            }
-                            if (rowBooks.size == 1) {
-                                Spacer(modifier = Modifier.weight(1f))
+                                }
                             }
                         }
-                    }
                 } else {
-                    readerBooks.forEach { book ->
+                    displayedBooks.forEach { book ->
                         key(book.id, homeCoverAspect) {
                         val selected = selectedBookId == book.id
                         val multiSelected = selectedBookIds.contains(book.id)
@@ -3857,23 +4265,13 @@ private fun ReaderSyncScreen() {
                             homeCoverFocusEditMode &&
                                 homeCoverAspect == HomeCoverAspect.BOOK &&
                                 displayCover?.source == ReaderBookCoverSource.AUDIO
+                        // 拖拽让位：本卡片被让位时的弹簧位移动画（目标由 dragDisplacementMap 驱动）
+                        val dispTarget = dragDisplacementMap[book.id] ?: Offset.Zero
+                        val dispAnim = animateDragDisplacement(dispTarget)
                         Card(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .combinedClickable(
-                                    onClick = {
-                                        if (isBookSelectionMode) {
-                                            toggleBookSelection(book.id)
-                                        } else if (homeCoverFocusEditMode && homeCoverAspect == HomeCoverAspect.BOOK) {
-                                            // Cover focus edit mode only reacts to cover taps.
-                                        } else {
-                                            openReaderBook(book, persist = true)
-                                        }
-                                    },
-                                    onLongClick = {
-                                        requestRenameBook(book)
-                                    }
-                                ),
+                                .manualReorderCardChain(book, dispAnim),
                             colors = CardDefaults.cardColors(containerColor = hoshiCardBackgroundColor())
                         ) {
                             Box(modifier = Modifier.fillMaxWidth()) {
@@ -4314,12 +4712,7 @@ private fun ReaderSyncScreen() {
                             runCatching { context.startActivity(intent) }
                                 .onFailure { Toast.makeText(context, context.getString(R.string.settings_open_link_failed), Toast.LENGTH_SHORT).show() }
                         },
-                        onExportDiagnosticsClick = {
-                            runCatching { shareDiagnosticsReport(context) }
-                                .onFailure {
-                                    Toast.makeText(context, context.getString(R.string.settings_export_diagnostics_failed), Toast.LENGTH_SHORT).show()
-                                }
-                        },
+                        onExportDiagnosticsClick = { diagnosticsExportSheetVisible = true },
                         onUpdateClick = { context.startActivity(Intent(context, UpdateSettingsActivity::class.java)) },
                         onVersionClick = {
                             val version = resolveAppVersionName(context)
@@ -4333,6 +4726,41 @@ private fun ReaderSyncScreen() {
                     )
                 }
             }
+        }
+
+        if (diagnosticsExportSheetVisible) {
+            DiagnosticsExportSheet(
+                onDismiss = { diagnosticsExportSheetVisible = false },
+                onDownload = {
+                    diagnosticsExportSheetVisible = false
+                    runCatching { downloadDiagnosticsReport(context) }
+                        .onSuccess { fileName ->
+                            Toast.makeText(
+                                context,
+                                context.getString(R.string.settings_export_diagnostics_saved, fileName),
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
+                        .onFailure {
+                            Toast.makeText(
+                                context,
+                                context.getString(R.string.settings_export_diagnostics_failed),
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                },
+                onShare = {
+                    diagnosticsExportSheetVisible = false
+                    runCatching { shareDiagnosticsReport(context) }
+                        .onFailure {
+                            Toast.makeText(
+                                context,
+                                context.getString(R.string.settings_export_diagnostics_failed),
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                }
+            )
         }
 
         if (renameBookDialogVisible) {
@@ -4562,11 +4990,10 @@ private fun ReaderSyncScreen() {
                         )
                         return@MainCollectionsHoshiPopup
                     }
-                    Log.d(
-                        "MainHoshiResultPopup",
+                    logDebug("MainHoshiResultPopup") {
                         "collection first-layer anchor=${anchor.boundingRectCoreOrNull()?.let { "${it.left},${it.top},${it.right},${it.bottom}" }} " +
-                            "query='${query.take(32)}' selection='${selection.text.take(32)}' selectedRange=${selection.range}"
-                    )
+                        "query='${query.take(32)}' selection='${selection.text.take(32)}' selectedRange=${selection.range}"
+                    }
                     showCollectionFirstLayerLookup(
                         selection = mainHoshiFallbackSelection(query, anchor).copy(
                             sentence = collectionLookupPreviewSentence,
@@ -4631,10 +5058,9 @@ private fun ReaderSyncScreen() {
         LookupPopupStackView(
                 popups = mainHoshiLookupPopups,
                 onPopupsChange = { next ->
-                    Log.d(
-                        "MainHoshiResultPopup",
+                    logDebug("MainHoshiResultPopup") {
                         "stack onPopupsChange old=${mainHoshiLookupPopups.size} new=${next.size} ids=${next.joinToString(",") { it.id.take(8) }}"
-                    )
+                    }
                     mainHoshiLookupPopups.clear()
                     mainHoshiLookupPopups.addAll(next)
                     if (next.isEmpty()) {
@@ -4761,7 +5187,7 @@ internal fun resolveAppVersionName(context: Context): String {
     }.getOrDefault("unknown")
 }
 
-private fun resolveAppVersionCode(context: Context): Long {
+internal fun resolveAppVersionCode(context: Context): Long {
     return runCatching {
         @Suppress("DEPRECATION")
         val packageInfo = context.packageManager.getPackageInfo(context.packageName, 0)
@@ -4793,15 +5219,50 @@ private fun shareDiagnosticsReport(context: Context) {
     context.startActivity(chooser)
 }
 
-private fun writeDiagnosticsReportFile(context: Context, report: String): File {
-    val diagnosticsDir = File(context.cacheDir, "anki_media").apply { mkdirs() }
-    diagnosticsDir.listFiles()
-        ?.filter { it.name.startsWith("9player-diagnostics-") && it.extension.equals("txt", ignoreCase = true) }
-        ?.forEach { runCatching { it.delete() } }
+private const val DIAGNOSTICS_REPORT_PREFIX = "9player-diagnostics-"
 
-    return File(diagnosticsDir, "9player-diagnostics-${System.currentTimeMillis()}.txt").apply {
+private fun diagnosticsReportFileName(): String =
+    "$DIAGNOSTICS_REPORT_PREFIX${System.currentTimeMillis()}.txt"
+
+private fun clearCachedDiagnosticsReports(context: Context) {
+    File(context.cacheDir, "anki_media")
+        .listFiles()
+        ?.filter { it.name.startsWith(DIAGNOSTICS_REPORT_PREFIX) && it.extension.equals("txt", ignoreCase = true) }
+        ?.forEach { runCatching { it.delete() } }
+}
+
+private fun writeDiagnosticsReportFile(context: Context, report: String): File {
+    clearCachedDiagnosticsReports(context)
+    val diagnosticsDir = File(context.cacheDir, "anki_media").apply { mkdirs() }
+    return File(diagnosticsDir, diagnosticsReportFileName()).apply {
         writeText(report, Charsets.UTF_8)
     }
+}
+
+private fun downloadDiagnosticsReport(context: Context): String {
+    val report = buildDiagnosticsReport(context)
+    val displayName = diagnosticsReportFileName()
+    val resolver = context.contentResolver
+    val values = ContentValues().apply {
+        put(MediaStore.Downloads.DISPLAY_NAME, displayName)
+        put(MediaStore.Downloads.MIME_TYPE, "text/plain")
+        put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+        put(MediaStore.Downloads.IS_PENDING, 1)
+    }
+    val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+        ?: throw IOException("Unable to create diagnostics report in Downloads")
+    try {
+        resolver.openOutputStream(uri)?.use { stream ->
+            stream.write(report.toByteArray(Charsets.UTF_8))
+        } ?: throw IOException("Unable to open diagnostics report output stream")
+        values.clear()
+        values.put(MediaStore.Downloads.IS_PENDING, 0)
+        resolver.update(uri, values, null, null)
+    } catch (t: Throwable) {
+        runCatching { resolver.delete(uri, null, null) }
+        throw t
+    }
+    return displayName
 }
 
 private fun buildDiagnosticsReport(context: Context): String {
@@ -4812,7 +5273,7 @@ private fun buildDiagnosticsReport(context: Context): String {
     val persistedImports = loadPersistedImports(context)
     val persistedAnki = loadPersistedAnkiConfig(context)
     val ankiResolvedPackage = resolveAnkiPackageName(context)
-    val recentLogs = loadRecentProcessLogs()
+    val recentLogs = readOwnProcessLogs(200)
 
     return buildString {
         appendLine("9Player Diagnostics")
@@ -4864,8 +5325,7 @@ private fun buildDiagnosticsReport(context: Context): String {
         appendLine("Tags=${persistedAnki.tags.ifBlank { "(blank)" }}")
         appendLine("FieldTemplateCount=${persistedAnki.fieldTemplates.size}")
         appendLine()
-        appendLine("[Recent Reader Logs]")
-        appendLine(extractRecentReaderLogs(recentLogs))
+        appendLine(buildCrashDiagnosticsReport(context))
         appendLine()
         appendLine("[Recent Logs]")
         appendLine(recentLogs.ifBlank { "(no recent logs captured)" })
@@ -4932,43 +5392,7 @@ private fun readerBookImportKey(book: ReaderBook): String {
         ?: book.id
 }
 
-private fun loadRecentProcessLogs(maxLines: Int = 200): String {
-    return runCatching {
-        val process = ProcessBuilder(
-            "logcat",
-            "-d",
-            "-t",
-            maxLines.toString(),
-            "--pid=${android.os.Process.myPid()}",
-            "*:V"
-        ).redirectErrorStream(true).start()
-        val output = process.inputStream.bufferedReader().use { it.readText().trim() }
-        process.waitFor()
-        output
-    }.getOrDefault("")
-}
 
-private fun extractRecentReaderLogs(recentLogs: String): String {
-    val interestingTags = listOf(
-        "BookReaderBack",
-        "BookReaderSeek",
-        "BookDelete",
-        "BookImportMove",
-        "MainReaderRestore",
-        "LegadoAudioProgress",
-        "LegadoMatch",
-        "LegadoRepeatClip",
-        "ReaderPausedSeek",
-        "FloatingSubtitleScroll",
-        "FloatingSubtitleRender",
-        "BookLookupTap"
-    )
-    return recentLogs
-        .lineSequence()
-        .filter { line -> interestingTags.any { tag -> line.contains(tag) } }
-        .joinToString(separator = "\n")
-        .ifBlank { "(no recent reader/subtitle logs captured)" }
-}
 
 private data class SubtitleCue(
     val startMs: Long,
@@ -5849,12 +6273,11 @@ private fun relocateSelectedBookFilesToAudFolder(
     if (!root.isDirectory) error(context.getString(R.string.error_audiobook_folder_not_directory))
 
     val audFolder = createNextAudFolder(context, root)
-    Log.d(
-        BOOK_IMPORT_MOVE_LOG_TAG,
+    logDebug(BOOK_IMPORT_MOVE_LOG_TAG) {
         "relocate start deleteSourceFiles=$deleteSourceFiles root=${rootFolderUri.toString().take(96)} " +
-            "targetFolder=${audFolder.name} " +
-            "audioName=$audioSourceName srtName=$srtSourceName ebookName=$ebookSourceName"
-    )
+        "targetFolder=${audFolder.name} " +
+        "audioName=$audioSourceName srtName=$srtSourceName ebookName=$ebookSourceName"
+    }
     val audioDisplayName = audioSourceUri?.let { sourceUri ->
         audioSourceName?.trim().takeUnless { it.isNullOrBlank() }
             ?: queryDisplayName(contentResolver, sourceUri)
@@ -5870,11 +6293,10 @@ private fun relocateSelectedBookFilesToAudFolder(
         )
     }
     if (audioSourceUri != null) {
-        Log.d(
-            BOOK_IMPORT_MOVE_LOG_TAG,
+        logDebug(BOOK_IMPORT_MOVE_LOG_TAG) {
             "copy audio source=${audioSourceUri.toString().take(96)} target=${copiedAudio?.uri?.toString()?.take(96)} " +
-                "name=${copiedAudio?.displayName}"
-        )
+            "name=${copiedAudio?.displayName}"
+        }
     }
     val copiedSrt = srtSourceUri?.let { sourceUri ->
         val srtDisplayName = srtSourceName?.trim().takeUnless { it.isNullOrBlank() }
@@ -5888,11 +6310,10 @@ private fun relocateSelectedBookFilesToAudFolder(
         )
     }
     if (srtSourceUri != null) {
-        Log.d(
-            BOOK_IMPORT_MOVE_LOG_TAG,
+        logDebug(BOOK_IMPORT_MOVE_LOG_TAG) {
             "copy srt source=${srtSourceUri.toString().take(96)} target=${copiedSrt?.uri?.toString()?.take(96)} " +
-                "name=${copiedSrt?.displayName}"
-        )
+            "name=${copiedSrt?.displayName}"
+        }
     }
     val copiedEbook = ebookSourceUri?.let { sourceUri ->
         val ebookDisplayName = ebookSourceName?.trim().takeUnless { it.isNullOrBlank() }
@@ -5906,42 +6327,40 @@ private fun relocateSelectedBookFilesToAudFolder(
         )
     }
     if (ebookSourceUri != null) {
-        Log.d(
-            BOOK_IMPORT_MOVE_LOG_TAG,
+        logDebug(BOOK_IMPORT_MOVE_LOG_TAG) {
             "copy ebook source=${ebookSourceUri.toString().take(96)} target=${copiedEbook?.uri?.toString()?.take(96)} " +
-                "name=${copiedEbook?.displayName}"
-        )
+            "name=${copiedEbook?.displayName}"
+        }
     }
 
     val warnings = mutableListOf<String>()
     if (deleteSourceFiles) {
         audioSourceUri?.let { uri ->
             val deleted = deleteSourceUri(context, contentResolver, uri)
-            Log.d(BOOK_IMPORT_MOVE_LOG_TAG, "delete audio source=${uri.toString().take(96)} success=$deleted")
+            logDebug(BOOK_IMPORT_MOVE_LOG_TAG) { "delete audio source=${uri.toString().take(96)} success=$deleted" }
             if (!deleted) {
                 warnings += context.getString(R.string.error_audio_delete_failed)
             }
         }
         srtSourceUri?.let { uri ->
             val deleted = deleteSourceUri(context, contentResolver, uri)
-            Log.d(BOOK_IMPORT_MOVE_LOG_TAG, "delete srt source=${uri.toString().take(96)} success=$deleted")
+            logDebug(BOOK_IMPORT_MOVE_LOG_TAG) { "delete srt source=${uri.toString().take(96)} success=$deleted" }
             if (!deleted) {
                 warnings += context.getString(R.string.error_srt_delete_failed)
             }
         }
         ebookSourceUri?.let { uri ->
             val deleted = deleteSourceUri(context, contentResolver, uri)
-            Log.d(BOOK_IMPORT_MOVE_LOG_TAG, "delete ebook source=${uri.toString().take(96)} success=$deleted")
+            logDebug(BOOK_IMPORT_MOVE_LOG_TAG) { "delete ebook source=${uri.toString().take(96)} success=$deleted" }
             if (!deleted) {
                 warnings += context.getString(R.string.error_ebook_delete_failed)
             }
         }
     } else {
-        Log.d(
-            BOOK_IMPORT_MOVE_LOG_TAG,
+        logDebug(BOOK_IMPORT_MOVE_LOG_TAG) {
             "keep original sources audio=${audioSourceUri?.toString()?.take(96)} " +
-                "srt=${srtSourceUri?.toString()?.take(96)} ebook=${ebookSourceUri?.toString()?.take(96)}"
-        )
+            "srt=${srtSourceUri?.toString()?.take(96)} ebook=${ebookSourceUri?.toString()?.take(96)}"
+        }
     }
 
     return RelocatedBookFiles(
@@ -6211,17 +6630,17 @@ private fun archiveBookStorage(
     audiobookFolderUri: Uri?
 ): ArchiveBookStorageResult {
     val rootUri = audiobookFolderUri ?: run {
-        Log.d(BOOK_DELETE_LOG_TAG, "archiveStorage skipped reason=no-root title=${book.title.take(48)}")
+        logDebug(BOOK_DELETE_LOG_TAG) { "archiveStorage skipped reason=no-root title=${book.title.take(48)}" }
         return ArchiveBookStorageResult(fileCopyFailures = 1, fileDeleteFailures = 0)
     }
     val root = DocumentFile.fromTreeUri(context, rootUri) ?: run {
-        Log.d(BOOK_DELETE_LOG_TAG, "archiveStorage skipped reason=root-inaccessible root=${rootUri.toString().take(96)}")
+        logDebug(BOOK_DELETE_LOG_TAG) { "archiveStorage skipped reason=root-inaccessible root=${rootUri.toString().take(96)}" }
         return ArchiveBookStorageResult(fileCopyFailures = 1, fileDeleteFailures = 0)
     }
     val sourcesRoot = runCatching {
         ensureChildDirectory(context, root, BOOK_SOURCES_FOLDER_NAME)
     }.getOrElse { error ->
-        Log.d(BOOK_DELETE_LOG_TAG, "archiveStorage skipped reason=sources-create-failed error=${error.message}")
+        logDebug(BOOK_DELETE_LOG_TAG) { "archiveStorage skipped reason=sources-create-failed error=${error.message}" }
         return ArchiveBookStorageResult(fileCopyFailures = 1, fileDeleteFailures = 0)
     }
     val primaryFileUri = book.audioUri ?: book.ebookUri
@@ -6230,7 +6649,7 @@ private fun archiveBookStorage(
     val archiveFolder = runCatching {
         createUniqueChildDirectory(context, sourcesRoot, archiveFolderName)
     }.getOrElse { error ->
-        Log.d(BOOK_DELETE_LOG_TAG, "archiveStorage skipped reason=archive-folder-create-failed error=${error.message}")
+        logDebug(BOOK_DELETE_LOG_TAG) { "archiveStorage skipped reason=archive-folder-create-failed error=${error.message}" }
         return ArchiveBookStorageResult(fileCopyFailures = 1, fileDeleteFailures = 0)
     }
     val files = buildList {
@@ -6238,11 +6657,10 @@ private fun archiveBookStorage(
         book.srtUri?.let { add(BookArchiveFile("srt", it, book.srtName)) }
         book.ebookUri?.let { add(BookArchiveFile("ebook", it, book.ebookName)) }
     }.distinctBy { it.uri.toString() }
-    Log.d(
-        BOOK_DELETE_LOG_TAG,
+    logDebug(BOOK_DELETE_LOG_TAG) {
         "archiveStorage start title=${book.title.take(48)} target=$BOOK_SOURCES_FOLDER_NAME/${archiveFolder.name} " +
-            "files=${files.joinToString(separator = ",") { it.kind }}"
-    )
+        "files=${files.joinToString(separator = ",") { it.kind }}"
+    }
 
     val copiedFiles = mutableListOf<BookArchiveFile>()
     var copyFailures = 0
@@ -6259,17 +6677,15 @@ private fun archiveBookStorage(
             )
         }.onSuccess { copiedFile ->
             copiedFiles += file
-            Log.d(
-                BOOK_DELETE_LOG_TAG,
+            logDebug(BOOK_DELETE_LOG_TAG) {
                 "archiveStorage copy ${file.kind} source=${file.uri.toString().take(96)} " +
-                    "target=${copiedFile.uri.toString().take(96)} name=${copiedFile.displayName}"
-            )
+                "target=${copiedFile.uri.toString().take(96)} name=${copiedFile.displayName}"
+            }
         }.onFailure { error ->
             copyFailures += 1
-            Log.d(
-                BOOK_DELETE_LOG_TAG,
+            logDebug(BOOK_DELETE_LOG_TAG) {
                 "archiveStorage copyFailed ${file.kind} source=${file.uri.toString().take(96)} error=${error.message}"
-            )
+            }
         }
         copied.getOrNull()
     }
@@ -6284,10 +6700,9 @@ private fun archiveBookStorage(
     )
     if (isInsideAudiobookFolder && primaryFileUri != null) {
         val folderDeleted = deleteAudParentFolder(context, primaryFileUri)
-        Log.d(
-            BOOK_DELETE_LOG_TAG,
+        logDebug(BOOK_DELETE_LOG_TAG) {
             "archiveStorage deleteOriginalFolder primary=${primaryFileUri.toString().take(96)} success=$folderDeleted"
-        )
+        }
         if (folderDeleted) {
             return ArchiveBookStorageResult(fileCopyFailures = 0, fileDeleteFailures = 0)
         }
@@ -6296,10 +6711,9 @@ private fun archiveBookStorage(
     var deleteFailures = 0
     copiedFiles.forEach { file ->
         val deleted = deleteSourceUri(context, contentResolver, file.uri)
-        Log.d(
-            BOOK_DELETE_LOG_TAG,
+        logDebug(BOOK_DELETE_LOG_TAG) {
             "archiveStorage deleteOriginalFile ${file.kind} source=${file.uri.toString().take(96)} success=$deleted"
-        )
+        }
         if (!deleted) deleteFailures += 1
     }
     return ArchiveBookStorageResult(fileCopyFailures = 0, fileDeleteFailures = deleteFailures)
@@ -6317,20 +6731,18 @@ private fun deleteBookStorage(
         fileUri = primaryFileUri,
         audiobookFolderUri = audiobookFolderUri
     )
-    Log.d(
-        BOOK_DELETE_LOG_TAG,
+    logDebug(BOOK_DELETE_LOG_TAG) {
         "deleteStorage title=${book.title.take(48)} insideRoot=$isInsideAudiobookFolder " +
-            "primary=${primaryFileUri?.toString()?.take(96)} root=${audiobookFolderUri?.toString()?.take(96)} " +
-            "audio=${book.audioUri?.toString()?.take(96)} srt=${book.srtUri?.toString()?.take(96)} " +
-            "ebook=${book.ebookUri?.toString()?.take(96)}"
-    )
+        "primary=${primaryFileUri?.toString()?.take(96)} root=${audiobookFolderUri?.toString()?.take(96)} " +
+        "audio=${book.audioUri?.toString()?.take(96)} srt=${book.srtUri?.toString()?.take(96)} " +
+        "ebook=${book.ebookUri?.toString()?.take(96)}"
+    }
 
     if (isInsideAudiobookFolder && primaryFileUri != null) {
         val folderDeleted = deleteAudParentFolder(context, primaryFileUri)
-        Log.d(
-            BOOK_DELETE_LOG_TAG,
+        logDebug(BOOK_DELETE_LOG_TAG) {
             "deleteStorage parentFolder primary=${primaryFileUri.toString().take(96)} success=$folderDeleted"
-        )
+        }
         if (folderDeleted) {
             return DeleteBookStorageResult(
                 folderDeleteAttempted = true,
@@ -6344,19 +6756,19 @@ private fun deleteBookStorage(
     val audio = book.audioUri
     if (audio != null) {
         val deleted = deleteSourceUri(context, contentResolver, audio)
-        Log.d(BOOK_DELETE_LOG_TAG, "deleteStorage file audio=${audio.toString().take(96)} success=$deleted")
+        logDebug(BOOK_DELETE_LOG_TAG) { "deleteStorage file audio=${audio.toString().take(96)} success=$deleted" }
         if (!deleted) fileDeleteFailures += 1
     }
     val srt = book.srtUri
     if (srt != null) {
         val deleted = deleteSourceUri(context, contentResolver, srt)
-        Log.d(BOOK_DELETE_LOG_TAG, "deleteStorage file srt=${srt.toString().take(96)} success=$deleted")
+        logDebug(BOOK_DELETE_LOG_TAG) { "deleteStorage file srt=${srt.toString().take(96)} success=$deleted" }
         if (!deleted) fileDeleteFailures += 1
     }
     val ebook = book.ebookUri
     if (ebook != null && ebook != audio) {
         val deleted = deleteSourceUri(context, contentResolver, ebook)
-        Log.d(BOOK_DELETE_LOG_TAG, "deleteStorage file ebook=${ebook.toString().take(96)} success=$deleted")
+        logDebug(BOOK_DELETE_LOG_TAG) { "deleteStorage file ebook=${ebook.toString().take(96)} success=$deleted" }
         if (!deleted) fileDeleteFailures += 1
     }
 

@@ -200,16 +200,14 @@ internal fun LookupPopupStackView(
                     onPopupsChange(dismissPopupAt(popups, index))
                 },
                 onTextSelected = { selection ->
-                    android.util.Log.d(
-                        "MainHoshiResultPopup",
+                    logDebug("MainHoshiResultPopup") {
                         "stack textSelected index=$index size=${popups.size} text='${selection.text.take(48)}'"
-                    )
+                    }
                     val nextPopups = closeChildPopups(popups, index)
                     lookupChildPopup(selection)?.let { (childPopup, highlightCount) ->
-                        android.util.Log.d(
-                            "MainHoshiResultPopup",
+                        logDebug("MainHoshiResultPopup") {
                             "stack child lookup created index=$index childId=${childPopup.id} results=${childPopup.state.results.size}"
-                        )
+                        }
                         onPopupsChange(nextPopups + childPopup)
                         highlightCount
                     }
@@ -236,16 +234,14 @@ internal fun LookupPopupStackView(
                     )
                 },
                 onLookupRedirected = { redirectSelection ->
-                    android.util.Log.d(
-                        "MainHoshiResultPopup",
+                    logDebug("MainHoshiResultPopup") {
                         "stack redirect index=$index size=${popups.size} text='${redirectSelection.text.take(48)}'"
-                    )
+                    }
                     val nextPopups = closeChildPopups(popups, index)
                     lookupChildPopup(redirectSelection)?.let { (childPopup, _) ->
-                        android.util.Log.d(
-                            "MainHoshiResultPopup",
+                        logDebug("MainHoshiResultPopup") {
                             "stack redirect child created index=$index childId=${childPopup.id} results=${childPopup.state.results.size}"
-                        )
+                        }
                         logDebug("HoshiLookupPopup") {
                             "stack push redirect parent=$index nextSize=${nextPopups.size + 1} query='${redirectSelection.text.take(32)}' rect=${redirectSelection.rect.x},${redirectSelection.rect.y} ${redirectSelection.rect.width}x${redirectSelection.rect.height}"
                         }

@@ -7,7 +7,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.outlined.AutoStories
-import androidx.compose.material.icons.outlined.Description
+import androidx.compose.material.icons.outlined.BugReport
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.FontDownload
 import androidx.compose.material.icons.outlined.Info
@@ -142,7 +142,7 @@ internal fun SettingsPanel(
                 onClick = onGuideClick
             )
             SettingsListItem(
-                icon = Icons.Outlined.Description,
+                icon = Icons.Outlined.BugReport,
                 title = stringResource(R.string.settings_export_diagnostics_title),
                 subtitle = stringResource(R.string.settings_export_diagnostics_subtitle),
                 onClick = onExportDiagnosticsClick

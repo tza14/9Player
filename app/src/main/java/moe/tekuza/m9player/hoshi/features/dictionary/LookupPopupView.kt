@@ -262,28 +262,25 @@ internal fun LookupPopupView(
                             onLookupRedirect = onLookupRedirect,
                             isLookupPopupActive = isLookupPopupActive,
                             onLookupRedirected = { selection, results ->
-                                android.util.Log.d(
-                                    HOSHI_LOOKUP_POPUP_LOG_TAG,
+                                logDebug(HOSHI_LOOKUP_POPUP_LOG_TAG) {
                                     "redirected callback text='${selection.text.take(48)}' results=${results.size}"
-                                )
+                                }
                                 logDebug(HOSHI_LOOKUP_POPUP_LOG_TAG) {
                                     "redirected query='${selection.text.take(32)}' resultCount=${results.size} freqCount=${results.firstOrNull()?.term?.frequencies?.size ?: 0} pitchCount=${results.firstOrNull()?.term?.pitches?.size ?: 0} rect=${selection.rect.x},${selection.rect.y} ${selection.rect.width}x${selection.rect.height}"
                                 }
                                 onLookupRedirected(selection)
                             },
                             onHistoryChanged = { backCount, forwardCount ->
-                                android.util.Log.d(
-                                    HOSHI_LOOKUP_POPUP_LOG_TAG,
+                                logDebug(HOSHI_LOOKUP_POPUP_LOG_TAG) {
                                     "history state updated back=$backCount forward=$forwardCount"
-                                )
+                                }
                                 historyBackCount = backCount
                                 historyForwardCount = forwardCount
                             },
                             onContentReady = {
-                                android.util.Log.d(
-                                    HOSHI_LOOKUP_POPUP_LOG_TAG,
+                                logDebug(HOSHI_LOOKUP_POPUP_LOG_TAG) {
                                     "content ready text='${state.selection.text.take(48)}' warmShell=$warmShell active=$isPopupActive visible=$isContentVisible"
-                                )
+                                }
                                 contentReady = true
                                 if (!firstPaintLogged && isPopupActive && isContentVisible) {
                                     firstPaintLogged = true

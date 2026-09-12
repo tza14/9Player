@@ -2,7 +2,6 @@ package moe.tekuza.m9player
 
 import android.content.Context
 import android.net.Uri
-import android.util.Log
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.util.UnstableApi
@@ -54,11 +53,10 @@ object BookReaderPlaybackSession {
                             reason == Player.DISCONTINUITY_REASON_SEEK ||
                             reason == Player.DISCONTINUITY_REASON_SEEK_ADJUSTMENT
                         ) {
-                            Log.d(
-                                READER_PAUSED_SEEK_LOG_TAG,
+                            logDebug(READER_PAUSED_SEEK_LOG_TAG) {
                                 "session discontinuity reason=$reason old=${oldPosition.positionMs} " +
-                                    "new=${newPosition.positionMs} ${sharedPlayer.seekStateForLog()}"
-                            )
+                                "new=${newPosition.positionMs} ${sharedPlayer.seekStateForLog()}"
+                            }
                         }
                     }
                 })
@@ -99,15 +97,13 @@ object BookReaderPlaybackSession {
     fun seekToPosition(positionMs: Long): Long? {
         val sharedPlayer = player ?: return null
         val targetMs = positionMs.coerceAtLeast(0L)
-        Log.d(
-            READER_PAUSED_SEEK_LOG_TAG,
+        logDebug(READER_PAUSED_SEEK_LOG_TAG) {
             "session seekToPosition request target=$targetMs ${sharedPlayer.seekStateForLog()}"
-        )
+        }
         sharedPlayer.seekTo(targetMs)
-        Log.d(
-            READER_PAUSED_SEEK_LOG_TAG,
+        logDebug(READER_PAUSED_SEEK_LOG_TAG) {
             "session seekToPosition immediate target=$targetMs ${sharedPlayer.seekStateForLog()}"
-        )
+        }
         return targetMs
     }
 

@@ -81,6 +81,11 @@
     <string name="settings_export_diagnostics_subtitle">匯出版本、裝置資訊、最近日誌和目前設定摘要</string>
     <string name="settings_export_diagnostics_subject">9Player 診斷資訊</string>
     <string name="settings_export_diagnostics_failed">匯出診斷失敗。</string>
+    <string name="settings_export_diagnostics_download">下載</string>
+    <string name="settings_export_diagnostics_download_subtitle">儲存到系統「下載」資料夾</string>
+    <string name="settings_export_diagnostics_share">分享</string>
+    <string name="settings_export_diagnostics_share_subtitle">透過其他應用程式傳送診斷檔案</string>
+    <string name="settings_export_diagnostics_saved">已儲存到下載：%1$s</string>
     <string name="settings_version_title">目前版本</string>
     <string name="settings_version_toast">目前版本：%1$s</string>
     <string name="settings_open_link_failed">無法開啟連結。</string>
@@ -124,6 +129,9 @@
     <string name="home_display_list">列表</string>
     <string name="home_cover_aspect_book">封面比例：~A4</string>
     <string name="home_cover_aspect_square">封面比例：正方形</string>
+    <string name="home_sort_recent">最近</string>
+    <string name="home_sort_title">書名</string>
+    <string name="home_sort_manual">手動</string>
     <string name="home_cover_adjust_title">微調封面</string>
     <string name="home_cover_adjust_reset">重設</string>
     <string name="home_cover_adjust_scale">縮放</string>

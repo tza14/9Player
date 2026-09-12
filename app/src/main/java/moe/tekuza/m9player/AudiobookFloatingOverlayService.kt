@@ -587,17 +587,17 @@ companion object {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_HIDE -> {
-                Log.d(FLOATING_OVERLAY_LOG_TAG, "onStartCommand hide")
+                logDebug(FLOATING_OVERLAY_LOG_TAG) { "onStartCommand hide" }
                 stopSelf()
                 return START_NOT_STICKY
             }
             ACTION_SHOW, null -> {
-                Log.d(FLOATING_OVERLAY_LOG_TAG, "onStartCommand show")
+                logDebug(FLOATING_OVERLAY_LOG_TAG) { "onStartCommand show" }
                 ensureOverlayVisible()
                 return START_STICKY
             }
             ACTION_REFRESH -> {
-                Log.d(FLOATING_OVERLAY_LOG_TAG, "onStartCommand refresh")
+                logDebug(FLOATING_OVERLAY_LOG_TAG) { "onStartCommand refresh" }
                 rebuildOverlay()
                 return START_STICKY
             }
@@ -810,27 +810,24 @@ companion object {
             this,
             object : GestureDetector.SimpleOnGestureListener() {
                 override fun onDown(e: MotionEvent): Boolean {
-                    Log.d(
-                        FLOATING_SUBTITLE_HIT_LOG_TAG,
+                    logDebug(FLOATING_SUBTITLE_HIT_LOG_TAG) {
                         "subtitleGesture onDown x=${e.x} y=${e.y} visible=${subtitleTextView?.visibility == View.VISIBLE}"
-                    )
+                    }
                     return true
                 }
 
                 override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
-                    Log.d(
-                        FLOATING_SUBTITLE_HIT_LOG_TAG,
+                    logDebug(FLOATING_SUBTITLE_HIT_LOG_TAG) {
                         "subtitleGesture onSingleTapConfirmed x=${e.x} y=${e.y} visible=${subtitleTextView?.visibility == View.VISIBLE}"
-                    )
+                    }
                     handleSubtitleSingleTap(e)
                     return true
                 }
 
                 override fun onDoubleTap(e: MotionEvent): Boolean {
-                    Log.d(
-                        FLOATING_SUBTITLE_HIT_LOG_TAG,
+                    logDebug(FLOATING_SUBTITLE_HIT_LOG_TAG) {
                         "subtitleGesture onDoubleTap x=${e.x} y=${e.y} visible=${subtitleTextView?.visibility == View.VISIBLE}"
-                    )
+                    }
                     subtitleControlsVisible = !subtitleControlsVisible
                     subtitleSettingsExpanded = false
                     updateSubtitleControlsVisibility(loadAudiobookSettingsConfig(this@AudiobookFloatingOverlayService))
@@ -1353,10 +1350,9 @@ companion object {
     private fun toggleBubbleControlsVisibility(animated: Boolean) {
         val controls = bubbleControlsRow ?: return
         val targetVisible = !bubbleControlsVisible
-        Log.d(
-            FLOATING_BUBBLE_LOG_TAG,
+        logDebug(FLOATING_BUBBLE_LOG_TAG) {
             "toggle targetVisible=$targetVisible"
-        )
+        }
         bubbleControlsVisible = targetVisible
         if (!animated) {
             controls.animate().cancel()
@@ -1489,10 +1485,9 @@ companion object {
         val verticalWriting = settings.floatingOverlaySubtitleWritingMode == FloatingSubtitleWritingMode.VERTICAL_RTL
         val verticalSubtitle = subtitleVerticalCanvasView
         val subtitle = subtitleTextView
-        Log.d(
-            FLOATING_SUBTITLE_HIT_LOG_TAG,
+        logDebug(FLOATING_SUBTITLE_HIT_LOG_TAG) {
             "subtitleTap vertical=$verticalWriting x=${event.x} y=${event.y} subtitleVisible=${subtitle?.visibility == View.VISIBLE || verticalSubtitle?.visibility == View.VISIBLE}"
-        )
+        }
         if (verticalWriting && verticalSubtitle != null) {
             verticalSubtitle.selectAt(event.x, event.y)
             return
@@ -1505,10 +1500,9 @@ companion object {
         val offset = layout.getOffsetForHorizontal(line, x)
         val initialRange = IntRange(offset, offset)
         val initialAnchorRect = computeSubtitleAnchorRects(subtitle, initialRange).firstOrNull()
-        Log.d(
-            FLOATING_SUBTITLE_HIT_LOG_TAG,
+        logDebug(FLOATING_SUBTITLE_HIT_LOG_TAG) {
             "subtitleAnchor initialRange=${initialRange.first}..${initialRange.last} initialAnchor=${initialAnchorRect?.let { "${it.left},${it.top},${it.right},${it.bottom}" } ?: "none"} layoutLines=${layout.lineCount} subtitleSize=${subtitle.width}x${subtitle.height}"
-        )
+        }
         performFloatingLookup(offset, initialAnchorRect)
     }
 
@@ -2016,15 +2010,13 @@ companion object {
                 )
             }
         }
-        Log.d(
-            FLOATING_SUBTITLE_HIT_LOG_TAG,
+        logDebug(FLOATING_SUBTITLE_HIT_LOG_TAG) {
             "subtitleAnchor horizontal range=${range.first}..${range.last} safe=${safeStart}..${safeEndExclusive - 1} lines=${startLine}..${endLine} rects=${rects.size} layoutLines=${layout.lineCount} subtitleSize=${subtitle.width}x${subtitle.height}"
-        )
+        }
         rects.forEachIndexed { index, rect ->
-            Log.d(
-                FLOATING_SUBTITLE_HIT_LOG_TAG,
+            logDebug(FLOATING_SUBTITLE_HIT_LOG_TAG) {
                 "subtitleAnchor rect[$index]=${rect.left},${rect.top},${rect.right},${rect.bottom}"
-            )
+            }
         }
         return rects
     }
@@ -2033,34 +2025,30 @@ companion object {
         val subtitleText = BookReaderFloatingBridge.currentSubtitle()?.trim()?.takeIf { it.isNotEmpty() } ?: return
         val audiobookSettings = loadAudiobookSettingsConfig(this)
         pausePlaybackForFloatingLookupIfNeeded(audiobookSettings)
-        Log.d(
-            FLOATING_LOOKUP_TAP_LOG_TAG,
+        logDebug(FLOATING_LOOKUP_TAP_LOG_TAG) {
             "floating lookup request offset=$offset subtitleLen=${subtitleText.length} anchor=${initialAnchorRect?.let { "${it.left},${it.top},${it.right},${it.bottom}" } ?: "none"}"
-        )
+        }
         val selection = selectLookupScanText(
             text = subtitleText,
             charOffset = offset,
             stopAtParticleBoundary = false
         ) ?: run {
-            Log.d(
-                FLOATING_LOOKUP_TAP_LOG_TAG,
+            logDebug(FLOATING_LOOKUP_TAP_LOG_TAG) {
                 "floating lookup aborted no_selection offset=$offset subtitleLen=${subtitleText.length}"
-            )
+            }
             hideFloatingLookup()
             return
         }
         val term = selection.text.trim().takeIf { it.isNotBlank() } ?: run {
-            Log.d(
-                FLOATING_LOOKUP_TAP_LOG_TAG,
+            logDebug(FLOATING_LOOKUP_TAP_LOG_TAG) {
                 "floating lookup aborted blank_term offset=$offset subtitleLen=${subtitleText.length}"
-            )
+            }
             hideFloatingLookup()
             return
         }
-        Log.d(
-            FLOATING_LOOKUP_TAP_LOG_TAG,
+        logDebug(FLOATING_LOOKUP_TAP_LOG_TAG) {
             "floating lookup start offset=$offset term='${term.take(24)}' range=${selection.range.first}..${selection.range.last} subtitleLen=${subtitleText.length}"
-        )
+        }
         val requestNonce = lookupRequestNonce + 1L
         lookupRequestNonce = requestNonce
         serviceScope.launch {
@@ -2087,15 +2075,13 @@ companion object {
             if (lookupRequestNonce != requestNonce) return@launch
             result.onSuccess { popup ->
                 val hoshiResults = popup?.first?.state?.results.orEmpty()
-                Log.d(
-                    FLOATING_LOOKUP_TAP_LOG_TAG,
+                logDebug(FLOATING_LOOKUP_TAP_LOG_TAG) {
                     "floating hoshi lookup result hits=${hoshiResults.size} requestNonce=$requestNonce"
-                )
+                }
                 if (hoshiResults.isEmpty()) {
-                    Log.d(
-                        FLOATING_LOOKUP_TAP_LOG_TAG,
+                    logDebug(FLOATING_LOOKUP_TAP_LOG_TAG) {
                         "floating lookup result empty term='${term.take(24)}' requestNonce=$requestNonce"
-                    )
+                    }
                     applySubtitleSelectionHighlight(null)
                     hideFloatingLookup()
                     return@onSuccess
@@ -2113,10 +2099,9 @@ companion object {
                     val anchorRects = selectionRects.takeIf { it.isNotEmpty() }
                         ?: initialAnchorRect?.let { listOf(it) }
                         ?: emptyList()
-                    Log.d(
-                        FLOATING_LOOKUP_TAP_LOG_TAG,
+                    logDebug(FLOATING_LOOKUP_TAP_LOG_TAG) {
                         "floating lookup anchor resolved trimmed=${trimmedRange.first}..${trimmedRange.last} anchorRects=${anchorRects.size} avoidRects=${selectionRects.size} subtitleView=${subtitleTextView?.width ?: -1}x${subtitleTextView?.height ?: -1}"
-                    )
+                    }
                     val dictionaryStyles = popup?.first?.state?.dictionaryStyles ?: currentDictionaryStyles()
                     val estimatedAnchorY = anchorRects.maxOfOrNull { it.bottom } ?: (resources.displayMetrics.heightPixels * 0.56f)
                     val shouldPlaceBelow = estimatedAnchorY <= (resources.displayMetrics.heightPixels / 2f)
@@ -2163,10 +2148,9 @@ companion object {
                     ?: emptyList()
                 finishRender(anchorRects)
             }.onFailure {
-                Log.d(
-                    FLOATING_LOOKUP_TAP_LOG_TAG,
+                logDebug(FLOATING_LOOKUP_TAP_LOG_TAG) {
                     "floating hoshi lookup failed term='${term.take(24)}' error='${it.message.orEmpty().take(80)}'"
-                )
+                }
                 renderFloatingLookupError(it.message ?: getString(R.string.bookreader_lookup_failed))
             }
         }
@@ -2255,20 +2239,18 @@ companion object {
             applySubtitleSelectionHighlight(floatingLookupSession.getOrNull(0)?.selectedRange)
         }
         if (floatingLookupSession.size == 0) {
-            Log.d(
-                FLOATING_LOOKUP_LOG_TAG,
+            logDebug(FLOATING_LOOKUP_LOG_TAG) {
                 "renderFloatingLookupResults skipped reason=empty_session"
-            )
+            }
             clearFloatingLookupHosts()
             return
         }
         val windowSize = IntSize(resources.displayMetrics.widthPixels, resources.displayMetrics.heightPixels)
         val activeIndex = floatingLookupSession.lastIndex
         val activeLayer = floatingLookupSession.getOrNull(activeIndex) ?: return
-        Log.d(
-            FLOATING_LOOKUP_LOG_TAG,
+        logDebug(FLOATING_LOOKUP_LOG_TAG) {
             "renderFloatingLookupResults start activeIndex=$activeIndex sessionSize=${floatingLookupSession.size} anchor=${activeLayer.anchor?.rects?.size ?: 0} placeBelow=${activeLayer.placeBelow} preferSide=${activeLayer.preferSidePlacement}"
-        )
+        }
         val cards = floatingLookupSession.layers.mapIndexed { index, item ->
             val sizeSpec = computeFloatingLookupPopupSizeSpec(
                 windowSize = windowSize,
@@ -2278,10 +2260,9 @@ companion object {
             )
             FloatingLookupRenderItem(index, item, sizeSpec)
         }
-        Log.d(
-            FLOATING_LOOKUP_LOG_TAG,
+        logDebug(FLOATING_LOOKUP_LOG_TAG) {
             "renderFloatingLookupResults cards=${cards.size} activeIndex=$activeIndex"
-        )
+        }
         renderFloatingLookupWindows(cards)
     }
 
@@ -2441,10 +2422,9 @@ companion object {
             screenPaddingPx = layout.screenPaddingPx
         )
         if (!showEvaluation.acceptable) {
-            Log.d(
-                FLOATING_LOOKUP_LOG_TAG,
+            logDebug(FLOATING_LOOKUP_LOG_TAG) {
                 "rejectShow layer=$layerIndex pos=${hostPosition.x},${hostPosition.y} guardOverlap=${showEvaluation.metrics.guardOverlap} avoidOverlap=${showEvaluation.metrics.avoidOverlap} distance=${showEvaluation.sourceDistance} maxDistance=${showEvaluation.maxAcceptDistancePx}"
-            )
+            }
             return false
         }
         val overlapMetrics = computeFloatingLookupOverlapMetrics(
@@ -2500,14 +2480,12 @@ companion object {
                 bottom = it.maxOf { rect -> rect.bottom }
             )
         }
-        Log.d(
-            FLOATING_LOOKUP_LOG_TAG,
+        logDebug(FLOATING_LOOKUP_LOG_TAG) {
             "show layer=$layerIndex pos=${hostPosition.x},${hostPosition.y} source=${layer.sourceTerm.orEmpty()} placeBelow=${layer.placeBelow} side=${layer.preferSidePlacement} sourceOverlap=${overlapMetrics.sourceOverlap} guardOverlap=${overlapMetrics.guardOverlap} avoidOverlap=${overlapMetrics.avoidOverlap}"
-        )
-        Log.d(
-            FLOATING_LOOKUP_LOG_TAG,
+        }
+        logDebug(FLOATING_LOOKUP_LOG_TAG) {
             "rects layer=$layerIndex sourceRects=${formatFloatingRectsForLog(sourceRects)} sourceBounds=${formatFloatingRectForLog(sourceBounds)} guardBounds=${formatFloatingRectForLog(guardBounds)} popupRect=${formatFloatingRectForLog(popupRect)}"
-        )
+        }
         return true
     }
 
@@ -2685,10 +2663,9 @@ companion object {
     }
 
     private fun clearFloatingLookupHosts() {
-        Log.d(
-            FLOATING_LOOKUP_LOG_TAG,
+        logDebug(FLOATING_LOOKUP_LOG_TAG) {
             "clearFloatingLookupHosts active=${floatingLookupHostViews.size} positions=${floatingLookupCardPositions.size}"
-        )
+        }
         val wm = windowManager
         if (wm != null) {
             floatingLookupHostViews.values.forEach { host ->
@@ -2773,10 +2750,9 @@ companion object {
             val oldWidth = oldRight.coerceAtLeast(0)
             val oldHeight = oldBottom.coerceAtLeast(0)
             if (newWidth != oldWidth || newHeight != oldHeight) {
-                Log.d(
-                    FLOATING_LOOKUP_LOG_TAG,
+                logDebug(FLOATING_LOOKUP_LOG_TAG) {
                     "sizeChanged layer=$layerIndex old=${oldWidth}x$oldHeight new=${newWidth}x$newHeight"
-                )
+                }
                 scheduleFloatingLookupHostReposition(layerIndex, reason = "sizeChanged")
             }
         }
@@ -2794,7 +2770,7 @@ companion object {
         floatingLookupRepositionJobs.remove(storageKey)?.cancel()
         floatingLookupRepositionJobs[storageKey] = serviceScope.launch {
             delay(delayMs)
-            Log.d(FLOATING_LOOKUP_LOG_TAG, "repositionRequest layer=$layerIndex reason=$reason delayMs=$delayMs")
+            logDebug(FLOATING_LOOKUP_LOG_TAG) { "repositionRequest layer=$layerIndex reason=$reason delayMs=$delayMs" }
             repositionFloatingLookupHost(layerIndex)
             floatingLookupRepositionJobs.remove(storageKey)
         }
@@ -2831,10 +2807,9 @@ companion object {
             gapPx = layout.gapPx,
             screenPaddingPx = layout.screenPaddingPx
         ) ?: run {
-            Log.d(
-                FLOATING_LOOKUP_LOG_TAG,
+            logDebug(FLOATING_LOOKUP_LOG_TAG) {
                 "skipRelayout layer=$layerIndex reason=no_candidate_keep_current"
-            )
+            }
             return
         }
         val relayoutEvaluation = evaluateFloatingPlacement(
@@ -2847,17 +2822,16 @@ companion object {
             screenPaddingPx = layout.screenPaddingPx
         )
         if (!relayoutEvaluation.acceptable) {
-            Log.d(
-                FLOATING_LOOKUP_LOG_TAG,
+            logDebug(FLOATING_LOOKUP_LOG_TAG) {
                 "skipRelayout layer=$layerIndex pos=${candidate.x},${candidate.y} guardOverlap=${relayoutEvaluation.metrics.guardOverlap} avoidOverlap=${relayoutEvaluation.metrics.avoidOverlap} distance=${relayoutEvaluation.sourceDistance} maxDistance=${relayoutEvaluation.maxAcceptDistancePx}"
-            )
+            }
             return
         }
         val currentPosition = floatingLookupCardPositions[storageKey]
         if (currentPosition == candidate) return
         runCatching { wm.updateViewLayout(host, createFloatingLookupWindowLayoutParams(candidate, touchable = true)) }
         floatingLookupCardPositions[storageKey] = candidate
-        Log.d(FLOATING_LOOKUP_LOG_TAG, "relayout layer=$layerIndex pos=${candidate.x},${candidate.y}")
+        logDebug(FLOATING_LOOKUP_LOG_TAG) { "relayout layer=$layerIndex pos=${candidate.x},${candidate.y}" }
     }
 
     private fun ensureFloatingHostMeasured(host: View, width: Int, force: Boolean = false) {
@@ -3187,10 +3161,9 @@ companion object {
     }
 
     private fun hideFloatingLookup() {
-        Log.d(
-            FLOATING_LOOKUP_LOG_TAG,
+        logDebug(FLOATING_LOOKUP_LOG_TAG) {
             "hideFloatingLookup session=${floatingLookupSession.size} hosts=${floatingLookupHostViews.size} positions=${floatingLookupCardPositions.size} paused=$playbackPausedByFloatingLookup"
-        )
+        }
         lookupRequestNonce += 1L
         floatingLookupSession.clear()
         floatingLookupCardPositions.clear()
@@ -3496,7 +3469,7 @@ companion object {
             onTapOutside = {},
             onOpenLink = { this@AudiobookFloatingOverlayService.openPopupExternalLink(it) },
             onImageTap = { src ->
-                Log.d(FLOATING_LOOKUP_TAP_LOG_TAG, "floating hoshi imageTap src=$src")
+                logDebug(FLOATING_LOOKUP_TAP_LOG_TAG) { "floating hoshi imageTap src=$src" }
                 this@AudiobookFloatingOverlayService.openHoshiImagePreview(src)
             },
             onMineEntryAsync = { content, onComplete ->
@@ -3617,10 +3590,9 @@ companion object {
         ) ?: return null
         val hoshiResults = popup.first.state.results
         if (hoshiResults.isEmpty()) {
-            Log.d(
-                FLOATING_LOOKUP_TAP_LOG_TAG,
+            logDebug(FLOATING_LOOKUP_TAP_LOG_TAG) {
                 "floating hoshi recursive empty text='${selection.text.take(24)}'"
-            )
+            }
             return null
         }
         val density = resources.displayMetrics.density.coerceAtLeast(0.1f)
@@ -3672,10 +3644,9 @@ companion object {
         val density = resources.displayMetrics.density
         val outlineColor = Color.argb(0x59, 0, 0, 0)
         val outlineStrokeWidth = (1.2f * density).coerceAtLeast(1f)
-        Log.d(
-            FLOATING_SUBTITLE_RENDER_LOG_TAG,
+        logDebug(FLOATING_SUBTITLE_RENDER_LOG_TAG) {
             "applyTypography vertical=$verticalWriting color=${settings.floatingOverlaySubtitleColor.toUInt().toString(16)} size=${settings.floatingOverlaySubtitleSizeSp}"
-        )
+        }
         subtitleTextView?.apply {
             textSize = settings.floatingOverlaySubtitleSizeSp.toFloat()
             setTextColor(settings.floatingOverlaySubtitleColor)

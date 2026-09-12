@@ -5,7 +5,6 @@ import android.database.sqlite.SQLiteDatabase
 import android.net.Uri
 import android.os.Bundle
 import android.os.SystemClock
-import android.util.Log
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -498,7 +497,7 @@ private fun AudiobookSettingsScreen(onBack: () -> Unit) {
                     selected = config.bookSubtitleWritingMode,
                     onSelected = { mode ->
                         if (mode != config.bookSubtitleWritingMode) {
-                            Log.d(BOOK_UI_MODE_LOG_TAG, "settings screen writing mode changed -> $mode")
+                            logDebug(BOOK_UI_MODE_LOG_TAG) { "settings screen writing mode changed -> $mode" }
                             saveAudiobookBookSubtitleWritingMode(context, mode)
                             refreshConfig()
                         }

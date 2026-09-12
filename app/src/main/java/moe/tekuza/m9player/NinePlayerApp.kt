@@ -7,6 +7,8 @@ class NinePlayerApp : Application() {
     override fun onCreate() {
         super.onCreate()
         WebViewPreloader.warmup(this)
+        // 崩溃诊断：只在崩溃那一刻写一份堆栈 + 最后一段日志到应用私有目录（无开关、无常驻采集）
+        installCrashDiagnostics(this)
     }
 
     override fun onTrimMemory(level: Int) {

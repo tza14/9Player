@@ -35,6 +35,11 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            // release 下 logDebug 整体不执行（消息字符串也不拼）；Log.w / Log.e 始终保留
+            buildConfigField("boolean", "VERBOSE_LOGS", "false")
+        }
+        debug {
+            buildConfigField("boolean", "VERBOSE_LOGS", "true")
         }
     }
     compileOptions {
@@ -43,6 +48,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     lint {
@@ -77,7 +83,9 @@ dependencies {
     implementation("androidx.media3:media3-ui:1.3.1")
     implementation("androidx.media3:media3-transformer:1.3.1")
     implementation("androidx.media:media:1.7.0") {
-        because("PlaybackNotificationController uses MediaSession.sessionCompatToken")
+        // PlaybackNotificationController 使用 media3 MediaSession.sessionCompatToken，
+        // 其返回类型 MediaSessionCompat.Token 来自 androidx.media，media3-session 未以 api 传递。
+        because("MediaSessionCompat.Token type for MediaSession.sessionCompatToken")
     }
     implementation("com.jaredrummler:colorpicker:1.1.0")
     implementation("dev.rikka.shizuku:api:13.1.5")

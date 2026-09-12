@@ -31,14 +31,6 @@ struct Meta {
   glz::raw_json_view data;
 };
 
-struct Tag {
-  std::string_view name;
-  std::string_view category;
-  int order = 0;
-  std::string_view notes;
-  int score = 0;
-};
-
 struct ParsedFrequency {
   std::string_view reading;
   int value;
@@ -48,15 +40,12 @@ struct ParsedFrequency {
 struct ParsedPitch {
   std::string_view reading;
   std::vector<int> pitches;
-  std::vector<std::string_view> transcriptions;
 };
 
 namespace yomitan_parser {
 bool parse_index(std::string_view content, Index& out);
 bool parse_term_bank(std::string_view content, std::vector<Term>& out);
 bool parse_meta_bank(std::string_view content, std::vector<Meta>& out);
-bool parse_tag_bank(std::string_view content, std::vector<Tag>& out);
 bool parse_frequency(std::string_view content, ParsedFrequency& out);
 bool parse_pitch(std::string_view content, ParsedPitch& out);
-bool parse_ipa(std::string_view content, ParsedPitch& out);
 };

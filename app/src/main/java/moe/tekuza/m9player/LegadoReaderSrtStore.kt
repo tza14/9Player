@@ -2,7 +2,6 @@ package moe.tekuza.m9player
 
 import android.content.Context
 import android.net.Uri
-import android.util.Log
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -22,20 +21,20 @@ internal fun loadLegadoReaderSrtSnapshotOrNull(
     val sourceStamp = buildReaderSourceStamp(context, uri)
     val file = legadoReaderSrtCacheFile(context, uri)
     if (!file.isFile) {
-        Log.d(LEGADO_READER_SRT_LOG_TAG, "load miss no file uri=$uri")
+        logDebug(LEGADO_READER_SRT_LOG_TAG) { "load miss no file uri=$uri" }
         return null
     }
     val root = runCatching { JSONObject(file.readText()) }.getOrNull() ?: run {
-        Log.d(LEGADO_READER_SRT_LOG_TAG, "load failed invalid json uri=$uri")
+        logDebug(LEGADO_READER_SRT_LOG_TAG) { "load failed invalid json uri=$uri" }
         return null
     }
     if (root.optInt("version") != LEGADO_READER_SRT_VERSION) {
-        Log.d(LEGADO_READER_SRT_LOG_TAG, "load skipped version mismatch uri=$uri")
+        logDebug(LEGADO_READER_SRT_LOG_TAG) { "load skipped version mismatch uri=$uri" }
         return null
     }
     val cachedStamp = root.optString("sourceStamp")
     if (cachedStamp != sourceStamp) {
-        Log.d(LEGADO_READER_SRT_LOG_TAG, "load skipped stale cache uri=$uri")
+        logDebug(LEGADO_READER_SRT_LOG_TAG) { "load skipped stale cache uri=$uri" }
         return null
     }
     val cuesPayload = root.optJSONArray("cues") ?: JSONArray()
@@ -55,10 +54,10 @@ internal fun loadLegadoReaderSrtSnapshotOrNull(
         cue.startMs >= 0L && cue.endMs >= cue.startMs
     }
     if (cues.isEmpty()) {
-        Log.d(LEGADO_READER_SRT_LOG_TAG, "load skipped empty cues uri=$uri")
+        logDebug(LEGADO_READER_SRT_LOG_TAG) { "load skipped empty cues uri=$uri" }
         return null
     }
-    Log.d(LEGADO_READER_SRT_LOG_TAG, "load hit cues=${cues.size} uri=$uri")
+    logDebug(LEGADO_READER_SRT_LOG_TAG) { "load hit cues=${cues.size} uri=$uri" }
     return LegadoReaderSrtSnapshot(cues = cues)
 }
 
@@ -68,7 +67,7 @@ internal fun saveLegadoReaderSrtSnapshot(
     cues: List<EbookSrtCue>
 ) {
     if (cues.isEmpty()) {
-        Log.d(LEGADO_READER_SRT_LOG_TAG, "save skipped empty cues uri=$uri")
+        logDebug(LEGADO_READER_SRT_LOG_TAG) { "save skipped empty cues uri=$uri" }
         return
     }
     val file = legadoReaderSrtCacheFile(context, uri)
@@ -92,7 +91,7 @@ internal fun saveLegadoReaderSrtSnapshot(
             }
         )
     file.writeText(root.toString())
-    Log.d(LEGADO_READER_SRT_LOG_TAG, "save cues=${cues.size} uri=$uri")
+    logDebug(LEGADO_READER_SRT_LOG_TAG) { "save cues=${cues.size} uri=$uri" }
 }
 
 private fun legadoReaderSrtCacheFile(context: Context, uri: Uri): File {

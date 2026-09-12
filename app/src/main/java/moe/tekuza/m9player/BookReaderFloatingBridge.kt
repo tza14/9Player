@@ -2,7 +2,6 @@ package moe.tekuza.m9player
 
 import android.content.Context
 import android.os.SystemClock
-import android.util.Log
 
 object BookReaderFloatingBridge {
     private const val READER_PAUSED_SEEK_LOG_TAG = "ReaderPausedSeek"
@@ -316,18 +315,16 @@ object BookReaderFloatingBridge {
 
     fun seekToPosition(targetPositionMs: Long) {
         val normalized = targetPositionMs.coerceAtLeast(0L)
-        Log.d(
-            READER_PAUSED_SEEK_LOG_TAG,
+        logDebug(READER_PAUSED_SEEK_LOG_TAG) {
             "bridge seekToPosition request target=$normalized beforeSession=${BookReaderPlaybackSession.currentPositionMs()} " +
-                "beforeBridge=$playbackPositionSnapshot cue=${cueForLog(currentCue())}"
-        )
+            "beforeBridge=$playbackPositionSnapshot cue=${cueForLog(currentCue())}"
+        }
         BookReaderPlaybackSession.seekToPosition(normalized)
         notifyPlaybackPosition(normalized)
-        Log.d(
-            READER_PAUSED_SEEK_LOG_TAG,
+        logDebug(READER_PAUSED_SEEK_LOG_TAG) {
             "bridge seekToPosition notify target=$normalized afterSession=${BookReaderPlaybackSession.currentPositionMs()} " +
-                "afterBridge=$playbackPositionSnapshot cue=${cueForLog(currentCue())}"
-        )
+            "afterBridge=$playbackPositionSnapshot cue=${cueForLog(currentCue())}"
+        }
     }
 
     fun setControlCollectListener(listener: (() -> ControlCollectResult?)?) {
@@ -342,7 +339,7 @@ object BookReaderFloatingBridge {
 
     fun seekAdjacent(context: Context, step: Int) {
         val listener = synchronized(this) { adjacentSeekListener }
-        Log.d(WEARABLE_SEEK_LOG_TAG, "request step=$step path=${if (listener != null) "reader" else "fallback"}")
+        logDebug(WEARABLE_SEEK_LOG_TAG) { "request step=$step path=${if (listener != null) "reader" else "fallback"}" }
         if (listener != null) {
             listener(step)
         } else {
@@ -355,10 +352,9 @@ object BookReaderFloatingBridge {
             val target = (current + delta).coerceAtLeast(0L).let {
                 if (duration > 0L) it.coerceAtMost(duration) else it
             }
-            Log.d(
-                WEARABLE_SEEK_LOG_TAG,
+            logDebug(WEARABLE_SEEK_LOG_TAG) {
                 "fallback stepMs=$stepMillis current=$current duration=$duration target=$target"
-            )
+            }
             seekToPosition(target)
         }
     }
@@ -392,18 +388,16 @@ object BookReaderFloatingBridge {
 
     fun replayCurrentCue() {
         val cueStartMs = currentCue()?.startMs ?: return
-        Log.d(
-            READER_PAUSED_SEEK_LOG_TAG,
+        logDebug(READER_PAUSED_SEEK_LOG_TAG) {
             "bridge replayCurrentCue target=$cueStartMs beforeSession=${BookReaderPlaybackSession.currentPositionMs()} " +
-                "beforeBridge=$playbackPositionSnapshot cue=${cueForLog(currentCue())}"
-        )
+            "beforeBridge=$playbackPositionSnapshot cue=${cueForLog(currentCue())}"
+        }
         BookReaderPlaybackSession.seekToPosition(cueStartMs)
         notifyPlaybackPosition(cueStartMs)
-        Log.d(
-            READER_PAUSED_SEEK_LOG_TAG,
+        logDebug(READER_PAUSED_SEEK_LOG_TAG) {
             "bridge replayCurrentCue notify target=$cueStartMs afterSession=${BookReaderPlaybackSession.currentPositionMs()} " +
-                "afterBridge=$playbackPositionSnapshot cue=${cueForLog(currentCue())}"
-        )
+            "afterBridge=$playbackPositionSnapshot cue=${cueForLog(currentCue())}"
+        }
     }
 
     private fun cueForLog(cue: CueSnapshot?): String {

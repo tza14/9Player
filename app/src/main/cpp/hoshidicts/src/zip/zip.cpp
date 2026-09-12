@@ -30,6 +30,20 @@ bool is_safe_zip_entry_name(std::string_view name) {
   }
   return true;
 }
+
+bool decompress_entry_into(const uint8_t* file_data, const ZipEntry& e, char* out) {
+  const uint8_t* src = file_data + e.data_offset;
+  if (e.compression_method == 0) {
+    std::memcpy(out, src, e.uncompressed_size);
+    return true;
+  }
+  if (e.compression_method == 8) {
+    thread_local auto* d = libdeflate_alloc_decompressor();
+    return libdeflate_deflate_decompress(d, src, e.compressed_size, out, e.uncompressed_size, nullptr) ==
+           LIBDEFLATE_SUCCESS;
+  }
+  return false;
+}
 }
 
 Zip::~Zip() {
@@ -65,17 +79,7 @@ std::string Zip::read(int index, size_t max_bytes) const {
 
   std::string result;
   result.resize(e.uncompressed_size);
-  const auto* src = file.data + e.data_offset;
-
-  if (e.compression_method == 0) {
-    std::memcpy(result.data(), src, e.uncompressed_size);
-  } else if (e.compression_method == 8) {
-    thread_local auto* d = libdeflate_alloc_decompressor();
-    if (libdeflate_deflate_decompress(d, src, e.compressed_size, result.data(), e.uncompressed_size, nullptr) !=
-        LIBDEFLATE_SUCCESS) {
-      return "";
-    }
-  } else {
+  if (!decompress_entry_into(file.data, e, result.data())) {
     return "";
   }
   return result;
@@ -93,16 +97,7 @@ std::optional<Zip::MediaResult> Zip::read_media(int index) const {
     return out;
   }
 
-  const auto* src = file.data + e.data_offset;
-  if (e.compression_method == 0) {
-    std::memcpy(out.blob.data(), src, e.uncompressed_size);
-  } else if (e.compression_method == 8) {
-    thread_local auto* d = libdeflate_alloc_decompressor();
-    if (libdeflate_deflate_decompress(d, src, e.compressed_size, out.blob.data(), e.uncompressed_size, nullptr) !=
-        LIBDEFLATE_SUCCESS) {
-      return std::nullopt;
-    }
-  } else {
+  if (!decompress_entry_into(file.data, e, out.blob.data())) {
     return std::nullopt;
   }
   return out;

@@ -103,21 +103,26 @@ internal class TextChapterLayout(
             val sentenceStarts = chapter.sentenceStarts
             var blockStart = segmentStart
             while (blockStart < segmentEnd) {
-                // 句子块：以 cue 句子起点切块——一个句子块（可能多行）整体放入页面，
-                // 放不下则整块推到下一页；句子块内部正常断行（行可断在句子中间）。
-                val blockEnd = if (sentenceStarts.isNotEmpty()) {
+                // 「句子不跨页」开启时才切句子块：以 cue 句子起点切块，一个句子块（可能多行）
+                // 整体放入页面，放不下则整块推到下一页；句子块内部正常断行。
+                // 关闭时 sentenceStarts 为空，块退化为整段 —— 此时不能再做"整块入页"判断，
+                // 否则长段会把整页切掉、在页底部留下成片空白；应回到贪婪填满（行排满才翻页）。
+                val usesSentenceBlocks = sentenceStarts.isNotEmpty()
+                val blockEnd = if (usesSentenceBlocks) {
                     sentenceStarts.filter { it > blockStart && it < segmentEnd }.minOrNull() ?: segmentEnd
                 } else {
                     segmentEnd
                 }
-                // 预测量块高度（按当前行宽逐行模拟）
-                val blockLineCount = measureTextLines(text, blockStart, blockEnd)
-                if (currentLines.isNotEmpty() && y + blockLineCount * lineHeight > currentPageHeight()) {
-                    pageLineGroups += currentLines
-                    pageStarts += pageStart
-                    pageStart = blockStart
-                    currentLines = mutableListOf()
-                    y = 0f
+                if (usesSentenceBlocks) {
+                    // 预测量块高度（按当前行宽逐行模拟）
+                    val blockLineCount = measureTextLines(text, blockStart, blockEnd)
+                    if (currentLines.isNotEmpty() && y + blockLineCount * lineHeight > currentPageHeight()) {
+                        pageLineGroups += currentLines
+                        pageStarts += pageStart
+                        pageStart = blockStart
+                        currentLines = mutableListOf()
+                        y = 0f
+                    }
                 }
                 var lineStart = blockStart
                 while (lineStart < blockEnd) {
@@ -208,7 +213,7 @@ internal class TextChapterLayout(
                         segmentEnd = markerIndex
                     )
                 }
-                val (imageWidth, imageHeight) = imageSize(chapter, markerIndex)
+                val (imageWidth, imageHeight) = imageSize(chapter, markerIndex, currentPageHeight())
                 if (currentLines.isNotEmpty() && y + imageHeight > currentPageHeight()) {
                     pageLineGroups += currentLines
                     pageStarts += pageStart
@@ -424,7 +429,7 @@ internal class TextChapterLayout(
         return count
     }
 
-    private fun justifyPageBottom(lines: MutableList<TextLine>, availableHeight: Float = visibleHeight.toFloat()) {
+    private fun justifyPageBottom(lines: MutableList<TextLine>, availableHeight: Float) {
         if (lines.size <= 1) return
         val lastBottom = lines.last().lineBottom
         val extra = availableHeight - lastBottom
@@ -563,27 +568,25 @@ internal class TextChapterLayout(
     }
 
     /**
-     * 独立段落图片的显示尺寸：按原图比例计算，只缩小、不放大、不做高度钳制
-     * （与参考实现 legado 的 setTypeImage 行为一致）。返回 (width, height)。
+     * 独立段落图片的显示尺寸：按原图比例缩放到铺满可用区域（允许放大，见
+     * [fitReaderStandaloneImageSize]）。返回 (width, height)。
+     * [availableHeight] 为当前页可用高度（首页需扣除章节标题预留）。
      */
-    private fun imageSize(chapter: TextChapter, chapterPosition: Int): Pair<Float, Float> {
+    private fun imageSize(
+        chapter: TextChapter,
+        chapterPosition: Int,
+        availableHeight: Float
+    ): Pair<Float, Float> {
         val image = chapter.images[chapterPosition] ?: return lineHeight * 4f to visibleWidth.toFloat()
         val bounds = image.readBytes()?.let(::decodeBitmapBounds)
         val sourceWidth = bounds?.width?.toFloat()?.takeIf { it > 0f } ?: return lineHeight * 4f to visibleWidth.toFloat()
         val sourceHeight = bounds?.height?.toFloat()?.takeIf { it > 0f } ?: return lineHeight * 4f to visibleWidth.toFloat()
-        var width = sourceWidth
-        var height = sourceHeight
-        val maxWidth = visibleWidth.toFloat()
-        val maxHeight = visibleHeight.toFloat()
-        if (width > maxWidth) {
-            height = height * maxWidth / width
-            width = maxWidth
-        }
-        if (height > maxHeight) {
-            width = width * maxHeight / height
-            height = maxHeight
-        }
-        return width to height
+        return fitReaderStandaloneImageSize(
+            sourceWidth = sourceWidth,
+            sourceHeight = sourceHeight,
+            maxWidth = visibleWidth.toFloat(),
+            maxHeight = availableHeight
+        )
     }
 
     /**

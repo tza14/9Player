@@ -2,6 +2,7 @@ package moe.tekuza.m9player
 
 import android.app.DatePickerDialog
 import android.app.Dialog
+import android.content.Context
 import android.content.Intent
 import android.content.res.ColorStateList
 import android.content.pm.ActivityInfo
@@ -26,6 +27,7 @@ import android.text.Editable
 import android.text.InputType
 import android.text.TextWatcher
 import android.view.WindowManager
+import android.view.inputmethod.InputMethodManager
 import android.widget.FrameLayout
 import android.widget.ArrayAdapter
 import android.widget.CheckBox
@@ -64,6 +66,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.time.LocalDate
@@ -105,11 +108,24 @@ private val LEGADO_READER_DEFAULT_PARAGRAPHS = listOf(
 )
 private const val DEFAULT_IMAGE_PAUSE_SECONDS = 0
 private const val MAX_IMAGE_PAUSE_SECONDS = 300
+/** 跨章后补判图片停点的窗口：只有刚进入触发句这么长时间内才补暂停 */
+private const val IMAGE_STOP_CATCH_UP_WINDOW_MS = 2_500L
+
+/** SRT 里标注章节题图位置的标记前缀 */
+private const val SECTION_MARKER_PREFIX = "＊"
+
+/** 比较章节标记与章节标题时忽略的装饰字符（破折号等） */
+private val SECTION_TITLE_DECORATIONS: Set<Char> = setOf(
+    '─', '━', '―', '─', '—', '–', '‐', '-', '＊', '*', '　', ' '
+)
 private const val DEFAULT_AUDIO_CUE_REPEAT_FIXED_PAUSE_SECONDS = 2
 private const val MAX_AUDIO_CUE_REPEAT_FIXED_PAUSE_SECONDS = 30
 private const val MAX_AUDIO_CUE_REPEAT_COUNT = 20
 private const val AUDIO_CUE_LOOP_RESUME_STALL_CHECK_DELAY_MS = 400L
 private const val AUDIO_CUE_LOOP_RESUME_STALL_CHECK_WINDOW_MS = 500L
+
+/** 「sync skip」这类每 tick 都会走到的日志最多每 5 秒输出一条（见 syncToAudioPositionAt）。 */
+private const val SYNC_SKIP_LOG_INTERVAL_MS = 5_000L
 
 private enum class AudioCueLoopPauseAction {
     SWITCH_CUE,
@@ -256,6 +272,8 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
     private val chapterPageCache: MutableMap<ReaderChapterPageCacheKey, List<TextPage>> = linkedMapOf()
     private var pendingAudioRestorePositionMs: Long = 0L
     private var pendingAudioRestoreDurationMs: Long = 0L
+    /** 最近一次已知的整轨时长：裁剪窗口（逐句重复/页尾整页裁剪）期间 player.duration 只是窗口长度 */
+    private var lastKnownFullAudioDurationMs: Long = -1L
     private var pendingPlayerOpenAudioReveal: Boolean = false
     private var lastSavedPlaybackPositionMs: Long = Long.MIN_VALUE
     private val sharedPlaybackStateListener = object : BookReaderFloatingBridge.PlaybackStateListener {
@@ -410,6 +428,8 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
     private var verticalControlDirectionReversed: Boolean = false
     private var verticalProgressDirectionReversed: Boolean = false
     private var lastImageStopKey: String? = null
+    private var lastSyncSkipLogAtMs: Long = 0L
+    private var syncSkipLogCount: Int = 0
     private var imagePauseResumeJob: Job? = null
     private var imagePausePageIndex: Int? = null
     private var currentChapterImageStops: List<ReaderChapterImageStop> = emptyList()
@@ -526,7 +546,7 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
                 hideCatalogPanel()
                 return true
             }
-            ::searchMenu.isInitialized && searchMenu.visibility == View.VISIBLE -> {
+            isSearchMenuVisible() -> {
                 searchQuery = null
                 searchHits = emptyList()
                 searchHitIndex = -1
@@ -575,27 +595,25 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         ReaderPlaybackScreenVisibility.markHidden(this)
         floatingOverlayStartJob?.cancel()
         if (isChangingConfigurations || suppressFloatingOverlayOnStop) {
-            Log.d(
-                FLOATING_OVERLAY_EXIT_LOG_TAG,
+            logDebug(FLOATING_OVERLAY_EXIT_LOG_TAG) {
                 "Legado onStop skipped changing=$isChangingConfigurations " +
-                    "suppress=$suppressFloatingOverlayOnStop"
-            )
+                "suppress=$suppressFloatingOverlayOnStop"
+            }
             return
         }
         val settings = loadAudiobookSettingsConfig(this)
         val overlayEnabled = settings.floatingOverlayEnabled || settings.floatingOverlaySubtitleEnabled
         publishReaderPlaybackBridgeSnapshot(notifyState = true)
         val playing = BookReaderFloatingBridge.isPlaying()
-        Log.d(
-            FLOATING_OVERLAY_EXIT_LOG_TAG,
+        logDebug(FLOATING_OVERLAY_EXIT_LOG_TAG) {
             "Legado onStop overlayEnabled=$overlayEnabled " +
-                "showOnReaderExit=${settings.floatingOverlayShowOnReaderExit} playing=$playing"
-        )
+            "showOnReaderExit=${settings.floatingOverlayShowOnReaderExit} playing=$playing"
+        }
         if (!overlayEnabled || !playing) {
             return
         }
         if (settings.floatingOverlayShowOnReaderExit) {
-            Log.d(FLOATING_OVERLAY_EXIT_LOG_TAG, "Legado starting overlay service immediately")
+            logDebug(FLOATING_OVERLAY_EXIT_LOG_TAG) { "Legado starting overlay service immediately" }
             startAudiobookFloatingOverlayService(this)
             return
         }
@@ -609,15 +627,14 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
             val shouldShowAfterReaderExit =
                 (refreshed.floatingOverlayShowOnReaderExit || !appForeground) && !readerOrPlayerVisible
             val stillPlaying = BookReaderFloatingBridge.isPlaying()
-            Log.d(
-                FLOATING_OVERLAY_EXIT_LOG_TAG,
+            logDebug(FLOATING_OVERLAY_EXIT_LOG_TAG) {
                 "Legado delayed overlayEnabled=$refreshedOverlayEnabled appForeground=$appForeground " +
-                    "showOnReaderExit=${refreshed.floatingOverlayShowOnReaderExit} " +
-                    "readerOrPlayerVisible=$readerOrPlayerVisible shouldShow=$shouldShowAfterReaderExit " +
-                    "playing=$stillPlaying"
-            )
+                "showOnReaderExit=${refreshed.floatingOverlayShowOnReaderExit} " +
+                "readerOrPlayerVisible=$readerOrPlayerVisible shouldShow=$shouldShowAfterReaderExit " +
+                "playing=$stillPlaying"
+            }
             if (refreshedOverlayEnabled && shouldShowAfterReaderExit && stillPlaying) {
-                Log.d(FLOATING_OVERLAY_EXIT_LOG_TAG, "Legado starting overlay service")
+                logDebug(FLOATING_OVERLAY_EXIT_LOG_TAG) { "Legado starting overlay service" }
                 startAudiobookFloatingOverlayService(this@LegadoReaderActivity)
             }
         }
@@ -787,6 +804,8 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
             when {
                 searchPanel.visibility == View.VISIBLE -> hideSearchPanel()
                 catalogPanel.visibility == View.VISIBLE -> hideCatalogPanel()
+                // 搜寻菜单自己吃掉点击：与 legado 的点遮罩一致，收起搜寻菜单（仍在搜寻模式内）
+                isSearchMenuVisible() -> hideSearchMenu()
                 audioControlPanel.visibility == View.VISIBLE -> {
                     audioControlPanel.visibility = View.GONE
                     updateSystemBarSurfaces()
@@ -795,6 +814,7 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
                     moreSettingsPanel.visibility = View.GONE
                     updateSystemBarSurfaces()
                 }
+                isSearchModeActive() -> showSearchMenu()
                 else -> {
                     toggleReadMenuVisibility()
                 }
@@ -865,6 +885,8 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
                         moreSettingsPanel.visibility = View.GONE
                         updateSystemBarSurfaces()
                     }
+                    // 与 legado 一致：搜寻模式下点屏幕回到搜寻菜单，而不是阅读主菜单
+                    isSearchModeActive() -> showSearchMenu()
                     else -> toggleReadMenuVisibility()
                 }
             }
@@ -1362,6 +1384,16 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
             searchInputView.setTextColor(textColor)
             searchInputView.setHintTextColor(withAlpha(textColor, 0.55f))
         }
+        // 搜寻菜单同样跟随主题（原先布局里是硬编码浅色，夜间模式下会刺眼）
+        if (::searchMenu.isInitialized) {
+            searchMenu.findViewById<View>(R.id.search_info_bar)?.setBackgroundColor(menuBgColor)
+            searchMenu.findViewById<View>(R.id.search_bottom_bar)?.setBackgroundColor(menuBgColor)
+            listOf(R.id.search_prev_float, R.id.search_next_float).forEach { id ->
+                searchMenu.findViewById<TextView>(id)?.backgroundTintList =
+                    ColorStateList.valueOf(menuBgColor)
+            }
+            tintMenuContent(searchMenu, textColor)
+        }
         updateFabStyle(floatingSearchButton, textColor, menuBgColor)
         updateFabStyle(floatingReplaceButton, textColor, menuBgColor)
         updateFabStyle(floatingPlaybackBarButton, textColor, menuBgColor)
@@ -1452,7 +1484,9 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         if (readMenu.visibility != targetVisibility) {
             readMenu.visibility = targetVisibility
         }
-        if (visible) updateChapterTitleSurfaces()
+        if (visible) {
+            updateChapterTitleSurfaces()
+        }
         if (updateSystemBars) updateSystemBarSurfaces()
     }
 
@@ -1495,7 +1529,13 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
 
     private fun tintMenuContent(view: View, textColor: Int) {
         when (view) {
-            is TextView -> view.setTextColor(textColor)
+            is TextView -> {
+                view.setTextColor(textColor)
+                // drawableTop 之类随文字排布的图标不吃 textColor，需要单独上色（搜寻菜单用到）
+                if (view.compoundDrawables.any { it != null }) {
+                    view.compoundDrawableTintList = ColorStateList.valueOf(textColor)
+                }
+            }
             is ImageView -> view.setColorFilter(textColor)
         }
         if (view is ViewGroup) {
@@ -2602,7 +2642,7 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
 
     private fun returnToSharedPlayer(): Boolean {
         val targetAudioUri = audioUri ?: return false
-        if (audioCueLoopClipActive) {
+        if (activeAudioClipRangeMs() != null) {
             disableAudioCueLoop(updateUi = false)
         }
         persistReaderSettingsWithCurrentAnchor("returnToPlayer")
@@ -2614,7 +2654,7 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
 
     private fun returnToHome() {
         val targetAudioUri = audioUri
-        if (audioCueLoopClipActive) {
+        if (activeAudioClipRangeMs() != null) {
             disableAudioCueLoop(updateUi = false)
         }
         val currentPlayer = player
@@ -2622,10 +2662,9 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         val currentDurationMs = currentAudioDurationMs() ?: pendingAudioRestoreDurationMs.coerceAtLeast(0L)
         persistAudioPlaybackSnapshot()
         persistReaderSettingsWithCurrentAnchor("returnToHome")
-        Log.d(
-            LEGADO_AUDIO_PROGRESS_LOG_TAG,
+        logDebug(LEGADO_AUDIO_PROGRESS_LOG_TAG) {
             "returnHome positionMs=$currentPositionMs durationMs=$currentDurationMs audioUri=${targetAudioUri?.toString()?.take(80)}"
-        )
+        }
         startActivity(
             Intent(this, MainActivity::class.java).apply {
                 addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
@@ -2865,6 +2904,40 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
 
     private fun hideSearchMenu() {
         if (::searchMenu.isInitialized) searchMenu.hideMenu()
+        updatePlaybackBarVisibility()
+    }
+
+    /**
+     * 是否处于「搜寻模式」：出过搜索结果、直到按退出为止（与 legado 的 isShowingSearchResult 对应）。
+     * 这期间点屏幕应该回到**搜寻菜单**（结果/主菜单/退出），而不是阅读主菜单。
+     */
+    private fun isSearchModeActive(): Boolean {
+        return searchHits.isNotEmpty() || isSearchMenuVisible()
+    }
+
+    private fun showSearchMenu() {
+        if (!::searchMenu.isInitialized) return
+        setReadMenuVisible(false, updateSystemBars = false)
+        updateSearchInfo()
+        searchMenu.showMenu()
+        // 播放栏是本 diff 后加入的视图、绘制在搜寻菜单之上；搜寻期间把它藏起来，
+        // 免得压住底下「结果 / 主菜单 / 退出」那排按钮（关闭搜寻菜单后原样恢复）。
+        updatePlaybackBarVisibility()
+    }
+
+    private fun isSearchMenuVisible(): Boolean {
+        return ::searchMenu.isInitialized && searchMenu.visibility == View.VISIBLE
+    }
+
+    /** 播放栏是否该显示：钉住且没有别的下方菜单需要这块地方。 */
+    private fun updatePlaybackBarVisibility() {
+        if (!::playbackBar.isInitialized) return
+        val target = if (playbackBarPinnedVisible && !isSearchMenuVisible()) {
+            View.VISIBLE
+        } else {
+            View.GONE
+        }
+        if (playbackBar.visibility != target) playbackBar.visibility = target
     }
 
     private fun showSearchPanel(initialQuery: String = searchQuery.orEmpty()) {
@@ -2884,13 +2957,25 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
 
     private fun hideSearchPanel() {
         if (::searchPanel.isInitialized) {
+            hideSoftKeyboard()
             searchPanel.visibility = View.GONE
             updateSystemBarSurfaces()
         }
     }
 
+    /** 收起输入法：搜寻提交后、点结果跳转后、关闭搜寻面板时都要收。 */
+    private fun hideSoftKeyboard() {
+        val inputMethodManager =
+            getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager ?: return
+        val token = (currentFocus
+            ?: searchPanel.takeIf { ::searchPanel.isInitialized })?.windowToken ?: return
+        inputMethodManager.hideSoftInputFromWindow(token, 0)
+    }
+
     private fun performSearchFromPanel() {
         val query = searchInputView.text.toString().trim()
+        // 提交后收起输入法，让搜索结果列表直接可见（结果多时不必再手动收键盘）
+        hideSoftKeyboard()
         startSearch(query)
     }
 
@@ -2954,7 +3039,7 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         updateSearchInfo()
         hideSearchPanel()
         if (showSearchMenu) {
-            searchMenu.showMenu()
+            showSearchMenu()
         }
     }
 
@@ -4959,19 +5044,17 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         paginationJob?.cancel()
         paginationJob = lifecycleScope.launch {
             val startupStartMs = SystemClock.elapsedRealtime()
-            Log.d(
-                LEGADO_READER_LOG_TAG,
+            logDebug(LEGADO_READER_LOG_TAG) {
                 "readerStartup start forceReload=$forceDocumentReload anchor=$anchor " +
-                    "page=${pageWidth}x$pageHeight book=${book?.uri}"
-            )
+                "page=${pageWidth}x$pageHeight book=${book?.uri}"
+            }
             runCatching {
                 val loadDocumentStartMs = SystemClock.elapsedRealtime()
                 val loaded = loadOrReuseDocument(book, forceDocumentReload)
-                Log.d(
-                    LEGADO_READER_LOG_TAG,
+                logDebug(LEGADO_READER_LOG_TAG) {
                     "readerStartup loadDocument=${SystemClock.elapsedRealtime() - loadDocumentStartMs}ms " +
-                        "chapters=${loaded.chapters.size}"
-                )
+                    "chapters=${loaded.chapters.size}"
+                }
                 document = loaded
                 updateSimulatedUnlockedChapterCount(loaded)
                 val safeAnchor = anchor?.let { clampAnchorToUnlocked(it, loaded) }
@@ -4988,11 +5071,10 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
                     chapterIndex = previewChapterIndex,
                     contentWidthPx = pageWidth.coerceAtLeast(1)
                 )
-                Log.d(
-                    LEGADO_READER_LOG_TAG,
+                logDebug(LEGADO_READER_LOG_TAG) {
                     "readerStartup chapterPaginate=${SystemClock.elapsedRealtime() - previewStartMs}ms " +
-                        "chapter=$previewChapterIndex pages=${previewPages.size}"
-                )
+                    "chapter=$previewChapterIndex pages=${previewPages.size}"
+                }
                 pages = previewPages
                 pageIndex = safeAnchor
                     ?.let { pageIndexForAnchor(previewPages, it) }
@@ -5004,20 +5086,19 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
                 if (safeAnchor != null && pendingAudioSyncLoadAnchor == safeAnchor) {
                     pendingAudioSyncLoadAnchor = null
                 }
-                Log.d(
-                    LEGADO_READER_LOG_TAG,
+                logDebug(LEGADO_READER_LOG_TAG) {
                     "readerStartup firstRender=${SystemClock.elapsedRealtime() - firstRenderStartMs}ms " +
-                        "firstText=${SystemClock.elapsedRealtime() - startupStartMs}ms pageIndex=$pageIndex"
-                )
+                    "firstText=${SystemClock.elapsedRealtime() - startupStartMs}ms pageIndex=$pageIndex"
+                }
                 if (cueMatchesByCueIndex.isNotEmpty()) {
-                    Log.d(LEGADO_READER_LOG_TAG, "readerStartup syncToAudioPosition begin")
+                    logDebug(LEGADO_READER_LOG_TAG) { "readerStartup syncToAudioPosition begin" }
                     syncToAudioPosition(
                         allowPageJump = isAudioPlaybackRequested() || pendingPlayerOpenAudioReveal,
                         forceReveal = pendingPlayerOpenAudioReveal
                     )
                     pendingPlayerOpenAudioReveal = false
                 } else {
-                    Log.d(LEGADO_READER_LOG_TAG, "readerStartup loadSrtSync begin")
+                    logDebug(LEGADO_READER_LOG_TAG) { "readerStartup loadSrtSync begin" }
                     loadSrtSyncIfNeeded { success ->
                         if (success) {
                             revealPendingPlayerOpenAudioPositionIfNeeded()
@@ -5030,10 +5111,9 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
                     contentWidthPx = pageWidth.coerceAtLeast(1)
                 )
             }.onSuccess {
-                Log.d(
-                    LEGADO_READER_LOG_TAG,
+                logDebug(LEGADO_READER_LOG_TAG) {
                     "readerStartup done=${SystemClock.elapsedRealtime() - startupStartMs}ms pageIndex=$pageIndex"
-                )
+                }
             }.onFailure { error ->
                 if (error is CancellationException) return@onFailure
                 Log.w(
@@ -5065,10 +5145,9 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
             loadedDocumentBookUriText == bookUriText &&
             loadedDocumentCharsetName == preferredCharsetName
         if (canReuseDocument) {
-            Log.d(
-                LEGADO_READER_LOG_TAG,
+            logDebug(LEGADO_READER_LOG_TAG) {
                 "readerStartup loadOrReuseDocument reused bookUri=$bookUriText charset=$preferredCharsetName"
-            )
+            }
             return document!!
         }
         val startMs = SystemClock.elapsedRealtime()
@@ -5092,19 +5171,17 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
                 )
             )
         }
-        Log.d(
-            LEGADO_READER_LOG_TAG,
+        logDebug(LEGADO_READER_LOG_TAG) {
             "readerStartup loadOrReuseDocument parsed=${SystemClock.elapsedRealtime() - startMs}ms " +
-                "format=${loaded.format} chapters=${loaded.chapters.size}"
-        )
+            "format=${loaded.format} chapters=${loaded.chapters.size}"
+        }
         clearChapterPageCache()
         loadedDocumentBookUriText = bookUriText
         loadedDocumentCharsetName = preferredCharsetName
         if (forceDocumentReload) {
-            Log.d(
-                LEGADO_READER_LOG_TAG,
+            logDebug(LEGADO_READER_LOG_TAG) {
                 "loadOrReuseDocument force reload resets in-memory match cache bookUri=$bookUriText charset=$preferredCharsetName"
-            )
+            }
             cueMatchesByCueIndex = emptyMap()
             matchData = null
             audioCueIndex = -1
@@ -5126,24 +5203,30 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
     }
 
     private fun buildTextPageFactory(paragraphIndentOverride: String? = null): TextPageFactory {
-        // 句尾处理（最后一句显示不全时放到下一页）：按章节收集 cue 匹配的句子边界
+        // 句尾处理（最后一句显示不全时放到下一页）：按章节收集 cue 匹配的句子边界。
+        // 匹配是按"可读字符"做的，句首的「『（ 与句尾的」』）。！？ 不在其中，
+        // 所以要按正文把范围扩到引号/括号之外，否则"句子不跨页"会把开引号单独留在上一页。
         val sentenceBoundariesByChapter: Map<Int, Pair<Set<Int>, Set<Int>>> = if (
             sentenceNoCrossPage
         ) {
+            val chapters = document?.chapters.orEmpty()
             cueMatchesByCueIndex.values
                 .groupBy { it.chapterIndex }
-                .mapValues { (_, matches) ->
-                    matches.map { it.rawStart }.toSet() to matches.map { it.rawEnd }.toSet()
+                .mapValues { (chapterIndex, matches) ->
+                    val chapterText = chapters.getOrNull(chapterIndex)?.text.orEmpty()
+                    val ranges = matches.map { match ->
+                        expandCueRangeToSentence(chapterText, match.rawStart, match.rawEnd)
+                    }
+                    ranges.map { it.first }.toSet() to ranges.map { it.second }.toSet()
                 }
         } else {
             emptyMap()
         }
-        Log.d(
-            M9_SENTENCE_TAIL_LOG_TAG,
+        logDebug(M9_SENTENCE_TAIL_LOG_TAG) {
             "buildTextPageFactory tailHandling=$sentenceNoCrossPage " +
-                "boundaryChapters=${sentenceBoundariesByChapter.size} cues=${cueMatchesByCueIndex.size} " +
-                "chapterBoundarySizes=${sentenceBoundariesByChapter.mapValues { it.value.first.size }}"
-        )
+            "boundaryChapters=${sentenceBoundariesByChapter.size} cues=${cueMatchesByCueIndex.size} " +
+            "chapterBoundarySizes=${sentenceBoundariesByChapter.mapValues { it.value.first.size }}"
+        }
         return TextPageFactory(
             config = M9ReadBookConfig(
                 textSizePx = readView.textSizePx,
@@ -5224,10 +5307,9 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
             firstPageReservePx = firstPageReservePx
         )
         chapterPageCache[cacheKey]?.let { cachedPages ->
-            Log.d(
-                LEGADO_READER_LOG_TAG,
+            logDebug(LEGADO_READER_LOG_TAG) {
                 "chapterPageCache hit chapter=$safeChapterIndex pages=${cachedPages.size}"
-            )
+            }
             return cachedPages
         }
         val factory = buildTextPageFactory()
@@ -5277,11 +5359,10 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
                             contentWidthPx = contentWidthPx
                         )
                     }.onSuccess { loadedPages ->
-                        Log.d(
-                            LEGADO_READER_LOG_TAG,
+                        logDebug(LEGADO_READER_LOG_TAG) {
                             "chapterPreload done=${SystemClock.elapsedRealtime() - startMs}ms " +
-                                "chapter=$chapterIndex pages=${loadedPages.size}"
-                        )
+                            "chapter=$chapterIndex pages=${loadedPages.size}"
+                        }
                     }.onFailure { error ->
                         if (error is CancellationException) return@launch
                         Log.w(LEGADO_READER_LOG_TAG, "chapterPreload failed chapter=$chapterIndex", error)
@@ -5423,14 +5504,23 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
     }
 
     private fun currentAudioDurationMs(): Long? {
-        if (audioCueLoopClipActive) {
-            return audioCueLoopClipEndMs
-        }
         val currentPlayer = player
+        val clip = activeAudioClipRangeMs()
+        if (clip != null) {
+            // 裁剪窗口下 player.duration 只是窗口长度（不是整轨时长），
+            // 用缓存/存档里的整轨时长，避免进度条与进度存档把「本页窗口」当成整本书
+            lastKnownFullAudioDurationMs.takeIf { it > 0L }?.let { return it }
+            pendingAudioRestoreDurationMs.takeIf { it > 0L }?.let { return it }
+            // 实在不知道整轨时长时退回窗口终点（旧行为：至少不会把当前位置截断掉）
+            return clip.second
+        }
         val durationMs = when {
             currentPlayer != null && currentPlayer.duration > 0L -> currentPlayer.duration
             pendingAudioRestoreDurationMs > 0L -> pendingAudioRestoreDurationMs
             else -> 0L
+        }
+        if (durationMs > 0L) {
+            lastKnownFullAudioDurationMs = durationMs
         }
         return durationMs.takeIf { it > 0L }
     }
@@ -5928,12 +6018,11 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         return page2
     }
 
-    /** 该句是否当前页的最后一句（页内 rawStart 最大的匹配） */
-    private fun isLastMatchOnPage(match: EbookCueMatch, page: TextPage): Boolean {
-        val lastMatch = cueMatchesByCueIndex.values
+    /** 本页最后一句的匹配（页内 rawStart 最大的匹配） */
+    private fun lastMatchOnPage(page: TextPage): EbookCueMatch? {
+        return cueMatchesByCueIndex.values
             .filter { it.chapterIndex == page.chapterIndex && it.intersects(page) }
-            .maxByOrNull { it.rawStart } ?: return false
-        return lastMatch.cueIndex == match.cueIndex
+            .maxByOrNull { it.rawStart }
     }
 
     private fun hideCrossPageCueWindow() {
@@ -6054,12 +6143,10 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
                 forward = delta > 0,
                 persistAnchor = true
             )
-            // 读完此页暂停：翻页后自动继续播放
-            Log.d(
-                M9_SENTENCE_TAIL_LOG_TAG,
+            // 读完此页暂停：翻页后自动继续播放（resume 里会在暂停态重新武装新页的整页裁剪）
+            logDebug(M9_SENTENCE_TAIL_LOG_TAG) {
                 "pageEndPause: page moved delta=$delta pageIndex=$next pending=$pageEndPausePending"
-            )
-            releasePageEndPauseClipIfActive()
+            }
             resumePlaybackFromPageEndPause()
             return        }
         val currentChapter = pages.getOrNull(pageIndex)?.chapterIndex ?: return
@@ -6122,13 +6209,12 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         val sameSharedAudio = BookReaderPlaybackSession.currentAudioUri() == uri.toString()
         val keepLiveSession = sameSharedAudio && BookReaderPlaybackSession.isPlaybackRequested()
         val forceSeekOnSameAudio = sameSharedAudio && !keepLiveSession && restoredPositionMs > 0L
-        Log.d(
-            LEGADO_AUDIO_PROGRESS_LOG_TAG,
+        logDebug(LEGADO_AUDIO_PROGRESS_LOG_TAG) {
             "restore source=${if (pendingAudioRestorePositionMs > 0L) "pending" else "shared"} " +
-                "positionMs=$restoredPositionMs durationMs=${restoredSnapshot?.durationMs ?: pendingAudioRestoreDurationMs} " +
-                "updatedAt=${restoredSnapshot?.updatedAtMs ?: 0L} sameAudio=$sameSharedAudio " +
-                "keepLive=$keepLiveSession forceSeek=$forceSeekOnSameAudio"
-        )
+            "positionMs=$restoredPositionMs durationMs=${restoredSnapshot?.durationMs ?: pendingAudioRestoreDurationMs} " +
+            "updatedAt=${restoredSnapshot?.updatedAtMs ?: 0L} sameAudio=$sameSharedAudio " +
+            "keepLive=$keepLiveSession forceSeek=$forceSeekOnSameAudio"
+        }
         audioCueIndex = -1
         disableAudioCueLoop(updateUi = false)
         player = BookReaderPlaybackSession.prepareAudioIfNeeded(
@@ -6204,7 +6290,7 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
 
     private fun togglePlaybackBar() {
         playbackBarPinnedVisible = !playbackBarPinnedVisible
-        playbackBar.visibility = if (playbackBarPinnedVisible) View.VISIBLE else View.GONE
+        updatePlaybackBarVisibility()
         if (playbackBarPinnedVisible) {
             setReadMenuVisible(false, updateSystemBars = false)
             playbackBar.post {
@@ -6235,9 +6321,11 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
             currentPlayer.pause()
         } else {
             clearImagePauseResume()
-            // 读完此页暂停：页尾暂停后点播放按钮 = 继续播放（解除 clip 从下一句继续）
+            // 读完此页暂停：页尾暂停后点播放按钮 = 和翻页同一逻辑（翻到下一页再继续）。
+            // 若只把 pending 清掉直接续播，画面仍停在旧页，而"刚播完的那一句"仍被认作
+            // "本页最后一句" → 兜底检查会在刚恢复的下一拍又把它停住（表现为"点了播放又停"）。
             if (pageEndPausePending) {
-                resumePlaybackFromPageEndPause()
+                movePage(1)
                 return
             }
             val pendingAction = audioCueLoopPauseAction
@@ -6264,6 +6352,8 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
                 if (audioCueLoopClipActive && currentPlayer.playbackState == Player.STATE_ENDED) {
                     currentPlayer.seekTo(0L)
                 }
+                // 暂停态按播放：先把本页整页裁剪武装好（此刻无声，重载不会重读），页尾才能精确停
+                refreshPageEndPauseArming(currentAudioPositionMs() ?: currentPlayer.currentPosition)
                 currentPlayer.play()
             }
         }
@@ -6390,12 +6480,15 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
             if (!pauseAfterPageEnd) {
                 releasePageEndPauseClipIfActive()
             }
-            Log.d(
-                M9_SENTENCE_TAIL_LOG_TAG,
+            logDebug(M9_SENTENCE_TAIL_LOG_TAG) {
                 "pageEndPause: repeat button toggle -> $pauseAfterPageEnd"
-            )
+            }
             persistReaderSettings(updateAnchor = false)
             updateAudioCueLoopLabel()
+            if (pauseAfterPageEnd) {
+                // 重新开启：暂停态就地把本页整页裁剪武装好（播放中则退化为句尾监视兜底）
+                currentAudioPositionMs()?.let { refreshPageEndPauseArming(it) }
+            }
             return
         }
         val currentPlayer = player
@@ -6433,22 +6526,24 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
 
     private fun disableAudioCueLoop(updateUi: Boolean) {
         cancelAudioCueRepeatDelay()
-        val wasClipActive = audioCueLoopClipActive
+        // 页尾整页裁剪也用同一个播放窗口：这里一并解除，避免残留一段被裁短的音频
+        val wasClipActive = audioCueLoopClipActive || pageEndPauseRange != null
         val absoluteMs = currentAudioPositionMs() ?: audioCueLoopClipBaseMs
         audioCueLoopEnabled = false
         audioCueLoopWindow = null
         audioCueLoopClipActive = false
         pageEndPauseClipActive = false
+        pageEndPauseRange = null
+        cancelPageEndPauseWatch()
         audioCueLoopPauseAction = null
         audioCueLoopPauseCueIndex = -1
         audioCueRepeatRemainingCount = initialAudioCueRepeatRemainingCount()
         if (wasClipActive) {
             val currentPlayer = player
             if (currentPlayer != null && audioUri != null) {
-                Log.d(
-                    AUDIO_CUE_LOOP_CLIP_LOG_TAG,
+                logDebug(AUDIO_CUE_LOOP_CLIP_LOG_TAG) {
                     "clipDisabled restoreAt=$absoluteMs playWhenReady=${currentPlayer.playWhenReady}"
-                )
+                }
                 currentPlayer.setMediaItem(currentAudioMediaItem(), absoluteMs)
                 currentPlayer.prepare()
                 BookReaderFloatingBridge.notifyPlaybackPosition(absoluteMs)
@@ -6507,13 +6602,12 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         } else {
             (sourceAbsoluteMs.coerceIn(startMs, endMs) - startMs).coerceAtLeast(0L)
         }
-        Log.d(
-            AUDIO_CUE_LOOP_CLIP_LOG_TAG,
+        logDebug(AUDIO_CUE_LOOP_CLIP_LOG_TAG) {
             "clipApply cueIndex=$audioCueIndex startMs=$startMs endMs=$endMs " +
-                "positionInClip=$positionInClip startFromCueStart=$startFromCueStart " +
-                "nextCueStart=${cues.getOrNull(audioCueIndex + 1)?.startMs} " +
-                "playWhenReady=${currentPlayer.playWhenReady}"
-        )
+            "positionInClip=$positionInClip startFromCueStart=$startFromCueStart " +
+            "nextCueStart=${cues.getOrNull(audioCueIndex + 1)?.startMs} " +
+            "playWhenReady=${currentPlayer.playWhenReady}"
+        }
         currentPlayer.setMediaItem(currentAudioMediaItem(), positionInClip)
         currentPlayer.prepare()
         if (startFromCueStart && forcePlay) {
@@ -6528,12 +6622,13 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
     private fun currentAudioMediaItem(): MediaItem {
         val uri = audioUri ?: return MediaItem.EMPTY
         val builder = MediaItem.Builder().setUri(uri)
-        return if (audioCueLoopClipActive) {
+        val clip = activeAudioClipRangeMs()
+        return if (clip != null) {
             builder
                 .setClippingConfiguration(
                     MediaItem.ClippingConfiguration.Builder()
-                        .setStartPositionMs(audioCueLoopClipBaseMs)
-                        .setEndPositionMs(audioCueLoopClipEndMs)
+                        .setStartPositionMs(clip.first)
+                        .setEndPositionMs(clip.second)
                         .build()
                 )
                 .build()
@@ -6543,11 +6638,13 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
     }
 
     private fun restoreAudioCueLoopMediaIfNeeded() {
-        if (!audioCueLoopClipActive) return
+        if (!audioCueLoopClipActive && pageEndPauseRange == null) return
         val currentPlayer = player ?: return
         val absoluteMs = currentAudioPositionMs() ?: audioCueLoopClipBaseMs
         audioCueLoopClipActive = false
         pageEndPauseClipActive = false
+        pageEndPauseRange = null
+        cancelPageEndPauseWatch()
         currentPlayer.setMediaItem(currentAudioMediaItem(), absoluteMs)
         currentPlayer.prepare()
         BookReaderFloatingBridge.notifyPlaybackPosition(absoluteMs)
@@ -6785,8 +6882,11 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
                 pauseAfterPageEnd = pauseAfterPageEndValue
                 // 设置里开启后按钮接管为「读完此页暂停」开关；设置里关闭则恢复为正常重复按钮
                 repeatButtonControlsPageEndPause = pauseAfterPageEndValue
-                if (!pauseAfterPageEndValue) {
-                    // 设置里关闭功能：解除正在进行的句尾 clip，恢复完整音频
+                val relayoutNeeded = tailHandlingEnabled != oldTailHandling ||
+                    pauseAfterPageEndValue != oldPauseAfterPageEnd
+                if (!pauseAfterPageEndValue || relayoutNeeded) {
+                    // 关闭功能 / 重新分页会换掉页面与句尾：先解除武装并恢复完整音频，
+                    // 重新分页后由 sync 按新的页面重新武装
                     releasePageEndPauseClipIfActive()
                 }
                 audioCueRepeatRemainingCount = initialAudioCueRepeatRemainingCount()
@@ -6795,14 +6895,10 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
                     disableAudioCueLoop(updateUi = true)
                 }
                 // 句尾处理（排版规则）与读完此页暂停需要重新分页才能生效
-                if (
-                    tailHandlingEnabled != oldTailHandling ||
-                    pauseAfterPageEndValue != oldPauseAfterPageEnd
-                ) {
-                    Log.d(
-                        M9_SENTENCE_TAIL_LOG_TAG,
+                if (relayoutNeeded) {
+                    logDebug(M9_SENTENCE_TAIL_LOG_TAG) {
                         "settings changed tail=$tailHandlingEnabled pause=$pauseAfterPageEndValue -> relayout"
-                    )
+                    }
                     requestBookRelayout(immediate = true)
                 }
                 persistReaderSettings(updateAnchor = false)
@@ -6892,7 +6988,7 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         }
         val pauseMs = audioCueRepeatPauseMs(startMs, endMs, currentPlayer)
         if (pauseMs <= 0L) {
-            Log.d(AUDIO_CUE_LOOP_CLIP_LOG_TAG, "clipRestart immediate cueIndex=$audioCueIndex startMs=$startMs endMs=$endMs")
+            logDebug(AUDIO_CUE_LOOP_CLIP_LOG_TAG) { "clipRestart immediate cueIndex=$audioCueIndex startMs=$startMs endMs=$endMs" }
             currentPlayer.seekTo(0L)
             currentPlayer.play()
             return
@@ -6900,11 +6996,10 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         launchAudioCueRepeatPause(pauseMs) {
             if (!audioCueLoopEnabled || !audioCueLoopClipActive) return@launchAudioCueRepeatPause
             val livePlayer = player ?: return@launchAudioCueRepeatPause
-            Log.d(
-                AUDIO_CUE_LOOP_CLIP_LOG_TAG,
+            logDebug(AUDIO_CUE_LOOP_CLIP_LOG_TAG) {
                 "clipRestart afterPause cueIndex=$audioCueIndex startMs=$audioCueLoopClipBaseMs " +
-                    "endMs=$audioCueLoopClipEndMs pauseMs=$pauseMs"
-            )
+                "endMs=$audioCueLoopClipEndMs pauseMs=$pauseMs"
+            }
             livePlayer.seekTo(0L)
             livePlayer.play()
             BookReaderFloatingBridge.notifyPlaybackPosition(audioCueLoopClipBaseMs)
@@ -6937,7 +7032,7 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
 
     private fun switchAudioCueLoopToCue(cueIndex: Int) {
         val cue = cues.getOrNull(cueIndex) ?: return
-        Log.d(AUDIO_CUE_LOOP_CLIP_LOG_TAG, "clipSwitch cueIndex=$cueIndex startMs=${cue.startMs} endMs=${cue.endMs}")
+        logDebug(AUDIO_CUE_LOOP_CLIP_LOG_TAG) { "clipSwitch cueIndex=$cueIndex startMs=${cue.startMs} endMs=${cue.endMs}" }
         applyAudioCueLoopWindow(cueIndex, cue, startFromCueStart = true)
     }
 
@@ -6945,11 +7040,10 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         val wasClipActive = audioCueLoopClipActive
         disableAudioCueLoop(updateUi = true)
         val currentPlayer = player ?: return
-        Log.d(
-            AUDIO_CUE_LOOP_CLIP_LOG_TAG,
+        logDebug(AUDIO_CUE_LOOP_CLIP_LOG_TAG) {
             "clipEnd loopStop absoluteMs=$absoluteMs wasClipActive=$wasClipActive " +
-                "nextCueStart=${cues.getOrNull(audioCueIndex + 1)?.startMs}"
-        )
+            "nextCueStart=${cues.getOrNull(audioCueIndex + 1)?.startMs}"
+        }
         if (!wasClipActive) {
             currentPlayer.seekTo(absoluteMs.coerceAtLeast(0L))
         }
@@ -6975,26 +7069,25 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
     private fun seekToAdjacentCue(delta: Int) {
         val currentPlayer = player
         if (currentPlayer == null) {
-            Log.d(READER_PAUSED_SEEK_LOG_TAG, "legado adjacentCue ignored reason=no-player delta=$delta")
+            logDebug(READER_PAUSED_SEEK_LOG_TAG) { "legado adjacentCue ignored reason=no-player delta=$delta" }
             Toast.makeText(this, R.string.reader_no_audio, Toast.LENGTH_SHORT).show()
             return
         }
         if (cues.isEmpty()) {
             if (srtUri == null) {
-                Log.d(READER_PAUSED_SEEK_LOG_TAG, "legado adjacentCue ignored reason=no-srt delta=$delta")
+                logDebug(READER_PAUSED_SEEK_LOG_TAG) { "legado adjacentCue ignored reason=no-srt delta=$delta" }
                 Toast.makeText(this, R.string.reader_no_srt, Toast.LENGTH_SHORT).show()
                 return
             }
-            Log.d(READER_PAUSED_SEEK_LOG_TAG, "legado adjacentCue loading-srt delta=$delta")
+            logDebug(READER_PAUSED_SEEK_LOG_TAG) { "legado adjacentCue loading-srt delta=$delta" }
             loadSrtSyncIfNeeded(force = true) { success ->
                 if (success) {
-                    Log.d(READER_PAUSED_SEEK_LOG_TAG, "legado adjacentCue retry-after-srt delta=$delta cues=${cues.size}")
+                    logDebug(READER_PAUSED_SEEK_LOG_TAG) { "legado adjacentCue retry-after-srt delta=$delta cues=${cues.size}" }
                     seekToAdjacentCue(delta)
                 } else {
-                    Log.d(
-                        READER_PAUSED_SEEK_LOG_TAG,
+                    logDebug(READER_PAUSED_SEEK_LOG_TAG) {
                         "legado adjacentCue srt-load-failed delta=$delta error=${srtLoadError.orEmpty().take(80)}"
-                    )
+                    }
                     Toast.makeText(
                         this,
                         srtLoadError ?: readerString(R.string.reader_srt_parse_failed),
@@ -7020,14 +7113,13 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         clearPageEndPauseForSeek()
         val targetMs = cues[targetIndex].startMs.coerceAtLeast(0L)
         val targetCue = cues.getOrNull(targetIndex)
-        Log.d(
-            READER_PAUSED_SEEK_LOG_TAG,
+        logDebug(READER_PAUSED_SEEK_LOG_TAG) {
             "legado cueJump request targetIndex=$targetIndex targetMs=$targetMs " +
-                "audioCue=$audioCueIndex audioCueMs=${cues.getOrNull(audioCueIndex)?.startMs} " +
-                "playing=${currentPlayer.isPlaying} " +
-                "playWhenReady=${currentPlayer.playWhenReady} state=${currentPlayer.playbackState} " +
-                "duration=${currentAudioDurationMs()} cue=${targetCue?.text.orEmpty().replace('\n', ' ').take(48)}"
-        )
+            "audioCue=$audioCueIndex audioCueMs=${cues.getOrNull(audioCueIndex)?.startMs} " +
+            "playing=${currentPlayer.isPlaying} " +
+            "playWhenReady=${currentPlayer.playWhenReady} state=${currentPlayer.playbackState} " +
+            "duration=${currentAudioDurationMs()} cue=${targetCue?.text.orEmpty().replace('\n', ' ').take(48)}"
+        }
         val resumeAfterRepeatPause = audioCueLoopPausedForRepeat
         val shouldResume = resumeAfterRepeatPause || currentPlayer.playWhenReady
         if (audioCueLoopEnabled) {
@@ -7039,11 +7131,10 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         } else {
             seekAudioPlayerTo(currentPlayer, targetMs)
         }
-        Log.d(
-            READER_PAUSED_SEEK_LOG_TAG,
+        logDebug(READER_PAUSED_SEEK_LOG_TAG) {
             "legado cueJump after-seek-immediate targetMs=$targetMs actual=${currentPlayer.currentPosition} " +
-                "playing=${currentPlayer.isPlaying} playWhenReady=${currentPlayer.playWhenReady} state=${currentPlayer.playbackState}"
-        )
+            "playing=${currentPlayer.isPlaying} playWhenReady=${currentPlayer.playWhenReady} state=${currentPlayer.playbackState}"
+        }
         if (resumeAfterRepeatPause) {
             currentPlayer.play()
         }
@@ -7058,12 +7149,11 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         )
         window.decorView.postDelayed(
             {
-                Log.d(
-                    READER_PAUSED_SEEK_LOG_TAG,
+                logDebug(READER_PAUSED_SEEK_LOG_TAG) {
                     "legado cueJump verify targetMs=$targetMs actual=${currentPlayer.currentPosition} " +
-                        "delta=${playerPositionMs(currentPlayer) - targetMs} playing=${currentPlayer.isPlaying} " +
-                        "playWhenReady=${currentPlayer.playWhenReady} state=${currentPlayer.playbackState}"
-                )
+                    "delta=${playerPositionMs(currentPlayer) - targetMs} playing=${currentPlayer.isPlaying} " +
+                    "playWhenReady=${currentPlayer.playWhenReady} state=${currentPlayer.playbackState}"
+                }
             },
             350L
         )
@@ -7096,16 +7186,27 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
 
     private fun playerPositionMs(currentPlayer: ExoPlayer): Long {
         val raw = currentPlayer.currentPosition.coerceAtLeast(0L)
-        return if (audioCueLoopClipActive) audioCueLoopClipBaseMs + raw else raw
+        val clip = activeAudioClipRangeMs()
+        return if (clip != null) clip.first + raw else raw
     }
 
     private fun audioPlayerPositionFor(absoluteMs: Long): Long {
-        return if (audioCueLoopClipActive) {
-            (absoluteMs - audioCueLoopClipBaseMs)
-                .coerceIn(0L, (audioCueLoopClipEndMs - audioCueLoopClipBaseMs).coerceAtLeast(1L))
+        val clip = activeAudioClipRangeMs()
+        return if (clip != null) {
+            (absoluteMs - clip.first)
+                .coerceIn(0L, (clip.second - clip.first).coerceAtLeast(1L))
         } else {
             absoluteMs.coerceAtLeast(0L)
         }
+    }
+
+    /**
+     * 当前生效的播放窗口（绝对 ms 起止）：逐句重复与页尾整页裁剪互斥，不会同时存在。
+     * @return null 表示播放器播放的是完整音频
+     */
+    private fun activeAudioClipRangeMs(): Pair<Long, Long>? = when {
+        audioCueLoopClipActive -> audioCueLoopClipBaseMs to audioCueLoopClipEndMs
+        else -> pageEndPauseRange
     }
 
     private fun seekAudioPlayerTo(currentPlayer: ExoPlayer, absoluteMs: Long) {
@@ -7141,25 +7242,138 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
             .filter { it.chapterIndex == chapterIndex }
             .sortedWith(compareBy<EbookCueMatch> { it.rawStart }.thenBy { it.cueIndex })
             .toList()
+        val seenTailCues = mutableSetOf<Int>()
         currentChapterImageStops = chapter.images.keys
             .sorted()
             .mapNotNull { imagePosition ->
+                // 章节题图页（目录指向的纯图片页，如「とあるスイーツの店にて」那张）
+                // 是章节的排版开头，不是插图：不建停点，听读路过时不停。
+                if (chapter.images[imagePosition]?.origin == EbookImageOrigin.SECTION_TITLE_PAGE) {
+                    logDebug(M9_SENTENCE_TAIL_LOG_TAG) {
+                        "imageStop: skip section title page image chapter=$chapterIndex " +
+                        "position=$imagePosition"
+                    }
+                    return@mapNotNull null
+                }
                 val imagePageIndex = findPageIndexForChapterPosition(chapterIndex, imagePosition)
                 if (imagePageIndex < 0) return@mapNotNull null
                 val nextCue = chapterMatches.firstOrNull { it.rawStart >= imagePosition }
                 val previousCue = chapterMatches.lastOrNull { it.rawEnd <= imagePosition }
+                val tailCueIndex = previousCue?.cueIndex?.takeIf { nextCue == null }
+                // 同一句之后挂着多张图（卷末插图）时只留第一张的停点：
+                // tail 触发不要求 cue 变化，否则恢复播放后会立刻被下一张连着停。
+                if (tailCueIndex != null && !seenTailCues.add(tailCueIndex)) {
+                    return@mapNotNull null
+                }
                 ReaderChapterImageStop(
                     target = ReaderImageStopTarget(chapterIndex, imagePosition),
                     pageIndex = imagePageIndex,
                     triggerCueIndex = nextCue?.cueIndex,
-                    tailCueIndex = previousCue?.cueIndex?.takeIf { nextCue == null },
-                    tailCueEndMs = previousCue?.cueIndex
+                    tailCueIndex = tailCueIndex,
+                    tailCueEndMs = tailCueIndex
                         ?.let { cues.getOrNull(it)?.endMs }
-                        ?.takeIf { nextCue == null }
                 )
             }
         currentChapterImageStopChapterIndex = chapterIndex
         syncCurrentChapterImageStopIndex()
+        maybePauseForImageStopAfterChapterLoad()
+    }
+
+    /** 这一章里某个位置的图的来源（见 [EbookImageOrigin]） */
+    private fun imageOriginAt(chapterIndex: Int, imagePosition: Int): EbookImageOrigin? {
+        return document?.chapters?.getOrNull(chapterIndex)?.images?.get(imagePosition)?.origin
+    }
+
+    /**
+     * SRT 章节标记 cue（以 ＊ 开头、文本是章节标题的那条，如「＊──市井にて──」）：
+     * 翻到该章节的第一页 —— 章节题图（把标题做成图片的那种）就能像翻页一样被看到。
+     * 只翻页、不改播放状态，所以不会在这里暂停。
+     *
+     * @return true 表示已翻到目标章节的第一页（或已发起该章节的加载）
+     */
+    private fun showSectionTitlePageForCue(cueIndex: Int): Boolean {
+        val cue = cues.getOrNull(cueIndex) ?: return false
+        val markerTitle = sectionMarkerTitle(cue.text) ?: return false
+        val chapters = document?.chapters ?: return false
+        val currentChapter = pages.getOrNull(pageIndex)?.chapterIndex ?: 0
+        // 同名小节（如多处的「断章一」）取当前章之后最近的一个
+        val candidates = chapters.indices.filter { index ->
+            normalizeSectionTitle(chapters[index].title) == markerTitle
+        }
+        val targetChapter = candidates.firstOrNull { it >= currentChapter }
+            ?: candidates.lastOrNull()
+            ?: return false
+        val targetPage = pages.indexOfFirst { it.chapterIndex == targetChapter }
+        if (targetPage < 0) {
+            val anchor = ReaderPageAnchor(targetChapter, 0)
+            if (pendingAudioSyncLoadAnchor == anchor) return false
+            pendingAudioSyncLoadAnchor = anchor
+            logDebug(M9_SENTENCE_TAIL_LOG_TAG) {
+                "sectionMarker: load chapter=$targetChapter title=$markerTitle"
+            }
+            loadDisplayedBook(anchor = anchor, forceDocumentReload = false)
+            return true
+        }
+        if (targetPage == pageIndex) return false
+        val forward = targetPage > pageIndex
+        logDebug(M9_SENTENCE_TAIL_LOG_TAG) {
+            "sectionMarker: show page=$targetPage chapter=$targetChapter title=$markerTitle"
+        }
+        pageIndex = targetPage
+        activeCueIndex = -1
+        renderCurrentPage(forward = forward, persistAnchor = true)
+        return true
+    }
+
+    /** ＊ 开头的 SRT 章节标记 cue → 归一化后的章节标题；不是章节标记则返回 null */
+    private fun sectionMarkerTitle(cueText: String): String? {
+        val trimmed = cueText.trim()
+        if (!trimmed.startsWith(SECTION_MARKER_PREFIX)) return null
+        return normalizeSectionTitle(trimmed.removePrefix(SECTION_MARKER_PREFIX))
+            .takeIf { it.isNotBlank() }
+    }
+
+    /**
+     * 比较章节标记与章节标题时用：去掉两边装饰用的破折号与空白，
+     * 让「＊──市井にて──」能和章节标题「──市井にて──」对上。
+     */
+    private fun normalizeSectionTitle(value: String): String {
+        return value.filterNot { it.isWhitespace() || it in SECTION_TITLE_DECORATIONS }
+    }
+
+    /**
+     * 跨章图片停点的补判。
+     *
+     * 图片停点的触发点是「图片之后的第一句」。跨章时这个触发点发生在**新章分页完成之前**：
+     * 那一次 sync 里 pages 还是上一章、currentChapterImageStops 也是上一章的，等新章页就绪
+     * 时已经不再有 cue 变化 → 靠 maybePausePlaybackForImage 永远漏掉。
+     * 「独立成页的插图」被并进章节正文开头后就是这种情况，表现为"遇图暂停没生效"。
+     *
+     * 所以新章停点表建好后补判一次：播放位置刚进入触发句 → 立刻按图片停点暂停。
+     * 只对**插图页来源**的图补判（见 [EbookImageOrigin]）：
+     * - 章节内部的图保持改之前的行为（章首的题图本来就不触发、中段/章末照旧触发）；
+     * - 章节题图页（目录指向的纯图片页）不建停点，也就不会被补判截停。
+     * 并且只在触发句开头的一小段窗口内补判，避免 seek 到章中间时被很早以前的插图截停。
+     */
+    private fun maybePauseForImageStopAfterChapterLoad() {
+        if (!stopPlaybackOnImage || !isAudioPlaying()) return
+        val cueIndex = audioCueIndex
+        if (cueIndex < 0) return
+        val currentPosition = currentAudioPositionMs() ?: return
+        val stop = currentChapterImageStops.firstOrNull { candidate ->
+            candidate.target.key != lastImageStopKey &&
+                candidate.target.chapterIndex == currentChapterImageStopChapterIndex &&
+                candidate.triggerCueIndex == cueIndex &&
+                imageOriginAt(candidate.target.chapterIndex, candidate.target.imagePosition) ==
+                EbookImageOrigin.ILLUSTRATION_PAGE
+        } ?: return
+        val triggerCue = cues.getOrNull(cueIndex) ?: return
+        if (currentPosition > triggerCue.startMs + IMAGE_STOP_CATCH_UP_WINDOW_MS) return
+        logDebug(READER_PAUSED_SEEK_LOG_TAG) {
+            "legado pauseAtImage(catchUp) chapter=${stop.target.chapterIndex} " +
+            "imagePosition=${stop.target.imagePosition} cue=$cueIndex actual=${player?.currentPosition}"
+        }
+        pausePlaybackAtImage(stop.target)
     }
 
     private fun syncCurrentChapterImageStopIndex() {
@@ -7196,12 +7410,22 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
     private var pageEndPausePending = false
 
     /**
-     * 读完此页暂停的播放窗口 clip 是否激活：
-     * 播放进入本页最后一句时把播放 clip 到该句句尾（复用逐句重复的 MediaItem 裁剪），
-     * 播放到句尾精确停止（STATE_ENDED → handlePageEndPauseClipEnded），
-     * 避免等 cue 切换到下一页才检测导致的滞后暂停。
+     * 读完此页暂停是否已武装（整页裁剪 或 句尾监视兜底）。
+     *
+     * 主路径是「整页裁剪」：在暂停态把播放窗口（MediaItem ClippingConfiguration）裁到
+     * [本页起点, 本页最后一句句尾]，播到页尾由解码层直接截断（STATE_ENDED → 暂停）。
+     * 这样既不重读最后一句（裁剪不在播放中途应用，不会有音频重载），
+     * 也不会读进下一页第一句（数据层截断，不受音频 HAL/蓝牙缓冲影响）。
+     *
+     * 句尾监视（pageEndPauseWatchJob）只在无法于暂停态武装时兜底：
+     * 播放中途 seek、阅读中途开启功能等场景，退化为轮询位置后暂停。
      */
     private var pageEndPauseClipActive = false
+    private var pageEndPauseWatchJob: Job? = null
+    private var pageEndPauseWatchEndMs: Long = -1L
+
+    /** 播放器的 MediaItem 当前被裁剪到的本页窗口（绝对 ms 起止）；null 表示播的是完整音频 */
+    private var pageEndPauseRange: Pair<Long, Long>? = null
 
     /**
      * 重复按钮是否处于「读完此页暂停」操控模式：
@@ -7209,71 +7433,186 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
      */
     private var repeatButtonControlsPageEndPause = false
 
-    /** 读完此页暂停：进入本页最后一句时，把播放窗口 clip 到该句句尾（复用逐句重复的裁剪机制） */
-    private fun applyPageEndPauseClip(match: EbookCueMatch) {
-        if (pageEndPauseClipActive) return
-        val cue = cues.getOrNull(match.cueIndex) ?: return
+    /**
+     * 读完此页暂停：保证「本页」已武装。
+     *
+     * 暂停态 → 整页裁剪（无声重载，播到页尾由解码层精确截断，零泄漏零重读）；
+     * 播放态 → 不能重载（会把当前句从头重读），退化为句尾监视兜底。
+     */
+    private fun refreshPageEndPauseArming(absoluteMs: Long) {
+        if (!pauseAfterPageEnd || pageEndPausePending) return
+        val page = pageForAudioPosition(absoluteMs)
+        val range = page?.let { pageEndPauseRangeForPage(it, absoluteMs) }
+        if (page == null || range == null) {
+            releasePageEndPauseClipIfActive()
+            return
+        }
+        val appliedRange = pageEndPauseRange
+        if (
+            appliedRange != null &&
+            appliedRange.second == range.second &&
+            absoluteMs >= appliedRange.first &&
+            absoluteMs < range.second
+        ) {
+            // 已按本页窗口武装：等 STATE_ENDED 精确暂停，无需重复处理
+            return
+        }
         val currentPlayer = player ?: return
-        val startMs = cue.startMs.coerceAtLeast(0L)
-        val endMs = cue.endMs.coerceAtLeast(startMs + 1L)
-        val sourceAbsoluteMs = currentAudioPositionMs() ?: startMs
+        val isSilent = !currentPlayer.isPlaying && !currentPlayer.playWhenReady
+        if (isSilent) {
+            applyPageEndPauseRangeClip(range.first, range.second, absoluteMs)
+            return
+        }
+        // 播放中：恢复完整音频（当前位置起继续，不重读已播部分）+ 句尾监视兜底
+        restoreFullAudioFromPageEndPauseClip(absoluteMs)
         pageEndPauseClipActive = true
-        audioCueLoopClipBaseMs = startMs
-        audioCueLoopClipEndMs = endMs
-        audioCueLoopClipActive = true
-        currentPlayer.repeatMode = Player.REPEAT_MODE_OFF
-        val positionInClip = (sourceAbsoluteMs.coerceIn(startMs, endMs) - startMs).coerceAtLeast(0L)
-        Log.d(
-            M9_SENTENCE_TAIL_LOG_TAG,
-            "pageEndPause: clip apply cue=${match.cueIndex} startMs=$startMs endMs=$endMs " +
-                "positionInClip=$positionInClip"
-        )
+        startPageEndPauseWatch(range.second)
+    }
+
+    /**
+     * 播放位置所在的页：按「即将要播的那一句」判断。
+     *
+     * 位置正好落在句尾（= 页尾暂停点）时必须算作下一句：`findEbookCueIndexAtTime` 在
+     * 句间有间隙（cue.endMs < 下一句 startMs）时会返回刚播完的那一句，那样算出来的
+     * 「页尾」就是已经播过的位置，会武装不上。所以这里向前跳过已播完的 cue。
+     *
+     * 也不能用 pageIndex：用户可能一边播一边翻页（显示页被翻走），
+     * 这时按显示页武装会把「页尾」算到别的页上。
+     */
+    private fun pageForAudioPosition(positionMs: Long): TextPage? {
+        var index = findEbookCueIndexAtTime(cues, positionMs).coerceAtLeast(0)
+        while (index < cues.size && cues[index].endMs <= positionMs) {
+            index += 1
+        }
+        val match = cueMatchesByCueIndex[index]
+        // 下一句没匹配到文本时退回显示页（与 sync 一致：此时页面本来就不跟音频走）
+        return match?.let { findTextPageForMatch(it) }?.let { pages.getOrNull(it) }
+            ?: pages.getOrNull(pageIndex)
+    }
+
+    /**
+     * 本页播放窗口（绝对 ms）：起点 = 当前播放位置，终点 = 本页最后一句句尾。
+     * 起点取当前位置（而不是页首），保证武装动作不改变正在读的内容。
+     * @return null 表示本页没有可用的句尾（不武装）
+     */
+    private fun pageEndPauseRangeForPage(page: TextPage, fromMs: Long): Pair<Long, Long>? {
+        val lastMatch = lastMatchOnPage(page) ?: return null
+        val cue = cues.getOrNull(lastMatch.cueIndex) ?: return null
+        val startMs = fromMs.coerceAtLeast(0L)
+        val endMs = cue.endMs.coerceAtLeast(0L)
+        if (endMs <= startMs + 1L) return null
+        return startMs to endMs
+    }
+
+    /**
+     * 暂停态武装整页裁剪：把 MediaItem 换成 [startMs, endMs] 窗口。
+     * 调用方必须保证此刻没有声音在播（翻页续播 / 暂停中按播放 / 开启功能）——
+     * 播放中重载会让当前句从头重读，所以播放中要改走句尾监视。
+     */
+    private fun applyPageEndPauseRangeClip(startMs: Long, endMs: Long, resumeAbsoluteMs: Long) {
+        val currentPlayer = player ?: return
+        if (audioUri == null) return
+        val positionInClip = (resumeAbsoluteMs - startMs).coerceAtLeast(0L)
+        pageEndPauseRange = startMs to endMs
+        pageEndPauseClipActive = true
+        cancelPageEndPauseWatch()
+        val page = pages.getOrNull(pageIndex)
+        logDebug(M9_SENTENCE_TAIL_LOG_TAG) {
+            "pageEndPause: arm page clip startMs=$startMs endMs=$endMs positionInClip=$positionInClip " +
+            "page=${page?.chapterIndex}:${page?.charStart} playWhenReady=${currentPlayer.playWhenReady}"
+        }
         currentPlayer.setMediaItem(currentAudioMediaItem(), positionInClip)
         currentPlayer.prepare()
-        BookReaderFloatingBridge.notifyPlaybackPosition(startMs + positionInClip)
+        BookReaderFloatingBridge.notifyPlaybackPosition(resumeAbsoluteMs)
         publishReaderPlaybackBridgeSnapshot(notifyState = true)
     }
 
-    /** 读完此页暂停的 clip 播放到句尾（STATE_ENDED）：精确暂停，停在当前页 */
+    /** 解除整页裁剪：恢复完整音频（从 absoluteMs 继续）。未裁剪时只清状态，不重载播放器 */
+    private fun restoreFullAudioFromPageEndPauseClip(absoluteMs: Long) {
+        val wasClipped = pageEndPauseRange != null
+        pageEndPauseRange = null
+        if (!wasClipped) return
+        val currentPlayer = player ?: return
+        if (audioUri == null) return
+        val safeMs = absoluteMs.coerceAtLeast(0L)
+        logDebug(M9_SENTENCE_TAIL_LOG_TAG) { "pageEndPause: restore full audio at=$safeMs" }
+        currentPlayer.setMediaItem(currentAudioMediaItem(), safeMs)
+        currentPlayer.prepare()
+        BookReaderFloatingBridge.notifyPlaybackPosition(safeMs)
+    }
+
+    /** 句尾监视（兜底）：轮询播放位置，到达句尾（endMs）时暂停；会有下游缓冲的一点泄漏 */
+    private fun startPageEndPauseWatch(endMs: Long) {
+        val safeEndMs = endMs.coerceAtLeast(1L)
+        if (pageEndPauseWatchEndMs == safeEndMs && pageEndPauseWatchJob?.isActive == true) return
+        pageEndPauseWatchJob?.cancel()
+        pageEndPauseWatchJob = null
+        pageEndPauseWatchEndMs = safeEndMs
+        pageEndPauseWatchJob = lifecycleScope.launch {
+            while (isActive) {
+                if (!pauseAfterPageEnd || pageEndPausePending) return@launch
+                if (pageEndPauseWatchEndMs != safeEndMs) return@launch
+                val currentPlayer = player ?: return@launch
+                if (!currentPlayer.isPlaying) {
+                    delay(150)
+                    continue
+                }
+                val positionMs = currentAudioPositionMs() ?: return@launch
+                if (positionMs >= safeEndMs) {
+                    logDebug(M9_SENTENCE_TAIL_LOG_TAG) {
+                        "pageEndPause: WATCH reached tail endMs=$safeEndMs pos=$positionMs -> paused (page end)"
+                    }
+                    handlePageEndPauseClipEnded()
+                    return@launch
+                }
+                val remaining = safeEndMs - positionMs
+                // 远离句尾时低频轮询，接近句尾时高频（~40ms），尽量减小暂停点误差
+                delay(if (remaining > 800L) 120L else 40L)
+            }
+        }
+    }
+
+    private fun cancelPageEndPauseWatch() {
+        pageEndPauseWatchJob?.cancel()
+        pageEndPauseWatchJob = null
+        pageEndPauseWatchEndMs = -1L
+    }
+
+    /**
+     * 读完此页暂停到点：停在当前页。
+     * 整页裁剪路径由播放器 STATE_ENDED 触发（解码层精确停在句尾），
+     * 句尾监视路径由轮询触发（可能已读进下一句一点点）。
+     */
     private fun handlePageEndPauseClipEnded() {
         pageEndPausePending = true
-        Log.d(
-            M9_SENTENCE_TAIL_LOG_TAG,
-            "pageEndPause: CLIP ENDED lastCue=$audioCueIndex -> paused (page end)"
-        )
+        logDebug(M9_SENTENCE_TAIL_LOG_TAG) {
+            "pageEndPause: PAUSE lastCue=$audioCueIndex clipApplied=${pageEndPauseRange != null} " +
+            "pos=${currentAudioPositionMs()} -> paused (page end)"
+        }
         player?.pause()
         BookReaderFloatingBridge.notifyPlaybackState(false)
         updateAudioControlLabels()
         persistAudioPlaybackSnapshot()
     }
 
-    /**
-     * 解除读完此页暂停的 clip（翻页/恢复播放/设置关闭时），恢复完整音频从当前位置继续。
-     * pageEndPauseClipActive 从 apply 到 release 全程保持 true（包括 clip 播完后），
-     * 保证 release 时 MediaItem 仍是带句尾裁剪的旧项，需要重新 setMediaItem 恢复完整音频。
-     */
+    /** 解除读完此页暂停（设置关闭/seek/关闭重复等）：停止监视并恢复完整音频 */
     private fun releasePageEndPauseClipIfActive() {
-        if (!pageEndPauseClipActive) return
-        val currentPlayer = player ?: return
-        // 先算绝对位置（此时 clipActive 仍 true：base + raw = 句尾），再清标志
-        val absoluteMs = currentAudioPositionMs() ?: return
+        if (!pageEndPauseClipActive && pageEndPauseRange == null) return
+        val absoluteMs = currentAudioPositionMs() ?: pageEndPauseRange?.first ?: 0L
         pageEndPauseClipActive = false
-        audioCueLoopClipActive = false
-        Log.d(
-            M9_SENTENCE_TAIL_LOG_TAG,
-            "pageEndPause: release clip continue from absoluteMs=$absoluteMs"
-        )
-        currentPlayer.setMediaItem(currentAudioMediaItem(), absoluteMs)
-        currentPlayer.prepare()
+        cancelPageEndPauseWatch()
+        restoreFullAudioFromPageEndPauseClip(absoluteMs.coerceAtLeast(0L))
+        logDebug(M9_SENTENCE_TAIL_LOG_TAG) { "pageEndPause: release (stop watch, restore full audio)" }
     }
 
-    /** 用户主动 seek/跳转：解除读完此页暂停（句尾 clip + pending），并继续播放 */
+    /** 用户主动 seek/跳转：解除读完此页暂停（整页裁剪 + pending），并继续播放 */
     private fun clearPageEndPauseForSeek() {
-        val hadState = pageEndPausePending || pageEndPauseClipActive
+        // 只有「被读完此页暂停停下的」才在 seek 后自动续播；普通暂停不动
+        val hadState = pageEndPausePending
         releasePageEndPauseClipIfActive()
         pageEndPausePending = false
         if (!hadState) return
-        Log.d(M9_SENTENCE_TAIL_LOG_TAG, "pageEndPause: cleared by seek")
+        logDebug(M9_SENTENCE_TAIL_LOG_TAG) { "pageEndPause: cleared by seek" }
         val currentPlayer = player ?: return
         if (!currentPlayer.isPlaying) {
             currentPlayer.play()
@@ -7284,52 +7623,45 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
 
     /** @return true 表示已触发「读完此页暂停」（调用方应保持当前页、不再翻页） */
     private fun maybePauseForPageEnd(justFinishedCueIndex: Int): Boolean {
-        Log.d(
-            M9_SENTENCE_TAIL_LOG_TAG,
+        logDebug(M9_SENTENCE_TAIL_LOG_TAG) {
             "pageEndPause: check cue=$justFinishedCueIndex pauseAfterPageEnd=$pauseAfterPageEnd"
-        )
+        }
         if (!pauseAfterPageEnd) return false
         val finishedMatch = cueMatchesByCueIndex[justFinishedCueIndex]
         if (finishedMatch == null) {
-            Log.d(
-                M9_SENTENCE_TAIL_LOG_TAG,
+            logDebug(M9_SENTENCE_TAIL_LOG_TAG) {
                 "pageEndPause: no match for cue=$justFinishedCueIndex"
-            )
+            }
             return false
         }
         val currentPage = pages.getOrNull(pageIndex)
         if (currentPage == null) {
-            Log.d(M9_SENTENCE_TAIL_LOG_TAG, "pageEndPause: no current page (pageIndex=$pageIndex)")
+            logDebug(M9_SENTENCE_TAIL_LOG_TAG) { "pageEndPause: no current page (pageIndex=$pageIndex)" }
             return false
         }
         if (finishedMatch.chapterIndex != currentPage.chapterIndex) {
-            Log.d(
-                M9_SENTENCE_TAIL_LOG_TAG,
+            logDebug(M9_SENTENCE_TAIL_LOG_TAG) {
                 "pageEndPause: chapter mismatch match.chapter=${finishedMatch.chapterIndex} " +
-                    "page.chapter=${currentPage.chapterIndex}"
-            )
+                "page.chapter=${currentPage.chapterIndex}"
+            }
             return false
         }
         if (!isAudioPlaying()) {
-            Log.d(M9_SENTENCE_TAIL_LOG_TAG, "pageEndPause: not playing, skip")
+            logDebug(M9_SENTENCE_TAIL_LOG_TAG) { "pageEndPause: not playing, skip" }
             return false
         }
-        // 该句是否本页最后一句（页内 rawStart 最大的匹配）
-        val lastMatchOnPage = cueMatchesByCueIndex.values
-            .filter { it.chapterIndex == currentPage.chapterIndex && it.intersects(currentPage) }
-            .maxByOrNull { it.rawStart }
-        if (lastMatchOnPage?.cueIndex != justFinishedCueIndex) {
-            Log.d(
-                M9_SENTENCE_TAIL_LOG_TAG,
-                "pageEndPause: not last on page cue=$justFinishedCueIndex last=${lastMatchOnPage?.cueIndex}"
-            )
+        // 该句是否本页最后一句
+        val lastOnPage = lastMatchOnPage(currentPage)
+        if (lastOnPage?.cueIndex != justFinishedCueIndex) {
+            logDebug(M9_SENTENCE_TAIL_LOG_TAG) {
+                "pageEndPause: not last on page cue=$justFinishedCueIndex last=${lastOnPage?.cueIndex}"
+            }
             return false
         }
-        Log.d(
-            M9_SENTENCE_TAIL_LOG_TAG,
+        logDebug(M9_SENTENCE_TAIL_LOG_TAG) {
             "pageEndPause: PAUSE page=${currentPage.chapterIndex}:${currentPage.charStart} " +
-                "lastCue=$justFinishedCueIndex"
-        )
+            "lastCue=$justFinishedCueIndex"
+        }
         pageEndPausePending = true
         player?.pause()
         BookReaderFloatingBridge.notifyPlaybackState(false)
@@ -7338,22 +7670,28 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         return true
     }
 
-    /** 读完此页暂停的恢复：翻页后自动继续播放（解除句尾 clip，从下一句继续） */
+    /**
+     * 读完此页暂停的恢复：翻页后自动继续播放。
+     * 此刻播放器是暂停态（页尾刚停），所以可以安全地把播放窗口换成新页的整页裁剪：
+     * 页尾再停，就是解码层精确停在句尾，不会读进下一页第一句。
+     */
     private fun resumePlaybackFromPageEndPause() {
         if (!pageEndPausePending) {
-            Log.d(M9_SENTENCE_TAIL_LOG_TAG, "pageEndPause: resume skip (no pending pause)")
+            logDebug(M9_SENTENCE_TAIL_LOG_TAG) { "pageEndPause: resume skip (no pending pause)" }
             return
         }
         pageEndPausePending = false
         val currentPlayer = player ?: run {
-            Log.d(M9_SENTENCE_TAIL_LOG_TAG, "pageEndPause: resume skip (no player)")
+            releasePageEndPauseClipIfActive()
+            logDebug(M9_SENTENCE_TAIL_LOG_TAG) { "pageEndPause: resume skip (no player)" }
             return
         }
-        releasePageEndPauseClipIfActive()
-        Log.d(
-            M9_SENTENCE_TAIL_LOG_TAG,
-            "pageEndPause: resume play isPlaying=${currentPlayer.isPlaying}"
-        )
+        val absoluteMs = currentAudioPositionMs() ?: 0L
+        logDebug(M9_SENTENCE_TAIL_LOG_TAG) {
+            "pageEndPause: resume play from=$absoluteMs isPlaying=${currentPlayer.isPlaying}"
+        }
+        // 暂停态：重新武装成新页的整页裁剪；无法武装时（本页无句尾）自动恢复完整音频
+        refreshPageEndPauseArming(absoluteMs)
         if (!currentPlayer.isPlaying) {
             currentPlayer.play()
             BookReaderFloatingBridge.notifyPlaybackState(true)
@@ -7371,42 +7709,47 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
     ): Boolean {
         if (!stopPlaybackOnImage || !allowPageJump || !isAudioPlaying()) return false
         if (match.chapterIndex != currentChapterImageStopChapterIndex) {
-            val carryOverStop = currentChapterImageStops.getOrNull(currentChapterImageStopIndex)
-            val crossedChapterTail = carryOverStop?.tailCueIndex?.let { tailCueIndex ->
-                previousCueIndex == tailCueIndex &&
-                    currentPosition >= (carryOverStop.tailCueEndMs ?: Long.MAX_VALUE)
-            } == true
-            if (crossedChapterTail) {
-                currentChapterImageStopIndex += 1
+            // 跨章：上一章末尾图片（图后无 cue）的收尾暂停仍生效
+            val carryOverStop = currentChapterImageStops.firstOrNull { stop ->
+                stop.target.key != lastImageStopKey &&
+                    stop.tailCueIndex?.let { tailCueIndex ->
+                        previousCueIndex == tailCueIndex &&
+                            currentPosition >= (stop.tailCueEndMs ?: Long.MAX_VALUE)
+                    } == true
+            }
+            if (carryOverStop != null) {
+                currentChapterImageStopIndex =
+                    currentChapterImageStops.indexOf(carryOverStop).coerceAtLeast(0) + 1
                 pausePlaybackAtImage(carryOverStop.target)
                 return true
             }
             rebuildCurrentChapterImageStops()
         }
-        var stopIndex = currentChapterImageStopIndex
-        while (stopIndex < currentChapterImageStops.size) {
-            val stop = currentChapterImageStops[stopIndex]
-            if (stop.target.key == lastImageStopKey) {
-                stopIndex += 1
-                continue
-            }
+        // 全量扫描未触发的图片停点（不依赖当前章内指针位置）：纵书每页容量大，
+        // 播放 cue 到达图片页时显示页往往已越过图片页，指针式"已过"判定会跳过
+        // 停点导致直接越过图片；按 cue 时序判断则与布局无关。
+        for ((index, stop) in currentChapterImageStops.withIndex()) {
+            if (stop.target.key == lastImageStopKey) continue
             val crossedCueTrigger = stop.triggerCueIndex?.let { triggerCueIndex ->
-                cueIndex >= triggerCueIndex &&
-                    previousCueIndex < triggerCueIndex &&
-                    (cueChanged || previousCueIndex < 0)
+                if (previousCueIndex < 0) {
+                    // 刚进入书本、恢复进度后按播放（还没有"上一句"）时，只有**当前这句就是
+                    // 触发句**才算越过。否则本章里更早的每一张图都满足 cueIndex >= 触发句，
+                    // 会被当成"刚刚越过"——一按播放就跳到那张图并触发遇图暂停。
+                    cueIndex == triggerCueIndex
+                } else {
+                    cueChanged && cueIndex >= triggerCueIndex && previousCueIndex < triggerCueIndex
+                }
             } == true
             val reachedTailTrigger = stop.tailCueIndex?.let { tailCueIndex ->
                 cueIndex == tailCueIndex &&
                     currentPosition >= (stop.tailCueEndMs ?: Long.MAX_VALUE)
             } == true
             if (crossedCueTrigger || reachedTailTrigger) {
-                currentChapterImageStopIndex = stopIndex + 1
+                currentChapterImageStopIndex = index + 1
                 pausePlaybackAtImage(stop.target)
                 return true
             }
-            break
         }
-        currentChapterImageStopIndex = stopIndex
         return false
     }
 
@@ -7528,7 +7871,7 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         )
         if (reload) {
             if (document == null && pages.isEmpty()) {
-                Log.d(LEGADO_READER_LOG_TAG, "readerRelayout skipped pending initial load")
+                logDebug(LEGADO_READER_LOG_TAG) { "readerRelayout skipped pending initial load" }
                 return
             }
             val anchor = currentPageAnchor() ?: pendingRestoreAnchor
@@ -7588,10 +7931,9 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
             if (cueMatchesByCueIndex.isNotEmpty()) {
                 syncToAudioPosition(allowPageJump = isAudioPlaying())
             } else {
-                Log.d(
-                    LEGADO_READER_LOG_TAG,
+                logDebug(LEGADO_READER_LOG_TAG) {
                     "relayoutCurrentDocument no in-memory matches; trying persisted restore"
-                )
+                }
                 restorePersistedMatchIfPossible()
             }
             val centerChapterIndex = pages.getOrNull(pageIndex)?.chapterIndex ?: anchor?.chapterIndex ?: 0
@@ -7682,44 +8024,51 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
 
     private suspend fun restorePersistedMatchIfPossible() {
         if (document == null) {
-            Log.d(LEGADO_READER_LOG_TAG, "restoreMatch skipped document=null")
+            logDebug(LEGADO_READER_LOG_TAG) { "restoreMatch skipped document=null" }
             return
         }
         if (cues.isEmpty()) {
-            Log.d(LEGADO_READER_LOG_TAG, "restoreMatch skipped cues empty")
+            logDebug(LEGADO_READER_LOG_TAG) { "restoreMatch skipped cues empty" }
             return
         }
         if (cueMatchesByCueIndex.isNotEmpty()) {
-            Log.d(
-                LEGADO_READER_LOG_TAG,
+            logDebug(LEGADO_READER_LOG_TAG) {
                 "restoreMatch skipped alreadyLoaded matches=${cueMatchesByCueIndex.size}"
-            )
+            }
             return
         }
         val storeKey = currentReaderMatchStoreKey() ?: run {
-            Log.d(LEGADO_READER_LOG_TAG, "restoreMatch skipped storeKey=null")
+            logDebug(LEGADO_READER_LOG_TAG) { "restoreMatch skipped storeKey=null" }
             return
         }
-        Log.d(
-            LEGADO_READER_LOG_TAG,
+        logDebug(LEGADO_READER_LOG_TAG) {
             "restoreMatch try key=${storeKey.take(48)} cues=${cues.size} book=${importedBook?.title}"
-        )
-        Log.d(
-            LEGADO_MATCH_LOG_TAG,
+        }
+        logDebug(LEGADO_MATCH_LOG_TAG) {
             "restore try key=${storeKey.take(48)} cues=${cues.size} existingMatches=${cueMatchesByCueIndex.size}"
-        )
+        }
         val restoreStartMs = SystemClock.elapsedRealtime()
         val snapshot = withContext(Dispatchers.IO) {
             loadLegadoReaderMatchSnapshotOrNull(this@LegadoReaderActivity, storeKey)
         } ?: run {
-            Log.d(LEGADO_READER_LOG_TAG, "restoreMatch miss key=${storeKey.take(48)}")
-            Log.d(LEGADO_MATCH_LOG_TAG, "restore miss key=${storeKey.take(48)}")
+            logDebug(LEGADO_READER_LOG_TAG) { "restoreMatch miss key=${storeKey.take(48)}" }
+            logDebug(LEGADO_MATCH_LOG_TAG) { "restore miss key=${storeKey.take(48)}" }
             return
         }
-        Log.d(
-            LEGADO_MATCH_LOG_TAG,
+        logDebug(LEGADO_MATCH_LOG_TAG) {
             "restore hit storedMatches=${snapshot.matches.size} totalCues=${snapshot.totalCues} unmatched=${snapshot.unmatched}"
-        )
+        }
+        // 章节结构变了（或旧快照没记签名）→ 快照里的 chapterIndex 已经指错章节，
+        // 直接用会出现"显示的不是这一段"：重新匹配一次。
+        val signature = currentDocumentSignature()
+        if (snapshot.documentSignature != signature) {
+            logDebug(LEGADO_READER_LOG_TAG) {
+                "restoreMatch stale structure stored=${snapshot.documentSignature.ifEmpty { "(none)" }} " +
+                "current=${signature.ifEmpty { "(none)" }} -> rematch"
+            }
+            rematchEbookCuesInPlace(reason = "structureChanged")
+            return
+        }
         val restoredMatches = withContext(Dispatchers.Default) {
             snapshot.matches.filter { match ->
                 cues.getOrNull(match.cueIndex)
@@ -7728,20 +8077,18 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
             }
         }
         if (restoredMatches.isEmpty()) {
-            Log.d(
-                LEGADO_READER_LOG_TAG,
+            logDebug(LEGADO_READER_LOG_TAG) {
                 "restoreMatch skipped after sanitize removed=${snapshot.matches.size} key=${storeKey.take(48)}"
-            )
+            }
             return
         }
         val removedMatches = snapshot.matches.size - restoredMatches.size
         val restoredUnmatched = (snapshot.unmatched + removedMatches)
             .coerceAtMost(snapshot.totalCues.coerceAtLeast(0))
         if (removedMatches > 0) {
-            Log.d(
-                LEGADO_READER_LOG_TAG,
+            logDebug(LEGADO_READER_LOG_TAG) {
                 "restoreMatch sanitized removed=$removedMatches matches=${snapshot.matches.size}->${restoredMatches.size}"
-            )
+            }
         }
         val matchesByCueIndex = withContext(Dispatchers.Default) {
             restoredMatches.associateBy { it.cueIndex }
@@ -7755,62 +8102,107 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         audioCueIndex = -1
         activeCueIndex = -1
         rebuildCurrentChapterImageStops()
-        Log.d(
-            LEGADO_READER_LOG_TAG,
+        logDebug(LEGADO_READER_LOG_TAG) {
             "restoreMatch applied=${SystemClock.elapsedRealtime() - restoreStartMs}ms " +
-                "matches=${restoredMatches.size} totalCues=${snapshot.totalCues} unmatched=$restoredUnmatched"
-        )
+            "matches=${restoredMatches.size} totalCues=${snapshot.totalCues} unmatched=$restoredUnmatched"
+        }
         val restoredData = matchData ?: return
-        Log.d(
-            LEGADO_MATCH_LOG_TAG,
+        logDebug(LEGADO_MATCH_LOG_TAG) {
             "restore applied matches=${restoredMatches.size} totalCues=${snapshot.totalCues} unmatched=$restoredUnmatched " +
-                "sampleUnmatched=${unmatchedCueDebugSample(restoredData)}"
-        )
+            "sampleUnmatched=${unmatchedCueDebugSample(restoredData)}"
+        }
     }
 
     private fun revealPendingPlayerOpenAudioPositionIfNeeded() {
         if (!pendingPlayerOpenAudioReveal) return
         if (cueMatchesByCueIndex.isEmpty()) {
-            Log.d(LEGADO_READER_LOG_TAG, "readerProgress revealFromPlayer skipped matches empty")
+            logDebug(LEGADO_READER_LOG_TAG) { "readerProgress revealFromPlayer skipped matches empty" }
             return
         }
         pendingPlayerOpenAudioReveal = false
-        Log.d(
-            LEGADO_READER_LOG_TAG,
+        logDebug(LEGADO_READER_LOG_TAG) {
             "readerProgress revealFromPlayer position=${currentAudioPositionMs()} playing=${isAudioPlaying()}"
-        )
+        }
         syncToAudioPosition(allowPageJump = true, forceReveal = true)
     }
 
     private fun persistCurrentMatchSnapshot() {
         val current = matchData ?: run {
-            Log.d(LEGADO_READER_LOG_TAG, "persistMatch skipped matchData=null")
+            logDebug(LEGADO_READER_LOG_TAG) { "persistMatch skipped matchData=null" }
             return
         }
         if (current.matches.isEmpty() || current.totalCues <= 0) {
-            Log.d(
-                LEGADO_READER_LOG_TAG,
+            logDebug(LEGADO_READER_LOG_TAG) {
                 "persistMatch skipped invalid matches=${current.matches.size} totalCues=${current.totalCues}"
-            )
+            }
             return
         }
         val storeKey = currentReaderMatchStoreKey() ?: run {
-            Log.d(LEGADO_READER_LOG_TAG, "persistMatch skipped storeKey=null")
+            logDebug(LEGADO_READER_LOG_TAG) { "persistMatch skipped storeKey=null" }
             return
         }
-        Log.d(
-            LEGADO_READER_LOG_TAG,
+        logDebug(LEGADO_READER_LOG_TAG) {
             "persistMatch saving matches=${current.matches.size} totalCues=${current.totalCues} key=${storeKey.take(48)}"
-        )
+        }
         saveLegadoReaderMatchSnapshot(
             context = this,
             storeKey = storeKey,
             snapshot = LegadoReaderMatchSnapshot(
                 matches = current.matches,
                 unmatched = current.unmatched,
-                totalCues = current.totalCues
+                totalCues = current.totalCues,
+                documentSignature = currentDocumentSignature()
             )
         )
+    }
+
+    /**
+     * 书籍结构签名：章节数 + 全书字数。
+     * 匹配结果里的 chapterIndex 是"第几章"，只要章节结构变了（例如把独立图片页并进相邻章节、
+     * 或按目录锚点切章），旧快照就会指到别的章节 —— 靠这个签名判定失效并重新匹配。
+     */
+    private fun currentDocumentSignature(): String {
+        val chapters = document?.chapters ?: return ""
+        if (chapters.isEmpty()) return ""
+        val chars = chapters.sumOf { it.text.length }
+        return "${chapters.size}:$chars"
+    }
+
+    /** 重新跑一遍 SRT 匹配并就地应用（结构变化后自动补做，避免旧快照指错章节） */
+    private suspend fun rematchEbookCuesInPlace(reason: String) {
+        val loadedDocument = document ?: return
+        val currentCues = cues
+        if (currentCues.isEmpty()) return
+        val startMs = SystemClock.elapsedRealtime()
+        val data = withContext(Dispatchers.Default) {
+            runCatching {
+                matchEbookCuesData(
+                    document = loadedDocument,
+                    cues = currentCues,
+                    searchWindow = matchSearchWindow
+                )
+            }.getOrNull()
+        } ?: run {
+            Log.w(LEGADO_READER_LOG_TAG, "rematch failed reason=$reason")
+            return
+        }
+        applyMatchDataInPlace(data)
+        logDebug(LEGADO_READER_LOG_TAG) {
+            "rematch applied reason=$reason matches=${data.matches.size} totalCues=${data.totalCues} " +
+            "unmatched=${data.unmatched} elapsed=${SystemClock.elapsedRealtime() - startMs}ms"
+        }
+    }
+
+    /** 把一份匹配结果就地生效：写快照、重建图片停点、跟随播放位置刷新显示 */
+    private fun applyMatchDataInPlace(data: EbookMatchData) {
+        matchData = data
+        cueMatchesByCueIndex = data.matches.associateBy { it.cueIndex }
+        persistCurrentMatchSnapshot()
+        audioCueIndex = -1
+        activeCueIndex = -1
+        rebuildCurrentChapterImageStops()
+        syncToAudioPosition(allowPageJump = isAudioPlaying())
+        renderCurrentPage()
     }
 
     private fun restoreReaderSettings() {
@@ -8416,23 +8808,14 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
                             )
                         }
                     }.onSuccess { data ->
-                        matchData = data
-                        cueMatchesByCueIndex = data.matches.associateBy { it.cueIndex }
-                        Log.d(
-                            LEGADO_READER_LOG_TAG,
+                        applyMatchDataInPlace(data)
+                        logDebug(LEGADO_READER_LOG_TAG) {
                             "manual match success matches=${data.matches.size} totalCues=${data.totalCues} unmatched=${data.unmatched}"
-                        )
-                        Log.d(
-                            LEGADO_MATCH_LOG_TAG,
+                        }
+                        logDebug(LEGADO_MATCH_LOG_TAG) {
                             "manual success rate=${data.matchRateText} matches=${data.matches.size} totalCues=${data.totalCues} " +
-                                "unmatched=${data.unmatched} sampleUnmatched=${unmatchedCueDebugSample(data)}"
-                        )
-                        persistCurrentMatchSnapshot()
-                        audioCueIndex = -1
-                        activeCueIndex = -1
-                        rebuildCurrentChapterImageStops()
-                        syncToAudioPosition(allowPageJump = isAudioPlaying())
-                        renderCurrentPage()
+                            "unmatched=${data.unmatched} sampleUnmatched=${unmatchedCueDebugSample(data)}"
+                        }
                         summaryText.text = matchSummaryText()
                     }.onFailure { error ->
                         summaryText.text = getString(
@@ -8489,32 +8872,28 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
                     }
                 }
                 if (cachedSnapshot != null) {
-                    Log.d(
-                        LEGADO_READER_LOG_TAG,
+                    logDebug(LEGADO_READER_LOG_TAG) {
                         "loadSrtSyncIfNeeded cacheHit=${SystemClock.elapsedRealtime() - srtStartMs}ms " +
-                            "cues=${cachedSnapshot.cues.size} uri=$uriText"
-                    )
-                    Log.d(
-                        LEGADO_MATCH_LOG_TAG,
+                        "cues=${cachedSnapshot.cues.size} uri=$uriText"
+                    }
+                    logDebug(LEGADO_MATCH_LOG_TAG) {
                         "srt cacheHit cues=${cachedSnapshot.cues.size} first=${cachedSnapshot.cues.firstOrNull()?.startMs} " +
-                            "last=${cachedSnapshot.cues.lastOrNull()?.startMs} uri=${uriText.take(80)}"
-                    )
+                        "last=${cachedSnapshot.cues.lastOrNull()?.startMs} uri=${uriText.take(80)}"
+                    }
                     cachedSnapshot.cues
                 } else {
                     val loadedCues = parseEbookSrt(contentResolver, uri)
                     withContext(Dispatchers.IO) {
                         saveLegadoReaderSrtSnapshot(this@LegadoReaderActivity, uri, loadedCues)
                     }
-                    Log.d(
-                        LEGADO_READER_LOG_TAG,
+                    logDebug(LEGADO_READER_LOG_TAG) {
                         "loadSrtSyncIfNeeded parsed=${SystemClock.elapsedRealtime() - srtStartMs}ms " +
-                            "cues=${loadedCues.size} uri=$uriText force=$force"
-                    )
-                    Log.d(
-                        LEGADO_MATCH_LOG_TAG,
+                        "cues=${loadedCues.size} uri=$uriText force=$force"
+                    }
+                    logDebug(LEGADO_MATCH_LOG_TAG) {
                         "srt parsed cues=${loadedCues.size} first=${loadedCues.firstOrNull()?.startMs} " +
-                            "last=${loadedCues.lastOrNull()?.startMs} force=$force uri=${uriText.take(80)}"
-                    )
+                        "last=${loadedCues.lastOrNull()?.startMs} force=$force uri=${uriText.take(80)}"
+                    }
                     loadedCues
                 }
             }.onSuccess { loadedCues ->
@@ -8524,15 +8903,13 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
                 matchData = null
                 audioCueIndex = -1
                 activeCueIndex = -1
-                Log.d(
-                    LEGADO_READER_LOG_TAG,
+                logDebug(LEGADO_READER_LOG_TAG) {
                     "loadSrtSyncIfNeeded ready=${SystemClock.elapsedRealtime() - srtStartMs}ms " +
-                        "cues=${loadedCues.size} uri=$uriText reset in-memory match cache"
-                )
-                Log.d(
-                    LEGADO_MATCH_LOG_TAG,
+                    "cues=${loadedCues.size} uri=$uriText reset in-memory match cache"
+                }
+                logDebug(LEGADO_MATCH_LOG_TAG) {
                     "srt ready cues=${loadedCues.size} resetMatches=true sampleFirst=${cueDebugText(loadedCues.firstOrNull())}"
-                )
+                }
                 srtLoadError = if (loadedCues.isEmpty()) {
                     readerString(R.string.reader_srt_parse_failed_detail)
                 } else {
@@ -8540,10 +8917,9 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
                 }
                 publishReaderSubtitleBridgeSnapshot(clearWhenMissing = true)
                 if (loadedCues.isNotEmpty()) {
-                    Log.d(
-                        LEGADO_READER_LOG_TAG,
+                    logDebug(LEGADO_READER_LOG_TAG) {
                         "loadSrtSyncIfNeeded trying persisted restore after SRT load"
-                    )
+                    }
                     restorePersistedMatchIfPossible()
                 }
                 onComplete?.invoke(loadedCues.isNotEmpty())
@@ -8635,7 +9011,7 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         }
         val currentPosition = currentAudioPositionMs() ?: run {
             if (forceReveal) {
-                Log.d(LEGADO_MATCH_LOG_TAG, "sync skipped currentPosition=null")
+                logDebug(LEGADO_MATCH_LOG_TAG) { "sync skipped currentPosition=null" }
             }
             return
         }
@@ -8654,10 +9030,9 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
     ) {
         if (cues.isEmpty() || pages.isEmpty()) {
             if (forceReveal) {
-                Log.d(
-                    LEGADO_MATCH_LOG_TAG,
+                logDebug(LEGADO_MATCH_LOG_TAG) {
                     "sync skipped empty cues=${cues.size} pages=${pages.size} allowPageJump=$allowPageJump forceReveal=$forceReveal"
-                )
+                }
             }
             return
         }
@@ -8667,10 +9042,9 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
             ?: findEbookCueIndexAtTime(cues, currentPosition)
         if (cueIndex < 0) {
             if (forceReveal) {
-                Log.d(
-                    LEGADO_MATCH_LOG_TAG,
+                logDebug(LEGADO_MATCH_LOG_TAG) {
                     "sync noCue position=$currentPosition cues=${cues.size} first=${cues.firstOrNull()?.startMs} last=${cues.lastOrNull()?.endMs}"
-                )
+                }
             }
             val changed = activeCueIndex != -1
             audioCueIndex = -1
@@ -8707,12 +9081,11 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
             return
         }
         if (forceReveal || match == null) {
-            Log.d(
-                LEGADO_MATCH_LOG_TAG,
+            logDebug(LEGADO_MATCH_LOG_TAG) {
                 "sync position=$currentPosition ${cueDebugSummary(cueIndex)} ${matchDebugSummary(match)} " +
-                    "matches=${cueMatchesByCueIndex.size}/${cues.size} allowPageJump=$allowPageJump " +
-                    "forceReveal=$forceReveal preferred=$preferredCueIndex"
-            )
+                "matches=${cueMatchesByCueIndex.size}/${cues.size} allowPageJump=$allowPageJump " +
+                "forceReveal=$forceReveal preferred=$preferredCueIndex"
+            }
         }
         if (textSelectionActive && !forceReveal) {
             activeCueIndex = if (match != null) cueIndex else -1
@@ -8720,11 +9093,16 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
             return
         }
         if (match == null) {
-            Log.d(
-                LEGADO_MATCH_LOG_TAG,
+            logDebug(LEGADO_MATCH_LOG_TAG) {
                 "sync missingMatch ${cueDebugSummary(cueIndex)} nearby=${nearbyMatchedCueSummary(cueIndex)}"
-            )
+            }
             activeCueIndex = -1
+            // SRT 里用 ＊ 标注章节题图的位置（如「＊──市井にて──」）：
+            // 这时直接翻到该章节的第一页，让题图像翻页一样被看到；
+            // 只翻页不暂停（这类题图不算插图，不触发遇图暂停）。
+            if (allowPageJump && showSectionTitlePageForCue(cueIndex)) {
+                return
+            }
             updateDisplayedCueHighlightOnly()
             return
         }
@@ -8740,35 +9118,40 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
             return
         }
         // 读完此页暂停：刚播完的上一句是本页最后一句 → 暂停，翻页后自动继续
-        // （主要精确停止靠 applyPageEndPauseClip 的句尾 clip；这里保留作兜底，
-        //   覆盖 clip 未应用成功/seek 直接跳到最后一句的场景）
+        // （主要精确停止靠整页裁剪的 STATE_ENDED；这里保留作兜底，
+        //   覆盖武装未生效/seek 直接跳到最后一句的场景）
         if (cueChanged && previousAudioCueIndex >= 0) {
             if (maybePauseForPageEnd(previousAudioCueIndex)) {
                 // 兜底暂停已触发：画面保持当前页（最后一句所在页），不再翻到下一页
-                Log.d(
-                    M9_SENTENCE_TAIL_LOG_TAG,
+                logDebug(M9_SENTENCE_TAIL_LOG_TAG) {
                     "pageEndPause: keep current page after fallback pause"
-                )
+                }
                 return
             }
+            // cue 刚变化：让下一次"未变化"的日志立刻输出，便于看清变化后的上下文
+            lastSyncSkipLogAtMs = 0L
         } else {
-            Log.d(
-                M9_SENTENCE_TAIL_LOG_TAG,
-                "pageEndPause: sync skip cueChanged=$cueChanged prev=$previousAudioCueIndex"
-            )
-        }
-        // 读完此页暂停：播放进入本页最后一句时，把播放窗口 clip 到该句句尾，
-        // 播放到句尾精确停止，不再读到下一页开头
-        if (pauseAfterPageEnd && match != null && pageEndPausePending.not()) {
-            val lastCuePage = pages.getOrNull(pageIndex)
-            if (
-                lastCuePage != null &&
-                match.chapterIndex == lastCuePage.chapterIndex &&
-                match.intersects(lastCuePage) &&
-                isLastMatchOnPage(match, lastCuePage)
-            ) {
-                applyPageEndPauseClip(match)
+            // 这里是每 350ms 一次的 tick 最常见的分支。曾经每 tick 打一条，约 171 行/分钟，
+            // 会在 ~70 秒内把 logcat 的 200 行窗口冲满，导致导出诊断时看不到有用的行；
+            // 现在 5 秒最多一条，并把期间的次数聚合进同一条日志。
+            val nowMs = SystemClock.elapsedRealtime()
+            syncSkipLogCount += 1
+            if (nowMs - lastSyncSkipLogAtMs >= SYNC_SKIP_LOG_INTERVAL_MS) {
+                logDebug(M9_SENTENCE_TAIL_LOG_TAG) {
+                    "pageEndPause: sync skip cueChanged=$cueChanged prev=$previousAudioCueIndex" +
+                    " (x$syncSkipLogCount)"
+                }
+                lastSyncSkipLogAtMs = nowMs
+                syncSkipLogCount = 0
             }
+        }
+        // 读完此页暂停：保证「本页」已武装——暂停态换成本页整页裁剪（播到页尾由解码层
+        // 精确截断，既不重读最后一句也不读进下一页第一句）；播放中途无法重载时退化为
+        // 句尾监视兜底。功能关闭时解除武装并恢复完整音频。
+        if (!pauseAfterPageEnd) {
+            releasePageEndPauseClipIfActive()
+        } else {
+            refreshPageEndPauseArming(currentPosition)
         }
         activeCueIndex = cueIndex
         if (!allowPageJump) {
@@ -8778,10 +9161,9 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         val matchAnchor = ReaderPageAnchor(match.chapterIndex, match.rawStart)
         val startPageIndex = findTextPageForMatch(match)
         if (startPageIndex == null) {
-            Log.d(
-                LEGADO_MATCH_LOG_TAG,
+            logDebug(LEGADO_MATCH_LOG_TAG) {
                 "sync noPage ${matchDebugSummary(match)} pageIndex=$pageIndex pages=${pages.size}"
-            )
+            }
             activeCueIndex = cueIndex
             persistReaderAnchor(matchAnchor)
             if (pendingAudioSyncLoadAnchor == matchAnchor && paginationJob?.isActive == true) {
@@ -8796,10 +9178,9 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         }
         if (startPageIndex == pageIndex) {
             if (forceReveal) {
-                Log.d(
-                    LEGADO_MATCH_LOG_TAG,
+                logDebug(LEGADO_MATCH_LOG_TAG) {
                     "sync samePage ${matchDebugSummary(match)} pageIndex=$pageIndex"
-                )
+                }
             }
             updateDisplayedCueHighlightOnly()
             persistReaderAnchor(matchAnchor)
@@ -8808,10 +9189,9 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         val previousPageIndex = pageIndex
         pageIndex = startPageIndex
         if (forceReveal) {
-            Log.d(
-                LEGADO_MATCH_LOG_TAG,
+            logDebug(LEGADO_MATCH_LOG_TAG) {
                 "sync jumpPage ${matchDebugSummary(match)} page=$previousPageIndex->$startPageIndex"
-            )
+            }
         }
         renderCurrentPage(forward = startPageIndex >= previousPageIndex)
         persistReaderAnchor(matchAnchor)
@@ -8826,16 +9206,26 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
     }
 
     private fun pausePlaybackAtImage(target: ReaderImageStopTarget) {
-        Log.d(
-            READER_PAUSED_SEEK_LOG_TAG,
+        logDebug(READER_PAUSED_SEEK_LOG_TAG) {
             "legado pauseAtImage chapter=${target.chapterIndex} position=${target.imagePosition} " +
-                "page=$pageIndex actual=${player?.currentPosition} audioCue=$audioCueIndex"
-        )
+            "page=$pageIndex actual=${player?.currentPosition} audioCue=$audioCueIndex"
+        }
         lastImageStopKey = target.key
         advanceCurrentChapterImageStopIndex(target.key)
         player?.pause()
         BookReaderFloatingBridge.notifyPlaybackState(false)
         activeCueIndex = -1
+        // 遇图暂停会把画面切到图片页，但"读完此页暂停"的武装还停在**上一页**：它的终点
+        // （上一页末句句尾）此刻已经被越过，恢复播放后要么被句尾监视的第一轮轮询立刻判到
+        // （positionMs >= safeEndMs），要么整页裁剪让播放器一恢复就 STATE_ENDED —— 表现为
+        // "继续播放后的第一个 cue 不播放"。这里先解除，恢复播放时再按当前 cue 重新武装
+        // （resumeFromImagePause 里的强制同步会做这件事）。
+        val armedClip = pageEndPauseRange != null
+        val armedWatchEnd = pageEndPauseWatchEndMs
+        releasePageEndPauseClipIfActive()
+        logDebug(M9_SENTENCE_TAIL_LOG_TAG) {
+            "imagePause: release page-end arming clip=$armedClip watchEnd=$armedWatchEnd page=$pageIndex"
+        }
         findImagePageIndex(target)?.let { imagePage ->
             if (imagePage != pageIndex) pageIndex = imagePage
         }
@@ -8860,11 +9250,20 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
     private fun resumeImagePauseIfPageLeft() {
         val pausedPageIndex = imagePausePageIndex ?: return
         if (pageIndex != pausedPageIndex) {
-            resumeFromImagePause()
+            // 用户自己翻页离开了图片页：不要把他拽回 cue 所在页
+            resumeFromImagePause(revealCuePage = false)
         }
     }
 
-    private fun resumeFromImagePause() {
+    /**
+     * 图片暂停结束、继续播放。
+     *
+     * 暂停时画面被切到图片页，而播放位置还停在**触发暂停的那一句**；恢复播放时如果只 play()，
+     * 同步逻辑会因为"cue 没变"直接返回（[syncToAudioPositionAt] 里 `!cueChanged && !forceReveal`
+     * 那个分支），画面就留在图片页上，要等**下一个 cue** 变化才跟随翻页——也就是"慢一个 cue
+     * 才翻到下一页"。所以恢复播放后强制按当前 cue 重新定位一次页面。
+     */
+    private fun resumeFromImagePause(revealCuePage: Boolean = true) {
         val hadPendingPause = imagePausePageIndex != null
         clearImagePauseResume()
         if (!hadPendingPause) return
@@ -8873,6 +9272,13 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
             currentPlayer.play()
             publishReaderPlaybackBridgeSnapshot(notifyState = true)
             updateAudioControlLabels()
+        }
+        if (revealCuePage) {
+            logDebug(M9_SENTENCE_TAIL_LOG_TAG) {
+                "imagePause: resume pos=${currentPlayer.currentPosition} cue=$audioCueIndex " +
+                "clip=${pageEndPauseRange != null} watchEnd=$pageEndPauseWatchEndMs page=$pageIndex"
+            }
+            syncToAudioPosition(allowPageJump = true, forceReveal = true)
         }
     }
 

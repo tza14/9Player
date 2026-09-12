@@ -15,6 +15,7 @@ import android.view.ViewConfiguration
 import android.view.animation.DecelerateInterpolator
 import moe.tekuza.m9player.EbookImageRef
 import moe.tekuza.m9player.VerticalTextGlyphEngine
+import moe.tekuza.m9player.isSidewaysAsciiText
 import moe.tekuza.m9player.legado.reader.M9LayoutMode
 import moe.tekuza.m9player.legado.reader.M9TextWeight
 import moe.tekuza.m9player.legado.reader.READER_TITLE_SCALE
@@ -28,6 +29,41 @@ import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.max
 
+/** 竖排英文气泡最多显示多少个字符；整段没有句读时围绕落点截断，避免气泡铺满整屏。 */
+private const val MAX_ASSIST_SENTENCE_CHARS = 200
+
+/** 句子边界：句读与换行（换行只在没有句读时兜底，防止把整章吞进一句）。 */
+private fun isAssistSentenceBreak(ch: Char): Boolean =
+    ch == '\n' || ch in "。！？…‥.!?"
+
+/**
+ * [start, end) 所在的整句范围（含句读符在内）：向两侧扩到句读/换行为止。
+ * 整段没有句读、结果长过 [MAX_ASSIST_SENTENCE_CHARS] 时，围绕落点截断。
+ */
+internal fun assistSentenceRange(text: String, start: Int, end: Int): IntRange? {
+    if (text.isEmpty()) return null
+    val from = start.coerceIn(0, text.length - 1)
+    val to = end.coerceIn(from + 1, text.length)
+    var begin = from
+    while (begin > 0 && !isAssistSentenceBreak(text[begin - 1])) begin -= 1
+    var stop = to
+    while (stop < text.length && !isAssistSentenceBreak(text[stop])) stop += 1
+    // 句读符本身算在句内；换行是段界，不纳入
+    if (stop < text.length && text[stop] != '\n') stop += 1
+    while (begin < stop && text[begin].isWhitespace()) begin += 1
+    while (stop > begin && text[stop - 1].isWhitespace()) stop -= 1
+    if (stop <= begin) return null
+    if (stop - begin > MAX_ASSIST_SENTENCE_CHARS) {
+        // 截断成宽度 ≤ MAX 的窗口：以落点为中心，夹在 [begin, stop] 内
+        val center = ((from + to) / 2).coerceIn(begin, stop)
+        val truncatedBegin = (center - MAX_ASSIST_SENTENCE_CHARS / 2)
+            .coerceIn(begin, (stop - MAX_ASSIST_SENTENCE_CHARS).coerceAtLeast(begin))
+        begin = truncatedBegin
+        stop = (truncatedBegin + MAX_ASSIST_SENTENCE_CHARS).coerceAtMost(stop)
+    }
+    return begin until stop
+}
+
 internal class ContentTextView @JvmOverloads constructor(
     context: Context,
     attrs: AttributeSet? = null
@@ -36,7 +72,9 @@ internal class ContentTextView @JvmOverloads constructor(
         val text: String,
         val rect: RectF,
         val sourceStart: Int,
-        val sourceEnd: Int
+        val sourceEnd: Int,
+        /** 被点中的那一列（单词）的起点，用于"再点同一个词=收起气泡"的判断。 */
+        val hitSourceStart: Int
     )
 
     internal data class TextHit(
@@ -282,7 +320,7 @@ internal class ContentTextView @JvmOverloads constructor(
             if (!inLineBounds) return@forEachIndexed
             line.columns.forEachIndexed { columnIndex, column ->
                 if (column !is TextColumn) return@forEachIndexed
-                if (!VerticalTextGlyphEngine.isSidewaysAsciiToken(column.charData)) return@forEachIndexed
+                if (!isSidewaysAsciiText(column.charData)) return@forEachIndexed
                 if (localY < column.start || localY > column.end) return@forEachIndexed
                 return assistTokenAround(current, lineIndex, columnIndex)
             }
@@ -290,12 +328,19 @@ internal class ContentTextView @JvmOverloads constructor(
         return null
     }
 
+    /**
+     * 竖排中英文按单词切列、横倒绘制；点中某一列时返回**整句**（而不是那个单词）。
+     *
+     * 相邻单词列的 source 之间隔着空格、并不连续，所以按"source 连续"合并只能覆盖被切断
+     * 的长串，永远合不成一句。这里改为按正文句子范围取值：以句读或换行为界，把落点所在的
+     * 整句取出来（跨列、跨页都能覆盖），气泡只覆盖本页可见的那几列用于定位。
+     */
     private fun assistTokenAround(page: TextPage, lineIndex: Int, columnIndex: Int): AssistToken? {
         val refs = buildList {
             page.lines.forEachIndexed { pageLineIndex, line ->
                 if (line.layoutMode != M9LayoutMode.VERTICAL) return@forEachIndexed
                 line.columns.forEachIndexed { pageColumnIndex, column ->
-                    if (column is TextColumn && VerticalTextGlyphEngine.isSidewaysAsciiToken(column.charData)) {
+                    if (column is TextColumn && isSidewaysAsciiText(column.charData)) {
                         add(
                             AssistColumnRef(
                                 lineIndex = pageLineIndex,
@@ -310,30 +355,25 @@ internal class ContentTextView @JvmOverloads constructor(
         }
         val hitIndex = refs.indexOfFirst { it.lineIndex == lineIndex && it.columnIndex == columnIndex }
         if (hitIndex < 0) return null
-        var startIndex = hitIndex
-        while (
-            startIndex > 0 &&
-            refs[startIndex - 1].column.sourceEnd == refs[startIndex].column.sourceStart
-        ) {
-            startIndex -= 1
-        }
-        var endIndex = hitIndex
-        while (
-            endIndex < refs.lastIndex &&
-            refs[endIndex].column.sourceEnd == refs[endIndex + 1].column.sourceStart
-        ) {
-            endIndex += 1
-        }
-        val selectedRefs = refs.subList(startIndex, endIndex + 1)
-        val text = selectedRefs.joinToString(separator = "") { it.column.charData }.trim()
+        val hit = refs[hitIndex]
+        val range = assistSentenceRange(page.text, hit.column.sourceStart, hit.column.sourceEnd)
+        val sentence = range?.let { page.text.substring(it.first, it.last + 1).trim() }
+        val text = sentence?.takeIf { it.isNotBlank() } ?: hit.column.charData.trim()
         if (text.isBlank()) return null
-        val rect = RectF(selectedRefs.first().rect)
-        selectedRefs.drop(1).forEach { rect.union(it.rect) }
+        val visible = if (range == null) {
+            listOf(hit)
+        } else {
+            refs.filter { it.column.sourceEnd > range.first && it.column.sourceStart <= range.last }
+                .ifEmpty { listOf(hit) }
+        }
+        val rect = RectF(visible.first().rect)
+        visible.drop(1).forEach { rect.union(it.rect) }
         return AssistToken(
             text = text,
             rect = rect,
-            sourceStart = selectedRefs.minOf { it.column.sourceStart },
-            sourceEnd = selectedRefs.maxOf { it.column.sourceEnd }
+            sourceStart = range?.first ?: hit.column.sourceStart,
+            sourceEnd = range?.last?.plus(1) ?: hit.column.sourceEnd,
+            hitSourceStart = hit.column.sourceStart
         )
     }
 

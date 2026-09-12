@@ -6,7 +6,9 @@ import android.text.TextPaint
 import moe.tekuza.m9player.EBOOK_IMAGE_MARKER
 import moe.tekuza.m9player.EbookImageRef
 import moe.tekuza.m9player.VerticalTextGlyphEngine
+import moe.tekuza.m9player.asciiTextRunEnd
 import moe.tekuza.m9player.decodeBitmapBounds
+import moe.tekuza.m9player.isAsciiRunSpaceChar
 import moe.tekuza.m9player.legado.reader.M9LayoutMode
 import moe.tekuza.m9player.legado.reader.M9ReadBookConfig
 import moe.tekuza.m9player.legado.reader.READER_TITLE_SCALE
@@ -127,7 +129,7 @@ internal class VerticalTextChapterLayout(
                 cursor = lineEnd
                 while (
                     cursor < end &&
-                    VerticalTextGlyphEngine.isAsciiRunSpace(text[cursor]) &&
+                    isAsciiRunSpaceChar(text[cursor]) &&
                     text.getOrNull(cursor + 1)?.let(VerticalTextGlyphEngine::isAsciiWordChar) == true
                 ) {
                     cursor += 1
@@ -160,25 +162,31 @@ internal class VerticalTextChapterLayout(
             }
             var blockStart = segmentStart
             while (blockStart < segmentEnd) {
-                val blockEnd = if (sentenceStarts.isNotEmpty()) {
+                // 「句子不跨页」开启时才切句子块（块 = 一句）：整句必须放进同一页，放不下就整块
+                // 推到下一页；竖排每行占一列，超长块由行内 x<0 兜底翻页，块仍可跨页。
+                // 关闭时 sentenceStarts 为空，块退化为整段 —— 此时不能再做"整块入页"判断，
+                // 否则长段会把整页切掉、在页左侧留下成片空白；应回到贪婪填满（列排满才翻页）。
+                val usesSentenceBlocks = sentenceStarts.isNotEmpty()
+                val blockEnd = if (usesSentenceBlocks) {
                     sentenceStarts.filter { it > blockStart && it < segmentEnd }.minOrNull() ?: segmentEnd
                 } else {
                     segmentEnd
                 }
-                // 句子块整体放入当前页：块所需列数 > 当前页剩余可开列数 → 整块推到下一页
-                // （竖排每行占一列；超长块由行内 x<0 兜底翻页，块仍可跨页）
-                val blockColumns = measureVerticalBlockColumns(blockStart, blockEnd, indentYFor(blockStart))
-                val remainingColumns = (x / columnWidth).toInt() + 1
-                if (currentColumns.isNotEmpty() && blockColumns > remainingColumns) {
-                    pageColumns += currentColumns
-                    pageStarts += pageStart
-                    pageStart = blockStart
-                    currentColumns = mutableListOf()
-                    x = (visibleWidth - columnWidth).coerceAtLeast(0f)
+                if (usesSentenceBlocks) {
+                    val blockColumns = measureVerticalBlockColumns(blockStart, blockEnd, indentYFor(blockStart))
+                    val remainingColumns = (x / columnWidth).toInt() + 1
+                    if (currentColumns.isNotEmpty() && blockColumns > remainingColumns) {
+                        pageColumns += currentColumns
+                        pageStarts += pageStart
+                        pageStart = blockStart
+                        currentColumns = mutableListOf()
+                        x = (visibleWidth - columnWidth).coerceAtLeast(0f)
+                    }
                 }
                 var lineStart = blockStart
-                var y = indentYFor(lineStart)
-                while (lineStart < blockEnd) {
+                var limit = blockEnd
+                while (lineStart < limit) {
+                    var y = indentYFor(lineStart)
                     if (y + glyphHeight > currentPageHeight()) {
                         x -= columnWidth
                         y = 0f
@@ -191,7 +199,7 @@ internal class VerticalTextChapterLayout(
                         x = (visibleWidth - columnWidth).coerceAtLeast(0f)
                         y = indentYFor(lineStart)
                     }
-                    val firstToken = nextToken(text, lineStart, blockEnd)
+                    val firstToken = nextToken(text, lineStart, limit)
                     if (y + tokenHeight(firstToken) > currentPageHeight() && y > 0f) {
                         x -= columnWidth
                         y = 0f
@@ -204,7 +212,21 @@ internal class VerticalTextChapterLayout(
                         x = (visibleWidth - columnWidth).coerceAtLeast(0f)
                         y = 0f
                     }
-                    val lineEnd = buildVerticalLineEnd(text, lineStart, blockEnd, currentPageHeight() - y)
+                    val columnSpace = currentPageHeight() - y
+                    var lineEnd = buildVerticalLineEnd(text, lineStart, limit, columnSpace)
+                    // 一列排完后若还有余量，就继续并入后面的**整句**（保持"一列一行"）：
+                    // 否则"句子不跨页"会变成每句独占一列，整页大半空白。
+                    // 但当前列是这一页的最后一列时，宁可让整句去下一页，也不把句子切开。
+                    val lastColumnOfPage = x - columnWidth < 0f
+                    while (lineEnd >= limit && limit < segmentEnd) {
+                        val nextLimit = sentenceStarts.filter { it > limit && it < segmentEnd }
+                            .minOrNull() ?: segmentEnd
+                        val trialEnd = buildVerticalLineEnd(text, lineStart, nextLimit, columnSpace)
+                        if (trialEnd <= lineEnd) break
+                        if (lastColumnOfPage && trialEnd < nextLimit) break
+                        lineEnd = trialEnd
+                        limit = nextLimit
+                    }
                     val lineText = text.substring(lineStart, lineEnd)
                     val line = createVerticalLine(
                         text = lineText,
@@ -218,17 +240,17 @@ internal class VerticalTextChapterLayout(
                     )
                     currentColumns += line
                     x -= columnWidth
-                    y = 0f
                     lineStart = lineEnd
                     while (
-                        lineStart < blockEnd &&
-                        VerticalTextGlyphEngine.isAsciiRunSpace(text[lineStart]) &&
+                        lineStart < limit &&
+                        isAsciiRunSpaceChar(text[lineStart]) &&
                         text.getOrNull(lineStart + 1)?.let(VerticalTextGlyphEngine::isAsciiWordChar) == true
                     ) {
                         lineStart += 1
                     }
                 }
-                blockStart = blockEnd
+                // 内层可能已经顺着并入的整句排到 blockEnd 之后，这里要跳到实际排到的位置
+                blockStart = lineStart.coerceAtLeast(blockEnd)
             }
         }
 
@@ -442,8 +464,9 @@ internal class VerticalTextChapterLayout(
                     y += blockHeight
                 }
             } else {
-                val tokenHeight = if (token.isLatinRun) {
-                    token.heightPx.coerceAtLeast(glyphHeight)
+                val tokenHeight = if (token.measuredAdvance) {
+                    // 欧文は比例送り：実測幅をそのまま使う（全角 1 字分に丸めない）
+                    token.heightPx.coerceAtLeast(1f)
                 } else {
                     glyphHeight * token.heightUnits.coerceAtLeast(1)
                 }
@@ -510,14 +533,14 @@ internal class VerticalTextChapterLayout(
     }
 
     /**
-     * 竖排独立段落图片的显示尺寸：按原图比例计算，只缩小、不放大、不做钳制
-     * （与参考实现 legado 的 setTypeImage 行为一致），保证绘制矩形与图片同比例。
+     * 竖排独立段落图片的显示尺寸：按原图比例缩放到铺满可用区域（允许放大，见
+     * [fitReaderStandaloneImageSize]），保证绘制矩形与图片同比例。
      * [availableHeight] 为当前页可用高度（首页需扣除章节标题预留）。
      */
     private fun imageBlockSize(
         chapter: TextChapter,
         chapterPosition: Int,
-        availableHeight: Float = visibleHeight.toFloat()
+        availableHeight: Float
     ): ImageBlockSize {
         val bounds = chapter.images[chapterPosition]?.readBytes()?.let(::decodeBitmapBounds)
         val sourceWidth = bounds?.width?.toFloat()?.takeIf { it > 0f }
@@ -525,18 +548,12 @@ internal class VerticalTextChapterLayout(
         if (sourceWidth == null || sourceHeight == null) {
             return ImageBlockSize(width = columnWidth * 4f, height = glyphHeight * 6f)
         }
-        var width = sourceWidth
-        var height = sourceHeight
-        val maxWidth = visibleWidth.toFloat()
-        val maxHeight = availableHeight
-        if (width > maxWidth) {
-            height = height * maxWidth / width
-            width = maxWidth
-        }
-        if (height > maxHeight) {
-            width = width * maxHeight / height
-            height = maxHeight
-        }
+        val (width, height) = fitReaderStandaloneImageSize(
+            sourceWidth = sourceWidth,
+            sourceHeight = sourceHeight,
+            maxWidth = visibleWidth.toFloat(),
+            maxHeight = availableHeight
+        )
         return ImageBlockSize(width = width, height = height)
     }
 
@@ -552,20 +569,54 @@ internal class VerticalTextChapterLayout(
         return height.coerceAtLeast(glyphHeight).coerceAtMost(availableHeight)
     }
 
+    /**
+     * 竖排取词。欧文按 JLREQ §3.2.6 处理：一続きの欧文は横倒しのまま連続して並べ、
+     * 語間は欧文間隔（cl-26）だけを空け、語の途中では折らない。
+     * そこで「英数字を含む ASCII の連続区間」を 1 つの token（= 1 本の横倒しラン）にまとめる。
+     * まとめないと語ごとに 1 列を使い、さらに語間の空白が 1 字分のセルを占めて
+     * 語間が全角に開いてしまう（実測で語間 76px ≒ 全角 1 字、正しくは約 1/4 字）。
+     * 列に収まらない場合は [fitLatinRunLength] が空白の位置で折る（語は分割されない）。
+     */
     private fun nextToken(text: String, start: Int, end: Int): VerticalToken {
+        val runEnd = asciiTextRunEnd(text, start, end)
+        if (runEnd > start) {
+            val runText = text.substring(start, runEnd)
+            return measuredAdvanceToken(runText, length = runEnd - start, heightPx = latinRunHeight(runText))
+        }
         val shared = VerticalTextGlyphEngine.nextVerticalTextToken(text, start, end)
         if (shared.sourceEndExclusive <= start) return VerticalToken("", 0, 0, 0f, false)
-        val isLatinRun = VerticalTextGlyphEngine.isSidewaysAsciiToken(shared.text) &&
-            !VerticalTextGlyphEngine.isTateChuYokoToken(shared.text)
-        val heightPx = if (isLatinRun) latinRunHeight(shared.text) else glyphHeight
-        val measuredUnits = ceil((heightPx / glyphHeight).coerceAtLeast(1f).toDouble()).toInt()
+        // 和文に挟まれた欧文語間の空白も比例幅にする（全角 1 字分は空けない）
+        if (shared.text.all(::isAsciiRunSpaceChar)) {
+            return measuredAdvanceToken(
+                text = shared.text,
+                length = shared.sourceEndExclusive - start,
+                heightPx = asciiSpaceAdvance()
+            )
+        }
         return VerticalToken(
             text = shared.text,
-            length = shared.sourceEndExclusive - shared.sourceOffset,
-            heightUnits = if (isLatinRun) measuredUnits.coerceAtLeast(1) else 1,
-            heightPx = heightPx,
-            isLatinRun = isLatinRun
+            length = shared.sourceEndExclusive - start,
+            heightUnits = 1,
+            heightPx = glyphHeight,
+            measuredAdvance = false
         )
+    }
+
+    private fun measuredAdvanceToken(text: String, length: Int, heightPx: Float): VerticalToken {
+        val height = heightPx.coerceAtLeast(1f)
+        val units = ceil((height / glyphHeight).coerceAtLeast(1f).toDouble()).toInt().coerceAtLeast(1)
+        return VerticalToken(
+            text = text,
+            length = length,
+            heightUnits = units,
+            heightPx = height,
+            measuredAdvance = true
+        )
+    }
+
+    /** 欧文の語間（cl-26）の送り量：プロポーショナルな空白幅。 */
+    private fun asciiSpaceAdvance(): Float {
+        return (contentPaint.measureText(" ") + config.letterSpacingPx).coerceAtLeast(1f)
     }
 
     private fun latinRunHeight(text: String): Float {
@@ -574,7 +625,7 @@ internal class VerticalTextChapterLayout(
     }
 
     private fun tokenHeight(token: VerticalToken): Float {
-        return if (token.isLatinRun) {
+        return if (token.measuredAdvance) {
             token.heightPx
         } else {
             glyphHeight * token.heightUnits.coerceAtLeast(1)
@@ -595,7 +646,7 @@ internal class VerticalTextChapterLayout(
                 break
             }
             if (usedHeight == 0f && height > maxHeight) {
-                val count = if (token.isLatinRun) {
+                val count = if (token.measuredAdvance) {
                     fitLatinRunLength(token.text, maxHeight)
                 } else {
                     1
@@ -627,7 +678,7 @@ internal class VerticalTextChapterLayout(
         if (count >= text.length) return count
         val lastSpaceBeforeBreak = text
             .substring(0, count)
-            .indexOfLast(VerticalTextGlyphEngine::isAsciiRunSpace)
+            .indexOfLast(::isAsciiRunSpaceChar)
         if (lastSpaceBeforeBreak >= 0) {
             return (lastSpaceBeforeBreak + 1).coerceAtLeast(1)
         }
@@ -639,7 +690,8 @@ internal class VerticalTextChapterLayout(
         val length: Int,
         val heightUnits: Int,
         val heightPx: Float,
-        val isLatinRun: Boolean
+        /** true なら送り量は実測値（欧文の横倒しラン・欧文語間の空白）、false なら全角 1 字分。 */
+        val measuredAdvance: Boolean
     )
 
     private data class ImageBlockSize(

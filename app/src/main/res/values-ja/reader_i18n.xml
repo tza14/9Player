@@ -141,9 +141,9 @@
     <string name="reader_search_result_current">検索結果: %1$d/%2$d / 現在の章: %3$s</string>
     <string name="reader_search_result_none">結果なし</string>
     <string name="reader_search_result_total">検索結果: %1$d</string>
-    <string name="reader_search_results_action">◇\n結果</string>
-    <string name="reader_search_main_menu_action">◇\nメニュー</string>
-    <string name="reader_search_exit_action">◇\n終了</string>
+    <string name="reader_search_results_action">結果</string>
+    <string name="reader_search_main_menu_action">メニュー</string>
+    <string name="reader_search_exit_action">終了</string>
     <string name="reader_catalog_not_ready">目次はまだ読み込み中です</string>
     <string name="reader_catalog_title_chapters">目次</string>
     <string name="reader_catalog_title_bookmarks">しおり</string>

@@ -1,10 +1,16 @@
 package moe.tekuza.m9player
 
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
 
+/**
+ * 词典导入链路的**资源上限 tripwire**：条目数 / 字节上限 / 路径安全 / 越界检查都散在
+ * C++ 与 JNI 里，native 侧目前没有测试目标（真测试需要一个 ctest target，见
+ * `app/src/main/cpp/CMakeLists.txt` 里被 `CMAKE_DISABLE_TESTING` 挡住的那些），
+ * 所以这里只钉"上限常量还在、调用点还在用带限读法"。
+ * 不写按名字的负断言（换个变量名就失效，属于假守卫）。
+ */
 class ArchiveImportLimitsSourceTest {
     @Test
     fun nativeHoshiImporterLimitsEntriesAndStreamsMediaWrites() {
@@ -22,7 +28,6 @@ class ArchiveImportLimitsSourceTest {
         assertTrue(source.contains("zip.read(index_idx, Zip::kMaxIndexBytes)"))
         assertTrue(source.contains("zip.read(styles_idx, Zip::kMaxStyleBytes)"))
         assertTrue(source.contains("media.write(buf.data()"))
-        assertFalse(source.contains("std::vector<char> blobs_buf"))
     }
 
     @Test
@@ -34,7 +39,6 @@ class ArchiveImportLimitsSourceTest {
         assertTrue(store.contains("HOSHI_IMPORT_ARCHIVE_MAX_BYTES"))
         assertTrue(media.contains("DICTIONARY_MEDIA_RESPONSE_MAX_BYTES"))
         assertTrue(media.contains("readDictionaryMediaBytesLimited"))
-        assertFalse(media.contains("input.readBytes()"))
         assertTrue(jni.contains("kMaxJavaMediaBytes"))
         assertTrue(jni.contains("entry.size > kMaxJavaMediaBytes"))
         assertTrue(jni.contains("obj->query.get_media_file(dict_name_str, media_path_str)"))

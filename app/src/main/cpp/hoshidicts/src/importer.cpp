@@ -30,7 +30,6 @@ namespace {
 struct Files {
   std::vector<int> term_banks;
   std::vector<int> meta_banks;
-  std::vector<int> tag_banks;
   std::vector<int> media_files;
 };
 
@@ -78,7 +77,7 @@ Files get_files(const Zip& zip) {
     } else if (name.starts_with("term_meta_bank_")) {
       files.meta_banks.push_back(i);
     } else if (name.starts_with("tag_bank_")) {
-      files.tag_banks.push_back(i);
+      // Tag banks are not consumed by the reader; skip them and keep them out of media limits.
     } else if (!(name == "styles.css" || name == "index.json")) {
       const uint64_t media_size = zip.entries[i].uncompressed_size;
       if (files.media_files.size() >= Zip::kMaxMediaFiles || media_size > Zip::kMaxMediaEntryBytes ||
@@ -115,81 +114,8 @@ void write_bytes(std::vector<char>& out, const void* data, size_t n) {
 }
 
 void radix_sort(std::vector<std::pair<uint64_t, uint64_t>>& offsets) {
-  if (offsets.size() < 2) {
-    return;
-  }
-
-  const size_t n = offsets.size();
-  const size_t num_threads = std::max<size_t>(1, std::thread::hardware_concurrency());
-  std::vector<std::pair<uint64_t, uint64_t>> temp(n);
-  auto* src = &offsets;
-  auto* dst = &temp;
-
-  std::vector<std::array<size_t, 65536>> local_counts(num_threads);
-  auto global_count = std::make_unique<std::array<size_t, 65536>>();
-  auto global_pos = std::make_unique<std::array<size_t, 65536>>();
-
-  for (uint32_t shift = 0; shift < 64; shift += 16) {
-    const size_t chunk = (n + num_threads - 1) / num_threads;
-    std::vector<std::future<void>> futures;
-    for (size_t t = 0; t < num_threads; t++) {
-      const size_t begin = t * chunk;
-      const size_t end = std::min(begin + chunk, n);
-      if (begin >= n) {
-        break;
-      }
-
-      local_counts[t].fill(0);
-      futures.push_back(std::async(std::launch::async, [src, shift, begin, end, &local_counts, t]() {
-        for (size_t i = begin; i < end; i++) {
-          local_counts[t][((*src)[i].first >> shift) & 0xffff]++;
-        }
-      }));
-    }
-    for (auto& future : futures) {
-      future.get();
-    }
-
-    global_count->fill(0);
-    for (size_t t = 0; t < futures.size(); t++) {
-      for (size_t bucket = 0; bucket < 65536; bucket++) {
-        (*global_count)[bucket] += local_counts[t][bucket];
-      }
-    }
-
-    global_pos->fill(0);
-    size_t total = 0;
-    for (size_t bucket = 0; bucket < 65536; bucket++) {
-      (*global_pos)[bucket] = total;
-      total += (*global_count)[bucket];
-    }
-
-    std::vector<std::array<size_t, 65536>> thread_pos(futures.size());
-    for (size_t bucket = 0; bucket < 65536; bucket++) {
-      size_t pos = (*global_pos)[bucket];
-      for (size_t t = 0; t < futures.size(); t++) {
-        thread_pos[t][bucket] = pos;
-        pos += local_counts[t][bucket];
-      }
-    }
-
-    std::vector<std::future<void>> scatter_futures;
-    for (size_t t = 0; t < futures.size(); t++) {
-      const size_t begin = t * chunk;
-      const size_t end = std::min(begin + chunk, n);
-      scatter_futures.push_back(std::async(std::launch::async, [src, dst, shift, begin, end, &thread_pos, t]() {
-        for (size_t i = begin; i < end; i++) {
-          const size_t bucket = ((*src)[i].first >> shift) & 0xffff;
-          (*dst)[thread_pos[t][bucket]++] = (*src)[i];
-        }
-      }));
-    }
-    for (auto& future : scatter_futures) {
-      future.get();
-    }
-
-    std::swap(src, dst);
-  }
+  // Stable to keep the same entry order as the previous LSD radix sort for duplicate keys.
+  std::ranges::stable_sort(offsets, {}, &std::pair<uint64_t, uint64_t>::first);
 }
 
 ProcessedFile process_term_bank(const std::string& content) {
@@ -495,6 +421,7 @@ ImportResult dictionary_importer::import(const std::string& zip_path, const std:
 
     std::filesystem::path dict_path = std::filesystem::path(output_dir) / safe_dictionary_dir_name(result.title);
     std::string path = dict_path.string();
+    result.dict_path = path;
     std::filesystem::create_directories(dict_path);
 
     if (glz::write_file_json(index, path + "/index.json", std::string{})) {

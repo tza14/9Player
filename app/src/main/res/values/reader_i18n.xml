@@ -141,9 +141,9 @@
     <string name="reader_search_result_current">搜索结果: %1$d/%2$d / 当前章节: %3$s</string>
     <string name="reader_search_result_none">暂无结果</string>
     <string name="reader_search_result_total">搜索结果: %1$d</string>
-    <string name="reader_search_results_action">◇\n结果</string>
-    <string name="reader_search_main_menu_action">◇\n主菜单</string>
-    <string name="reader_search_exit_action">◇\n退出</string>
+    <string name="reader_search_results_action">结果</string>
+    <string name="reader_search_main_menu_action">主菜单</string>
+    <string name="reader_search_exit_action">退出</string>
     <string name="reader_catalog_not_ready">目录还没有加载完成</string>
     <string name="reader_catalog_title_chapters">目录</string>
     <string name="reader_catalog_title_bookmarks">书签</string>

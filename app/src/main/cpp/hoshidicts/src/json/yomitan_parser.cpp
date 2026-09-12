@@ -26,13 +26,6 @@ struct glz::meta<Meta> {
   static constexpr auto value = array(glz::raw_string<&T::expression>, glz::raw_string<&T::mode>, &T::data);
 };
 
-template <>
-struct glz::meta<Tag> {
-  using T = Tag;
-  static constexpr auto value =
-      array(glz::raw_string<&T::name>, glz::raw_string<&T::category>, &T::order, glz::raw_string<&T::notes>, &T::score);
-};
-
 namespace internal {
 struct FrequencyValue {
   int value;
@@ -57,15 +50,6 @@ struct PitchesArray {
 struct RawPitch {
   std::string_view reading;
   std::vector<PitchesArray> pitches;
-};
-
-struct TranscriptionsArray {
-  std::string_view ipa;
-};
-
-struct RawIPA {
-  std::string_view reading;
-  std::vector<TranscriptionsArray> transcriptions;
 };
 };
 
@@ -99,18 +83,6 @@ struct glz::meta<internal::RawPitch> {
   static constexpr auto value = object("reading", glz::raw_string<&T::reading>, "pitches", &T::pitches);
 };
 
-template <>
-struct glz::meta<internal::TranscriptionsArray> {
-  using T = internal::TranscriptionsArray;
-  static constexpr auto value = object("ipa", glz::raw_string<&T::ipa>);
-};
-
-template <>
-struct glz::meta<internal::RawIPA> {
-  using T = internal::RawIPA;
-  static constexpr auto value = object("reading", glz::raw_string<&T::reading>, "transcriptions", &T::transcriptions);
-};
-
 bool yomitan_parser::parse_index(std::string_view content, Index& out) {
   auto error = glz::read<glz::opts{.error_on_unknown_keys = false, .error_on_missing_keys = false}>(out, content);
   return !error;
@@ -122,11 +94,6 @@ bool yomitan_parser::parse_term_bank(std::string_view content, std::vector<Term>
 }
 
 bool yomitan_parser::parse_meta_bank(std::string_view content, std::vector<Meta>& out) {
-  auto error = glz::read<glz::opts{.error_on_unknown_keys = false, .error_on_missing_keys = false}>(out, content);
-  return !error;
-}
-
-bool yomitan_parser::parse_tag_bank(std::string_view content, std::vector<Tag>& out) {
   auto error = glz::read<glz::opts{.error_on_unknown_keys = false, .error_on_missing_keys = false}>(out, content);
   return !error;
 }
@@ -180,18 +147,5 @@ bool yomitan_parser::parse_pitch(std::string_view content, ParsedPitch& out) {
   out.reading = parsed.reading;
   out.pitches =
       parsed.pitches | std::views::transform(&internal::PitchesArray::position) | std::ranges::to<std::vector>();
-  return true;
-}
-
-bool yomitan_parser::parse_ipa(std::string_view content, ParsedPitch& out) {
-  internal::RawIPA parsed;
-  auto error = glz::read<glz::opts{.error_on_unknown_keys = false, .error_on_missing_keys = false}>(parsed, content);
-  if (error) {
-    return false;
-  }
-
-  out.reading = parsed.reading;
-  out.transcriptions =
-      parsed.transcriptions | std::views::transform(&internal::TranscriptionsArray::ipa) | std::ranges::to<std::vector>();
   return true;
 }

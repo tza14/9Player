@@ -1,6 +1,5 @@
 package moe.tekuza.m9player
 
-import android.util.Log
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -88,11 +87,10 @@ internal fun MainCollectionsHoshiPopup(
                 val minPopupHeightPx = with(rootDensity) { 260.dp.roundToPx() }
                 val availableHeightPx = (windowSize.height - y - bottomMarginPx).coerceAtLeast(minPopupHeightPx)
                 maxPopupHeight = with(rootDensity) { availableHeightPx.toDp() }
-                Log.d(
-                    "MainHoshiResultPopup",
+                logDebug("MainHoshiResultPopup") {
                     "collections host posPx=$x,$y popupSizePx=${popupContentSize.width}x${popupContentSize.height} " +
-                        "windowPx=${windowSize.width}x${windowSize.height}"
-                )
+                    "windowPx=${windowSize.width}x${windowSize.height}"
+                }
                 return IntOffset(x, y)
             }
         }
@@ -123,10 +121,9 @@ internal fun MainCollectionsHoshiPopup(
                     layoutDirection = layoutDirection,
                     popupContentSize = popupContentSize,
                 )
-                Log.d(
-                    "MainHoshiResultPopup",
+                logDebug("MainHoshiResultPopup") {
                     "collections liveHostOffsetDp=${position.x / rootDensity.density},${position.y / rootDensity.density}"
-                )
+                }
                 hostWindowOffsetDp = Offset(
                     x = position.x / rootDensity.density,
                     y = position.y / rootDensity.density,
@@ -193,11 +190,10 @@ internal fun MainCollectionsHoshiPopup(
                                     previewSentenceCoordinates = it
                                     val bounds = it.boundsInWindow()
                                     val densityScale = rootDensity.density.coerceAtLeast(0.1f)
-                                    Log.d(
-                                        "MainHoshiResultPopup",
+                                    logDebug("MainHoshiResultPopup") {
                                         "collections preview boundsDp=${bounds.left / densityScale},${bounds.top / densityScale} " +
-                                            "${bounds.width / densityScale}x${bounds.height / densityScale} selectedRange=$selectedRange"
-                                    )
+                                        "${bounds.width / densityScale}x${bounds.height / densityScale} selectedRange=$selectedRange"
+                                    }
                                 }
                                 .fillMaxWidth()
                                 .padding(horizontal = 16.dp, vertical = 14.dp),

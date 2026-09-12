@@ -82,6 +82,11 @@
     <string name="settings_export_diagnostics_subtitle">バージョン、端末情報、最近のログ、設定概要を書き出します</string>
     <string name="settings_export_diagnostics_subject">9Player 診断情報</string>
     <string name="settings_export_diagnostics_failed">診断の書き出しに失敗しました。</string>
+    <string name="settings_export_diagnostics_download">ダウンロード</string>
+    <string name="settings_export_diagnostics_download_subtitle">システムの「ダウンロード」に保存します</string>
+    <string name="settings_export_diagnostics_share">共有</string>
+    <string name="settings_export_diagnostics_share_subtitle">他のアプリで診断ファイルを送信します</string>
+    <string name="settings_export_diagnostics_saved">ダウンロードに保存しました：%1$s</string>
     <string name="settings_version_title">現在のバージョン</string>
     <string name="settings_version_toast">現在のバージョン：%1$s</string>
     <string name="settings_open_link_failed">リンクを開けませんでした。</string>
@@ -125,6 +130,9 @@
     <string name="home_display_list">一覧</string>
     <string name="home_cover_aspect_book">表紙比率：~A4</string>
     <string name="home_cover_aspect_square">表紙比率：正方形</string>
+    <string name="home_sort_recent">最近</string>
+    <string name="home_sort_title">タイトル順</string>
+    <string name="home_sort_manual">手動</string>
     <string name="home_cover_adjust_title">表紙を微調整</string>
     <string name="home_cover_adjust_reset">リセット</string>
     <string name="home_cover_adjust_scale">拡大率</string>

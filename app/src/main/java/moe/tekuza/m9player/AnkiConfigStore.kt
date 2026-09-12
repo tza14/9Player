@@ -1,7 +1,6 @@
 package moe.tekuza.m9player
 
 import android.content.Context
-import android.util.Log
 import androidx.compose.runtime.snapshots.SnapshotStateMap
 import org.json.JSONObject
 
@@ -68,19 +67,17 @@ internal fun loadPersistedAnkiConfig(context: Context): PersistedAnkiConfig {
         },
         fieldTemplates = templates
     )
-    Log.d(
-        ANKI_CONFIG_LOG_TAG,
+    logDebug(ANKI_CONFIG_LOG_TAG) {
         "load persisted deck='${config.deckName}' model='${config.modelName}' tagsLen=${config.tags.length} fieldCount=${config.fieldTemplates.size}"
-    )
+    }
     return config
 }
 
 internal fun savePersistedAnkiConfig(context: Context, config: PersistedAnkiConfig) {
     clearPreparedAnkiExportCache()
-    Log.d(
-        ANKI_CONFIG_LOG_TAG,
+    logDebug(ANKI_CONFIG_LOG_TAG) {
         "save persisted deck='${config.deckName}' model='${config.modelName}' tagsLen=${config.tags.length} fieldCount=${config.fieldTemplates.size}"
-    )
+    }
     val obj = JSONObject().apply {
         put("deckName", config.deckName)
         put("modelName", config.modelName)

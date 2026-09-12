@@ -141,9 +141,9 @@
     <string name="reader_search_result_current">Results: %1$d/%2$d / Chapter: %3$s</string>
     <string name="reader_search_result_none">No results</string>
     <string name="reader_search_result_total">Results: %1$d</string>
-    <string name="reader_search_results_action">◇\nResults</string>
-    <string name="reader_search_main_menu_action">◇\nMenu</string>
-    <string name="reader_search_exit_action">◇\nExit</string>
+    <string name="reader_search_results_action">Results</string>
+    <string name="reader_search_main_menu_action">Menu</string>
+    <string name="reader_search_exit_action">Exit</string>
     <string name="reader_catalog_not_ready">Catalog is not ready yet</string>
     <string name="reader_catalog_title_chapters">Chapters</string>
     <string name="reader_catalog_title_bookmarks">Bookmarks</string>

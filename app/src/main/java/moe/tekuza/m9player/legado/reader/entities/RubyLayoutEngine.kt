@@ -53,6 +53,42 @@ internal object RubyLayoutEngine {
         return paint.measureText(annotation) < baseWidth * DISTRIBUTE_THRESHOLD
     }
 
+    /**
+     * ルビが親文字からはみ出すとき、隣接する 1 文字に掛けてよい量（JLREQ 3.3.8）。
+     * 汉字等（cl-19）には掛けない／仮名・長音記号・小書き仮名にはルビ 1 字分まで／
+     * 約物にはその半分まで。
+     */
+    fun allowedRubyOverhang(adjacent: String, rubySize: Float): Float {
+        val first = adjacent.firstOrNull() ?: return 0f
+        return when {
+            isJapaneseIdeograph(first) -> 0f
+            first in RUBY_FULL_OVERHANG_CHARS -> rubySize
+            first in RUBY_PUNCTUATION_OVERHANG_CHARS -> rubySize * 0.5f
+            else -> rubySize * EDGE_OVERHANG_EM
+        }
+    }
+
+    /**
+     * 分割ルビ（&lt;rb&gt;/&lt;rt&gt;）を含めた掛かり量の決定。
+     *
+     * - 同じ親文字群の内側（熟語ルビの字間）は分割ルビの組み方を崩さないよう抑える（JLREQ 3.3.7）。
+     * - 隣の字が自分もルビを持つ場合も、2 つのルビ文字列が触れないよう抑える（JLREQ Fig.137/138）。
+     * - それ以外は、分割ルビでも文字クラスごとの掛かり量まで掛けてよい。モノルビで親文字より
+     *   ルビが長い場合（例：眦←まなじり）はベタ組のまま前後の仮名に掛かる（JLREQ 3.3.5 / 3.3.8）。
+     */
+    fun rubyOverhang(
+        adjacent: String,
+        rubySize: Float,
+        segmented: Boolean,
+        insideBaseGroup: Boolean,
+        adjacentHasRuby: Boolean
+    ): Float {
+        if (segmented && (insideBaseGroup || adjacentHasRuby)) {
+            return rubySize * SEGMENT_OVERHANG_EM
+        }
+        return allowedRubyOverhang(adjacent, rubySize)
+    }
+
     fun verticalGlyphBoxes(
         annotation: String,
         baseColumns: List<TextColumn>,
@@ -112,6 +148,25 @@ internal object RubyLayoutEngine {
     private fun usesBaseSpanDistribution(rubyKind: EbookRubyKind, segmented: Boolean): Boolean {
         return !segmented && (rubyKind == EbookRubyKind.GROUP || rubyKind == EbookRubyKind.JUKUGO)
     }
+
+    private val JAPANESE_IDEOGRAPH_BLOCKS = setOf(
+        Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS,
+        Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS_EXTENSION_A,
+        Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS_EXTENSION_B,
+        Character.UnicodeBlock.CJK_COMPATIBILITY_IDEOGRAPHS
+    )
+
+    private fun isJapaneseIdeograph(char: Char): Boolean =
+        Character.UnicodeBlock.of(char) in JAPANESE_IDEOGRAPH_BLOCKS
+
+    /** 仮名（小書き仮名を含む）。長音記号 'ー' は U+30FC でカタカナ範囲の外なので個別に足す。 */
+    private val RUBY_FULL_OVERHANG_CHARS = setOf('ー') + ('ぁ'..'ん') + ('ァ'..'ヶ')
+
+    private val RUBY_PUNCTUATION_OVERHANG_CHARS = setOf(
+        '、', '。', '，', '．', '・', '：', '；', '！', '？',
+        '「', '『', '（', '《', '〈', '［', '〔',
+        '」', '』', '）', '》', '〉', '］', '〕'
+    )
 
     private fun shouldAttachPerBase(
         rubyChars: List<String>,
