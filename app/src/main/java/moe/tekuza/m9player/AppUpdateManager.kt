@@ -16,7 +16,7 @@ import java.net.URL
 import java.security.MessageDigest
 import java.util.Locale
 
-private const val GITHUB_LATEST_RELEASE_URL = "https://api.github.com/repos/techza14/9Player/releases/latest"
+private const val GITHUB_LATEST_RELEASE_URL = "https://api.github.com/repos/tza14/9Player/releases/latest"
 private const val UPDATE_APK_CACHE_DIR = "update_apk"
 private const val UPDATE_APK_DOWNLOAD_SUFFIX = ".download"
 private val UPDATE_APK_VERSION_REGEX = Regex(

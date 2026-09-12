@@ -4707,7 +4707,7 @@ private fun ReaderSyncScreen() {
                         onGuideClick = {
                             val intent = Intent(
                                 Intent.ACTION_VIEW,
-                                Uri.parse("https://github.com/techza14/9Player")
+                                Uri.parse("https://github.com/tza14/9Player")
                             )
                             runCatching { context.startActivity(intent) }
                                 .onFailure { Toast.makeText(context, context.getString(R.string.settings_open_link_failed), Toast.LENGTH_SHORT).show() }

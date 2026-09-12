@@ -130,7 +130,7 @@ Anki模板：[Lapis](https://github.com/donkuri/lapis)
 
 ## 手環端
 
-https://github.com/techza14/9Player-vela
+https://github.com/tza14/9Player-vela
 
 ## 特別感謝
 

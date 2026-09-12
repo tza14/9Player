@@ -126,7 +126,7 @@ Double tap: Expand the control bar.
 
 ## Mi Band
 
-https://github.com/techza14/9Player-vela
+https://github.com/tza14/9Player-vela
 
 ## Credits
 

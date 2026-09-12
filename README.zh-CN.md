@@ -128,7 +128,7 @@ Anki模板:[Lapis](https://github.com/donkuri/lapis)
 
 ## 手环端
 
-https://github.com/techza14/9Player-vela
+https://github.com/tza14/9Player-vela
 
 ##  特别感谢
 
