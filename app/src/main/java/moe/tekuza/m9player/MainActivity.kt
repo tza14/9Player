@@ -1869,10 +1869,7 @@ private fun ReaderSyncScreen() {
                 persistedBookCoverAdjustment(book, HomeCoverCropFocus.CENTER)?.let { adjustment -> audio to adjustment }
             }
             .toMap()
-        // 导入时间同理必须沿用持久化记录：扫描只负责"文件现在长什么样"，
-        // 重建出来的 ReaderBook 上 addedAtMs 是 0，漏捞就会让整架书在
-        // 「最近」排序里塌回按书名排（刷新一次即中）。认书用 persistImportState
-        // 那套 import key，保证两边认的是同一本书。
+        // 重建只还原文件信息，导入时间沿用持久化记录（认书用 import key，同 persistImportState）
         val persistedAddedAtByImportKey = persistedState.books
             .filter { it.addedAtMs > 0L }
             .associate { persistedBookImportKey(it) to it.addedAtMs }

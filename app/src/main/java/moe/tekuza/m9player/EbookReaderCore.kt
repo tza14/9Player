@@ -751,12 +751,8 @@ private fun anchorCutPositions(html: String, entries: List<EpubTocEntry>): List<
 }
 
 /** 锚点 `id="X"` 在 html 里的位置（单双引号都认）；找不到返回 null。 */
-private fun anchorIdIndex(html: String, anchor: String): Int? {
-    return listOf("id=\"$anchor\"", "id='$anchor'")
-        .map { html.indexOf(it) }
-        .filter { it >= 0 }
-        .minOrNull()
-}
+private fun anchorIdIndex(html: String, anchor: String): Int? =
+    listOf("id=\"$anchor\"", "id='$anchor'").map { html.indexOf(it) }.filter { it >= 0 }.minOrNull()
 
 /**
  * 找到带 `id="X"` 的那个元素（`id` 位置在 [idIndex]）的起始位置，用来断开 html。
