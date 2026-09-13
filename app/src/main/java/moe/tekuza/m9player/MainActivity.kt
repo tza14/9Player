@@ -400,7 +400,13 @@ internal data class ReaderBook(
     val ebookCoverUri: Uri? = if (coverSource == ReaderBookCoverSource.EBOOK) coverUri else null,
     val coverFocus: HomeCoverCropFocus = HomeCoverCropFocus.CENTER,
     val startBookCoverAdjustment: BookCoverAdjustment? = null,
-    val centerBookCoverAdjustment: BookCoverAdjustment? = null
+    val centerBookCoverAdjustment: BookCoverAdjustment? = null,
+    /**
+     * 导入时间。「最近」排序取它和播放快照时间的较大者，这样刚导入、还没播过的书
+     * 也会排在最前面（以前它没有快照，只能落到"没播过"那组按书名排，看着像沉在底部）。
+     * 0 = 旧数据里没有这个字段，排序时按书名处理。
+     */
+    val addedAtMs: Long = 0L
 ) {
     val isEbookOnly: Boolean
         get() = audioUri == null && ebookUri != null
@@ -968,7 +974,8 @@ private fun ReaderSyncScreen() {
                                         startBookCoverAnchorYPx = book.startBookCoverAdjustment?.anchorYPx,
                                         centerBookCoverZoom = book.centerBookCoverAdjustment?.zoom?.toDouble(),
                                         centerBookCoverAnchorXPx = book.centerBookCoverAdjustment?.anchorXPx,
-                                        centerBookCoverAnchorYPx = book.centerBookCoverAdjustment?.anchorYPx
+                                        centerBookCoverAnchorYPx = book.centerBookCoverAdjustment?.anchorYPx,
+                                        addedAtMs = book.addedAtMs
                                     )
                                 }
                                 savePersistedImports(
@@ -986,6 +993,8 @@ private fun ReaderSyncScreen() {
                                         books = persistedBooks,
                                         selectedBookId = selectedBookId,
                                         homeLibraryView = homeLibraryView.name,
+                                        homeCoverAspect = homeCoverAspect.name,
+                                        homeLibrarySort = homeLibrarySort.name,
                                         dictionaries = dictionaryRefs
                                     )
                                 )
@@ -1195,7 +1204,10 @@ private fun ReaderSyncScreen() {
                 startBookCoverAnchorYPx = book.startBookCoverAdjustment?.anchorYPx,
                 centerBookCoverZoom = book.centerBookCoverAdjustment?.zoom?.toDouble(),
                 centerBookCoverAnchorXPx = book.centerBookCoverAdjustment?.anchorXPx,
-                centerBookCoverAnchorYPx = book.centerBookCoverAdjustment?.anchorYPx
+                centerBookCoverAnchorYPx = book.centerBookCoverAdjustment?.anchorYPx,
+                // 0 = 未知（旧数据，或某些重建路径交上来的新 ReaderBook）：不许把磁盘上
+                // 已知的导入时间降级成 0，否则「最近」排序会静默塌回按书名排。
+                addedAtMs = book.addedAtMs.takeIf { it > 0L } ?: previousBook?.addedAtMs ?: 0L
             )
         }
         val previousSelectedSrt = previous.srtUri?.takeIf { it.isNotBlank() }
@@ -1539,12 +1551,22 @@ private fun ReaderSyncScreen() {
     }
 
     fun upsertReaderBook(book: ReaderBook, activate: Boolean) {
-        // 保持列表存储顺序稳定（手动排序的依据）：已存在则原位更新，新书追加到末尾。
-        // 「最近阅读」排序由播放快照时间驱动，不再依赖把书提前。
+        // 已存在的书原位更新，保持存储顺序稳定（手动排序的依据）。
+        // 新书插到最前而不是追加到末尾：手动排序下也能一眼看到刚导入的书
+        //（与"重新关联字幕"那条路径一致）。「最近」排序不看这个顺序，它按
+        // addedAtMs 与播放快照时间取较大者排。
         readerBooks = if (readerBooks.any { it.id == book.id }) {
-            readerBooks.map { if (it.id == book.id) book else it }
+            // 原位替换时保住导入时间：有些路径（重建/重新授权）会拿一个新构造的 ReaderBook
+            // 过来，那上面的 addedAtMs 是 0，直接替换会让这本书在「最近」里掉到最后。
+            readerBooks.map { current ->
+                if (current.id == book.id) {
+                    book.copy(addedAtMs = book.addedAtMs.takeIf { it > 0L } ?: current.addedAtMs)
+                } else {
+                    current
+                }
+            }
         } else {
-            readerBooks + book
+            listOf(book.copy(addedAtMs = System.currentTimeMillis())) + readerBooks
         }
         if (activate) {
             activateReaderBook(book, persist = true)
@@ -1847,6 +1869,13 @@ private fun ReaderSyncScreen() {
                 persistedBookCoverAdjustment(book, HomeCoverCropFocus.CENTER)?.let { adjustment -> audio to adjustment }
             }
             .toMap()
+        // 导入时间同理必须沿用持久化记录：扫描只负责"文件现在长什么样"，
+        // 重建出来的 ReaderBook 上 addedAtMs 是 0，漏捞就会让整架书在
+        // 「最近」排序里塌回按书名排（刷新一次即中）。认书用 persistImportState
+        // 那套 import key，保证两边认的是同一本书。
+        val persistedAddedAtByImportKey = persistedState.books
+            .filter { it.addedAtMs > 0L }
+            .associate { persistedBookImportKey(it) to it.addedAtMs }
         val previousSelectedId = selectedBookId
         scope.launch {
             srtLoading = true
@@ -1880,6 +1909,7 @@ private fun ReaderSyncScreen() {
                                 ?: rebuilt.audioUri?.toString()?.let { persistedStartAdjustmentByAudioUri[it] }
                             val persistedCenterAdjustment = persistedCenterAdjustmentById[rebuilt.id]
                                 ?: rebuilt.audioUri?.toString()?.let { persistedCenterAdjustmentByAudioUri[it] }
+                            val persistedAddedAt = persistedAddedAtByImportKey[readerBookImportKey(rebuilt)] ?: 0L
                             val titled = if (!persistedTitle.isNullOrBlank()) {
                                 rebuilt.copy(title = persistedTitle)
                             } else {
@@ -1888,7 +1918,8 @@ private fun ReaderSyncScreen() {
                             titled.copy(
                                 coverFocus = persistedFocus,
                                 startBookCoverAdjustment = persistedStartAdjustment,
-                                centerBookCoverAdjustment = persistedCenterAdjustment
+                                centerBookCoverAdjustment = persistedCenterAdjustment,
+                                addedAtMs = persistedAddedAt
                             )
                         }.onSuccess { refreshedBooks += it }
                     }
@@ -2099,7 +2130,9 @@ private fun ReaderSyncScreen() {
                             restored.copy(
                                 coverFocus = coverFocus,
                                 startBookCoverAdjustment = persistedStartAdjustment,
-                                centerBookCoverAdjustment = persistedCenterAdjustment
+                                centerBookCoverAdjustment = persistedCenterAdjustment,
+                                // 与「刷新文件夹」同理：重建只还原文件信息，导入时间要跟着记录走。
+                                addedAtMs = savedBook.addedAtMs
                             )
                         }.onSuccess { restoredBooks += it }
                             .onFailure {
@@ -3618,14 +3651,14 @@ private fun ReaderSyncScreen() {
                         HomeLibrarySort.TITLE -> readerBooks.sortedWith(
                             compareBy({ it.title.lowercase(Locale.ROOT) }, { it.id })
                         )
-                        HomeLibrarySort.RECENT -> {
-                            val (touched, untouched) = readerBooks.partition {
-                                readerBookPlaybackSnapshots[it.id] != null
-                            }
-                            touched.sortedByDescending {
-                                readerBookPlaybackSnapshots[it.id]?.updatedAtMs ?: 0L
-                            } + untouched.sortedBy { it.title.lowercase(Locale.ROOT) }
-                        }
+                        HomeLibrarySort.RECENT -> readerBooks.sortedWith(
+                            // 「最近」＝最近动过的：导入时间与播放快照时间取较大者。
+                            // 刚导入还没播过的书以前没有快照，只能落到"没播过"那一组按书名排，
+                            // 于是看着像沉在列表底部；现在它按导入时间参与排序，直接排在前面。
+                            compareByDescending<ReaderBook> {
+                                maxOf(it.addedAtMs, readerBookPlaybackSnapshots[it.id]?.updatedAtMs ?: 0L)
+                            }.thenBy { it.title.lowercase(Locale.ROOT) }.thenBy { it.id }
+                        )
                         HomeLibrarySort.MANUAL -> readerBooks
                     }
                 }
@@ -5376,7 +5409,8 @@ private fun PersistedReaderBook.toReaderBookOrNull(): ReaderBook? {
         coverSource = if (parsedAudioUri == null && parsedEbookUri != null) ReaderBookCoverSource.EBOOK else null,
         coverFocus = bookFocusOrDefault(this),
         startBookCoverAdjustment = persistedBookCoverAdjustment(this, HomeCoverCropFocus.START),
-        centerBookCoverAdjustment = persistedBookCoverAdjustment(this, HomeCoverCropFocus.CENTER)
+        centerBookCoverAdjustment = persistedBookCoverAdjustment(this, HomeCoverCropFocus.CENTER),
+        addedAtMs = addedAtMs
     )
 }
 

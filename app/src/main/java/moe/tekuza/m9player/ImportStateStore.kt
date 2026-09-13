@@ -36,7 +36,9 @@ internal data class PersistedReaderBook(
     val bookCoverAnchorXPx: Int? = null,
     val bookCoverAnchorYPx: Int? = null,
     val bookCoverViewportX: Double? = null,
-    val bookCoverViewportY: Double? = null
+    val bookCoverViewportY: Double? = null,
+    /** 导入时间（毫秒）。旧数据没有这个字段，读出来是 0 —— 排序时按书名处理，无需迁移。 */
+    val addedAtMs: Long = 0L
 )
 
 internal data class PersistedImports(
@@ -177,7 +179,8 @@ internal fun loadPersistedImports(context: Context): PersistedImports {
             bookCoverAnchorXPx = bookCoverAnchorXPx,
             bookCoverAnchorYPx = bookCoverAnchorYPx,
             bookCoverViewportX = bookCoverViewportX,
-            bookCoverViewportY = bookCoverViewportY
+            bookCoverViewportY = bookCoverViewportY,
+            addedAtMs = item.optLong("addedAtMs", 0L)
         )
     }
 
@@ -237,6 +240,8 @@ internal fun savePersistedImports(context: Context, state: PersistedImports) {
                         put("bookCoverZoom", book.bookCoverZoom ?: JSONObject.NULL)
                         put("bookCoverAnchorXPx", book.bookCoverAnchorXPx ?: JSONObject.NULL)
                         put("bookCoverAnchorYPx", book.bookCoverAnchorYPx ?: JSONObject.NULL)
+                        // 少了这一行，"最近"排序里的导入时间在重启后就是 0，刚导入的书会掉回列表底部
+                        put("addedAtMs", book.addedAtMs)
                     })
                 }
             }
