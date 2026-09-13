@@ -126,18 +126,61 @@ class EbookTocAnchorSplitTest {
     }
 
     @Test
-    fun epubHtmlSegments_givesNoSegmentToADuplicateAnchor() {
-        // 两条目录条目指向同一个锚点：第二条没有自己的段（正文不会重复出现），
-        // 但**不影响**其余章节照常切分。这条同时钉住 anchorCutPositions 里的
-        // usedAnchorIndexes —— 删掉它这里会变成 4 段。
+    fun epubHtmlSegments_givesEachEntryItsOwnCutWhenTwoShareAnAnchor() {
+        // 两条目录条目指向同一个锚点（标题相同）：两条各算各的切点 —— 前一条落在外层大 div 上、
+        // 后一条落在锚点元素上。多出来的那段是空的，上层会丢掉，所以目录里仍然只有一行。
         val segments = epubHtmlSegments(
             wrappedHtml,
             tocEntriesOf("toc-anchor", "toc-anchor", "toc-anchor-1")
         )
 
-        assertEquals(3, segments.size)
-        assertEquals("toc-anchor", segments[1].entry?.fragment)
-        assertEquals("toc-anchor-1", segments[2].entry?.fragment)
+        assertEquals(4, segments.size)
+        assertEquals(
+            listOf(null, "toc-anchor", "toc-anchor", "toc-anchor-1"),
+            segments.map { it.entry?.fragment }
+        )
+        val parts = segments.textsIn(wrappedHtml)
+        // 第 1 段只有外层 div 的开标签（没有正文，上层会当空章节丢掉），标题落在第 2 段
+        assertTrue(!parts[1].contains("前 言"))
+        assertTrue(parts[2].contains("前 言"))
+    }
+
+    /**
+     * 《苏珊·福沃德心理学经典作品集》的真实形状：**"第一部分 X"和它的"第一章 Y"共用一个锚点**
+     * —— 部分的标题在自己文件里没有 id（`<h2>` 无 id），制作方就把部分条目指到了子节点的 h3 上。
+     */
+    private val sharedAnchorHtml = """
+        <body><h2 class="first">第一部分 疯狂的控制型关系</h2><h3 id="sigil_toc_id_1">第一章 从天而降的真命天子</h3><p>一见钟情是非常美好的爱情体验。</p><h3 id="sigil_toc_id_57">第二章 当蜜月结束时</h3><p>蜜月总会结束。</p></body>
+    """.trimIndent()
+
+    @Test
+    fun epubHtmlSegments_splitsPartAndItsFirstChapterThatShareAnAnchor() {
+        val entries = listOf(
+            tocEntryOf("OEBPS", "part.xhtml#sigil_toc_id_1", "第一部分 疯狂的控制型关系"),
+            tocEntryOf("OEBPS", "part.xhtml#sigil_toc_id_1", "第一章 从天而降的真命天子"),
+            tocEntryOf("OEBPS", "part.xhtml#sigil_toc_id_57", "第二章 当蜜月结束时")
+        // level/isGroup 不参与切分（只有 fragment 和 title 参与），所以这里不用设
+        ).map { requireNotNull(it) }
+
+        val segments = epubHtmlSegments(sharedAnchorHtml, entries)
+        val parts = segments.textsIn(sharedAnchorHtml)
+
+        // 4 段：首段（空的） + 部分 + 第一章 + 第二章
+        assertEquals(4, parts.size)
+        assertEquals(
+            listOf(null, "第一部分 疯狂的控制型关系", "第一章 从天而降的真命天子", "第二章 当蜜月结束时"),
+            segments.map { it.entry?.title }
+        )
+        // "部分"拿到的是锚点**前面**那个同标题的 <h2>（它自己成一段标题页），
+        // 而不是从锚点开始 —— 否则它会吞掉第一章的正文、第一章整章消失
+        assertTrue(parts[1].startsWith("<h2"))
+        assertTrue(parts[1].contains("第一部分 疯狂的控制型关系"))
+        assertTrue(!parts[1].contains("一见钟情"))
+        // "第一章"从自己的 h3 开始，正文归它
+        assertTrue(parts[2].startsWith("<h3 id=\"sigil_toc_id_1\">"))
+        assertTrue(parts[2].contains("一见钟情"))
+        assertTrue(!parts[2].contains("蜜月总会结束"))
+        assertTrue(parts[3].contains("蜜月总会结束"))
     }
 
     @Test

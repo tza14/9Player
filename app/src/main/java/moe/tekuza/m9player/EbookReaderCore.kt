@@ -453,7 +453,6 @@ private fun loadEpubDocumentFromZip(
                 path = path,
                 imageResources = epubImages,
                 tocEntriesForFile = tocEntries.filter { it.path == path },
-                fallbackTitle = fallbackEpubChapterTitle(html, isFirstSpineItem = index == 0),
                 isFirstSpineItem = index == 0
             )
         }.flatten().ifEmpty {
@@ -464,7 +463,6 @@ private fun loadEpubDocumentFromZip(
                     path = path,
                     imageResources = epubImages,
                     tocEntriesForFile = emptyList(),
-                    fallbackTitle = fallbackEpubChapterTitle(html, isFirstSpineItem = index == 0),
                     isFirstSpineItem = index == 0
                 )
             }.flatten().filter { it.text.isNotBlank() || it.isVolume }
@@ -516,7 +514,6 @@ private fun loadEpubDocumentFromCache(
                 path = path,
                 imageResources = epubImages,
                 tocEntriesForFile = tocEntries.filter { it.path == path },
-                fallbackTitle = fallbackEpubChapterTitle(html, isFirstSpineItem = index == 0),
                 isFirstSpineItem = index == 0
             )
         }.flatten().ifEmpty {
@@ -528,7 +525,6 @@ private fun loadEpubDocumentFromCache(
                     path = path,
                     imageResources = epubImages,
                     tocEntriesForFile = emptyList(),
-                    fallbackTitle = fallbackEpubChapterTitle(html, isFirstSpineItem = index == 0),
                     isFirstSpineItem = index == 0
                 )
             }.flatten().filter { it.text.isNotBlank() || it.isVolume }
@@ -559,7 +555,6 @@ private fun fallbackHtmlEpub(
                 path = path,
                 imageResources = epubImages,
                 tocEntriesForFile = emptyList(),
-                fallbackTitle = fallbackEpubChapterTitle(html, isFirstSpineItem = index == 0),
                 isFirstSpineItem = index == 0
             )
         }.flatten().filter { it.text.isNotBlank() }
@@ -582,7 +577,6 @@ private fun fallbackHtmlEpubFromCache(
                 path = path,
                 imageResources = epubImages,
                 tocEntriesForFile = emptyList(),
-                fallbackTitle = fallbackEpubChapterTitle(html, isFirstSpineItem = index == 0),
                 isFirstSpineItem = index == 0
             )
         }.flatten().filter { it.text.isNotBlank() }
@@ -644,27 +638,17 @@ private fun buildEpubChaptersFromHtml(
     path: String,
     imageResources: Map<String, EpubImageResource>,
     tocEntriesForFile: List<EpubTocEntry>,
-    fallbackTitle: String,
     isFirstSpineItem: Boolean
 ): List<EbookChapter> {
     // 只有**带锚点**的条目才对应一段；不带锚点的条目（例：part0007 的「第一章 幼年期」）
     // 是整文件的标题，用来给"锚点之前那一段"命名。
     val anchoredEntries = tocEntriesForFile.filter { it.fragment.isNotBlank() }
     val fileEntry = tocEntriesForFile.firstOrNull { it.fragment.isBlank() }
-    val segments = epubHtmlSegments(html, anchoredEntries)
-    if (segments.isEmpty()) {
-        // 一条锚点都定位不到：整个文件一章，行为与以前一致
-        val chapter = buildEpubChapterFromHtml(
-            html = html,
-            path = path,
-            title = fileEntry?.title ?: tocEntriesForFile.firstOrNull()?.title ?: fallbackTitle,
-            imageResources = imageResources,
-            titleFromMarkup = tocEntriesForFile.isNotEmpty() || extractHtmlHeading(html) != null
-        )
-        val kept = chapter
-            .markImageOrigin(isSectionTitlePage = tocEntriesForFile.isNotEmpty())
-            .takeIf { it.text.isNotBlank() || it.isVolume }
-        return listOfNotNull(kept)
+    // 一条锚点都定位不到（或压根没有带锚点的条目）时整个文件就是一段，命名条目取"不带锚点"
+    // 的那条 —— 很多书的"第二部分 X"就是直接指向整个文件的；没有整文件条目时退化成第一条目，
+    // 标题与 level/isGroup 都取自它，保持一致。这样兜底不需要单独一条分支。
+    val segments = epubHtmlSegments(html, anchoredEntries).ifEmpty {
+        listOf(EpubHtmlSegment(fileEntry ?: tocEntriesForFile.firstOrNull(), 0, html.length))
     }
 
     val chapters = mutableListOf<EbookChapter>()
@@ -680,9 +664,9 @@ private fun buildEpubChaptersFromHtml(
             imageResources = imageResources,
             // 带锚点的段由目录条目命名；"锚点之前"的续段没有条目，标题可信度看整文件条目/正文标题元素
             titleFromMarkup = entry != null || fileEntry != null || extractHtmlHeading(segmentHtml) != null,
-            // 目录层级/大章节标记：首段（锚点之前）没有条目，按顶层算
-            level = entry?.level ?: 0,
-            isGroup = entry?.isGroup == true
+            // 目录层级/大章节标记：带锚点的段用自己的条目，首段（锚点之前）用整文件条目
+            level = (entry ?: fileEntry)?.level ?: 0,
+            isGroup = (entry ?: fileEntry)?.isGroup == true
         )
         if (chapter.text.isNotBlank() || chapter.isVolume) {
             chapters += chapter.markImageOrigin(isSectionTitlePage = entry != null || fileEntry != null)
@@ -711,7 +695,7 @@ internal data class EpubHtmlSegment(
  * 一坏全废（《心理学原理》整本正文排在一个 xhtml 里，曾经因此只显示 2 章）。
  */
 internal fun epubHtmlSegments(html: String, entries: List<EpubTocEntry>): List<EpubHtmlSegment> {
-    val cuts = anchorCutPositions(html, entries.map { it.fragment })
+    val cuts = anchorCutPositions(html, entries)
     if (cuts.none { it != null }) return emptyList()
     val boundaries = mutableListOf<Pair<Int, EpubTocEntry?>>(0 to null)
     cuts.forEachIndexed { index, cut -> if (cut != null) boundaries += cut to entries[index] }
@@ -723,33 +707,38 @@ internal fun epubHtmlSegments(html: String, entries: List<EpubTocEntry>): List<E
 }
 
 /**
- * 按目录顺序逐个锚点算切点，返回**与 [anchors] 一一对应**的位置；定位不到的（以及目录里
- * 重复指向同一锚点的）为 null —— [epubHtmlSegments] 靠这份对齐关系把"段"和"目录条目"配上，
- * 所以不能把 null 挤掉。
+ * 按目录顺序逐个条目算切点，返回**与 [entries] 一一对应**的位置；定位不到的为 null
+ * —— [epubHtmlSegments] 靠这份对齐关系把"段"和"目录条目"配上，所以不能把 null 挤掉。
  *
  * 两条约束缺一不可：
  * - **不能把下一个锚点一起包进来**：有的书整篇正文外面还套着一层大 div
  *   （《心理学原理》的 `<div id="x-">`），往前回溯时会一路爬到它上面，于是好几个锚点
  *   全落到同一个位置上。
  * - **必须排在**上一个**切点之后**：段是按目录顺序挨个配标题的，切点一乱序就张冠李戴。
+ *
+ * 这里**不**按锚点去重：目录里"第一部分 X"和它的"第一章 Y"共用一个锚点是常见写法，
+ * 去重会把后一条整章丢掉。两条各算各的切点，靠"必须递增"自然分开（见 [precedingTitleBlockStart]）。
  */
-private fun anchorCutPositions(html: String, anchors: List<String>): List<Int?> {
-    val anchorIndexes = anchors.map { anchorIdIndex(html, it) }
+private fun anchorCutPositions(html: String, entries: List<EpubTocEntry>): List<Int?> {
+    val anchorIndexes = entries.map { anchorIdIndex(html, it.fragment) }
     val cuts = mutableListOf<Int?>()
-    val usedAnchorIndexes = mutableSetOf<Int>()
     var previousCut: Int? = null
-    anchors.indices.forEach { index ->
+    entries.indices.forEach { index ->
         val ownIndex = anchorIndexes[index]
-        // 承重，删了重复锚点会多切一刀（行为由 epubHtmlSegments_givesNoSegmentToADuplicateAnchor 钉住）
-        if (ownIndex == null || !usedAnchorIndexes.add(ownIndex)) {
+        if (ownIndex == null) {
             cuts += null
             return@forEach
         }
-        // 下一个**能定位到、且排在当前锚点之后**的锚点（重复的那条不算），
-        // 只用来判断候选元素有没有把它一起包住。
+        // 下一个**能定位到、且排在当前锚点之后**的锚点，只用来判断候选元素有没有把它一起包住。
         val nextAnchorIndex = anchorIndexes.subList(index + 1, anchorIndexes.size)
             .firstOrNull { it != null && it > ownIndex }
-        val cut = anchorElementStart(html, ownIndex, nextAnchorIndex, previousCut)
+        val cut = anchorElementStart(
+            html = html,
+            idIndex = ownIndex,
+            nextAnchorIndex = nextAnchorIndex,
+            previousCut = previousCut,
+            chapterTitle = entries[index].title
+        )
         // 切点严格递增（上一个切点之后的候选才会被选中），所以不用再去重排序
         if (cut != null && cut in 1 until html.length) {
             previousCut = cut
@@ -776,12 +765,14 @@ private fun anchorIdIndex(html: String, anchor: String): Int? {
  *
  * [nextAnchorIndex] = 下一个锚点的位置，包住它的候选元素不能用（否则两章会并成一章）；
  * [previousCut] = 上一个切点，不能退回到它前面（否则段序与目录顺序不一致，标题会配错）。
+ * [chapterTitle] 用来处理"部分和它的第一章共用一个锚点"：见 [precedingTitleBlockStart]。
  */
 private fun anchorElementStart(
     html: String,
     idIndex: Int,
     nextAnchorIndex: Int?,
-    previousCut: Int?
+    previousCut: Int?,
+    chapterTitle: String
 ): Int? {
     val anchorTagEnd = html.indexOf('>', idIndex).takeIf { it >= 0 } ?: return null
     var cursor = anchorTagEnd
@@ -806,10 +797,34 @@ private fun anchorElementStart(
         }
         cursor = tagStart
     }
-    return best
+    // 锚点前面紧挨着的"同标题标题块"也算本条目，见 precedingTitleBlockStart
+    val containing = best ?: return null
+    val preceding = precedingTitleBlockStart(html, containing, chapterTitle) ?: return containing
+    return if (previousCut == null || preceding > previousCut) preceding else containing
+}
+
+/**
+ * 锚点元素**前面紧挨着**（中间只有空白）的那个标题块，如果它的文字正好等于本条目的标题，
+ * 就返回它的起点 —— 否则返回 null。
+ *
+ * 例（《苏珊·福沃德》三册）：`<h2>第一部分 X</h2><h3 id="sigil_toc_id_1">第一章 Y</h3>`，
+ * 目录里两条都指向那个 h3（部分标题自己没 id）。没有这条规则，"第一部分"只能从 h3 开始切，
+ * 于是它吞掉第一章的正文、第一章整章丢失。
+ */
+private fun precedingTitleBlockStart(html: String, anchorElementStart: Int, chapterTitle: String): Int? {
+    val title = chapterTitle.cleanTocTitle()
+    if (title.isEmpty()) return null
+    val windowStart = (anchorElementStart - PRECEDING_TITLE_WINDOW).coerceAtLeast(0)
+    val window = html.substring(windowStart, anchorElementStart)
+    // 只认"刚好在这个锚点前面结束"的那个块级元素（`\s*$` 保证是窗口里最后一个）
+    val match = Regex("""(?is)<(h[1-6]|p|div)\b[^>]*>(.*?)</\1>\s*$""").find(window) ?: return null
+    val text = match.groupValues[2].replace(Regex("<[^>]*>"), "").cleanTocTitle()
+    if (text != title) return null
+    return windowStart + match.range.first
 }
 
 private const val ANCHOR_LOOKBACK_LIMIT = 400
+private const val PRECEDING_TITLE_WINDOW = 600
 private val HTML_BLOCK_TAG_REGEX = Regex("(?i)<(div|section|article|p|h[1-6]|li|blockquote|td|tr|table)\\b")
 
 
