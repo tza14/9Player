@@ -10,13 +10,17 @@ import android.util.Xml
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.xmlpull.v1.XmlPullParser
+import org.xml.sax.InputSource
+import org.w3c.dom.Element
 import java.io.ByteArrayInputStream
 import java.io.File
+import java.io.StringReader
 import java.net.URLDecoder
 import java.nio.charset.Charset
 import java.nio.charset.StandardCharsets
 import java.util.Locale
 import java.util.zip.ZipInputStream
+import javax.xml.parsers.DocumentBuilderFactory
 import kotlin.math.max
 
 private const val EBOOK_READER_CORE_LOG_TAG = "EbookReaderCore"
@@ -34,7 +38,14 @@ internal data class EbookDocument(
 internal data class EpubTocEntry(
     val title: String,
     val path: String,
-    val fragment: String = ""
+    val fragment: String = "",
+    /** 目录里的层级，0 = 顶层。只用于目录缩进。 */
+    val level: Int = 0,
+    /**
+     * 这条条目下面还有子条目 —— 也就是"大章节"。照 legado 的做法：navPoint 有 children
+     * 就把父条目当卷处理，目录里灰底显示、下面的子条目缩进。
+     */
+    val isGroup: Boolean = false
 )
 
 internal data class EbookChapter(
@@ -44,6 +55,15 @@ internal data class EbookChapter(
     val images: Map<Int, EbookImageRef> = emptyMap(),
     val rubySpans: List<EbookRubySpan> = emptyList(),
     val isVolume: Boolean = false,
+    /**
+     * 目录里的层级（0 = 顶层），只用于目录缩进。
+     *
+     * 与 [isVolume] 的分工：[isVolume] 是**排版**意义上的卷页（标题形如"第三部分 …"），
+     * 会走居中卷页排版；这里纯粹是目录结构，不影响正文。
+     */
+    val level: Int = 0,
+    /** 目录里这一条还有子条目 —— 即"大章节"，目录里灰底分组显示（照 legado）。 */
+    val isGroup: Boolean = false,
     /**
      * 标题是否来自目录条目或正文标题元素（h1-h3）。
      * false 表示只是 `<title>` 兜底 —— calibre 常常把它写成 part0012 这种文件名，
@@ -575,13 +595,21 @@ private fun buildEpubChapterFromHtml(
     path: String,
     title: String,
     imageResources: Map<String, EpubImageResource>,
-    titleFromMarkup: Boolean
+    titleFromMarkup: Boolean,
+    level: Int = 0,
+    isGroup: Boolean = false
 ): EbookChapter {
+    // "卷/大章节页"：目录结构上还有子条目的（isGroup）和标题形如"第三部分 …"的都算。
+    // 两者必须用同一个判断，否则同样是"大章节"，一本书居中显示标题页、另一本
+    // 却在正文里把标题又排一遍（《我们为什么要睡觉》卷标题写成 <h1> 能剥掉，
+    // 《心理学原理》写成 <p> 剥不掉，于是两本书长得完全不一样）。
+    val isVolumeChapter = isGroup || title.isVolumeTitle()
     val content = htmlToReaderContent(
         html = html,
         htmlBasePath = path.substringBeforeLast('/', missingDelimiterValue = ""),
         imageResources = imageResources,
-        chapterTitle = title
+        chapterTitle = title,
+        isVolumeChapter = isVolumeChapter
     )
     return EbookChapter(
         title = title,
@@ -589,7 +617,9 @@ private fun buildEpubChapterFromHtml(
         sourcePath = path,
         images = content.images,
         rubySpans = content.rubySpans,
-        isVolume = content.text.isBlank() && title.isVolumeTitle(),
+        isVolume = content.text.isBlank() && isVolumeChapter,
+        level = level,
+        isGroup = isGroup,
         titleFromMarkup = titleFromMarkup
     )
 }
@@ -599,7 +629,8 @@ private fun buildEpubChapterFromHtml(
  *
  * 目录里可能有多条指向**同一个文件**、用锚点区分小节的条目（例：無職転生 的
  * part0009.xhtml 里 #a5HS/#a5HT/#a5HU 分别是 第一話/第二話/第三話）。这种就按锚点在
- * html 里的位置把 html 切成多段、各自解析成章节（legado 的做法），标题取各自的目录条目。
+ * html 里的位置把 html 切成多段、各自解析成章节（legado 的做法），标题取各自的目录条目；
+ * 段怎么切、边界怎么定见 [epubHtmlSegments]。
  *
  * 关键：切分在 **html 层**做，不是先转成正文再按字符偏移切。这样每段正文里的图片位置与
  * 注音 span 偏移都是各自独立算出来的，不会出现整体平移错位（我们为此专门修过 bug）。
@@ -619,11 +650,10 @@ private fun buildEpubChaptersFromHtml(
     // 只有**带锚点**的条目才对应一段；不带锚点的条目（例：part0007 的「第一章 幼年期」）
     // 是整文件的标题，用来给"锚点之前那一段"命名。
     val anchoredEntries = tocEntriesForFile.filter { it.fragment.isNotBlank() }
-    val anchors = anchoredEntries.map { it.fragment }
     val fileEntry = tocEntriesForFile.firstOrNull { it.fragment.isBlank() }
-    val segments = splitHtmlAtAnchors(html, anchors)
-    if (anchors.isEmpty() || segments.size != anchors.size + 1) {
-        // 没有可用的锚点位置：整个文件一章，行为与以前一致
+    val segments = epubHtmlSegments(html, anchoredEntries)
+    if (segments.isEmpty()) {
+        // 一条锚点都定位不到：整个文件一章，行为与以前一致
         val chapter = buildEpubChapterFromHtml(
             html = html,
             path = path,
@@ -638,64 +668,121 @@ private fun buildEpubChaptersFromHtml(
     }
 
     val chapters = mutableListOf<EbookChapter>()
-    val leadingHtml = segments.first()
-    val leading = buildEpubChapterFromHtml(
-        html = leadingHtml,
-        path = path,
-        title = fileEntry?.title
-            ?: fallbackEpubChapterTitle(leadingHtml, isFirstSpineItem = isFirstSpineItem),
-        imageResources = imageResources,
-        titleFromMarkup = fileEntry != null || extractHtmlHeading(leadingHtml) != null
-    )
-    if (leading.text.isNotBlank() || leading.isVolume) {
-        chapters += leading.markImageOrigin(isSectionTitlePage = fileEntry != null)
-    }
-    anchoredEntries.forEachIndexed { index, entry ->
-        val segmentHtml = segments[index + 1]
+    segments.forEach { segment ->
+        val entry = segment.entry
+        val segmentHtml = html.substring(segment.start, segment.end)
         val chapter = buildEpubChapterFromHtml(
             html = segmentHtml,
             path = path,
-            title = entry.title,
+            title = entry?.title
+                ?: fileEntry?.title
+                ?: fallbackEpubChapterTitle(segmentHtml, isFirstSpineItem = isFirstSpineItem),
             imageResources = imageResources,
-            titleFromMarkup = true
+            // 带锚点的段由目录条目命名；"锚点之前"的续段没有条目，标题可信度看整文件条目/正文标题元素
+            titleFromMarkup = entry != null || fileEntry != null || extractHtmlHeading(segmentHtml) != null,
+            // 目录层级/大章节标记：首段（锚点之前）没有条目，按顶层算
+            level = entry?.level ?: 0,
+            isGroup = entry?.isGroup == true
         )
         if (chapter.text.isNotBlank() || chapter.isVolume) {
-            chapters += chapter.markImageOrigin(isSectionTitlePage = true)
+            chapters += chapter.markImageOrigin(isSectionTitlePage = entry != null || fileEntry != null)
         }
     }
     return chapters
 }
 
 /**
- * 按目录锚点把一份 xhtml 切成多段，返回 [锚点之前的正文, 锚点1 起, 锚点2 起, …]。
- * 找不到位置的锚点会被忽略（切出来的段数与可用锚点数不一致时，调用方退回"整文件一章"）。
+ * 按锚点切出来的一段：正文是 html 的 `[start, end)`，[entry] 是给它命名的目录条目
+ * （第一个锚点之前的那段没有条目，为 null）。
  */
-internal fun splitHtmlAtAnchors(html: String, anchors: List<String>): List<String> {
-    val cuts = anchors.mapNotNull { anchor -> anchorElementStart(html, anchor) }
-        .filter { it in 1 until html.length }
-        .distinct()
-        .sorted()
-    if (cuts.isEmpty()) return listOf(html)
-    val segments = mutableListOf<String>()
-    var start = 0
-    cuts.forEach { cut ->
-        segments += html.substring(start, cut)
-        start = cut
+internal data class EpubHtmlSegment(
+    val entry: EpubTocEntry?,
+    val start: Int,
+    val end: Int
+)
+
+/**
+ * 把 html 按目录条目的锚点切成若干段，每段带上命名它的那条条目。一条锚点都定位不到时
+ * 返回空 —— 调用方据此退回"整文件一章"。
+ *
+ * 段的边界沿用 legado 的 start/end 模型：起点是**它自己那条条目的锚点**，终点是**下一条
+ * 能定位到的锚点**。所以某条锚点在正文里找不到（错字、被改过）时不会产生段，它的正文留在
+ * 相邻段里 —— 坏一条只影响它自己那一章，而不像"段数对不上锚点数就整本书退回一章"那样
+ * 一坏全废（《心理学原理》整本正文排在一个 xhtml 里，曾经因此只显示 2 章）。
+ */
+internal fun epubHtmlSegments(html: String, entries: List<EpubTocEntry>): List<EpubHtmlSegment> {
+    val cuts = anchorCutPositions(html, entries.map { it.fragment })
+    if (cuts.none { it != null }) return emptyList()
+    val boundaries = mutableListOf<Pair<Int, EpubTocEntry?>>(0 to null)
+    cuts.forEachIndexed { index, cut -> if (cut != null) boundaries += cut to entries[index] }
+    // 末尾压一个哨兵，zipWithNext 就不用再单独处理"最后一段到文末"这个边界情况
+    boundaries += html.length to null
+    return boundaries.zipWithNext { (start, entry), (next, _) ->
+        EpubHtmlSegment(entry = entry, start = start, end = next)
     }
-    segments += html.substring(start)
-    return segments
 }
 
 /**
- * 找到包含锚点 `id="X"` 的那个元素的起始位置，用来断开 html。
- * 从锚点往前找最近的开始标签，取"在锚点之后才闭合"的最外层那个（限制在**一段距离内**，
- * 避免一直回溯到 body/html），这样每段的标签是平衡的，也不会把上一段的样式包住。
+ * 按目录顺序逐个锚点算切点，返回**与 [anchors] 一一对应**的位置；定位不到的（以及目录里
+ * 重复指向同一锚点的）为 null —— [epubHtmlSegments] 靠这份对齐关系把"段"和"目录条目"配上，
+ * 所以不能把 null 挤掉。
+ *
+ * 两条约束缺一不可：
+ * - **不能把下一个锚点一起包进来**：有的书整篇正文外面还套着一层大 div
+ *   （《心理学原理》的 `<div id="x-">`），往前回溯时会一路爬到它上面，于是好几个锚点
+ *   全落到同一个位置上。
+ * - **必须排在**上一个**切点之后**：段是按目录顺序挨个配标题的，切点一乱序就张冠李戴。
  */
-private fun anchorElementStart(html: String, anchor: String): Int? {
-    val idIndex = listOf("id=\"$anchor\"", "id='$anchor'")
+private fun anchorCutPositions(html: String, anchors: List<String>): List<Int?> {
+    val anchorIndexes = anchors.map { anchorIdIndex(html, it) }
+    val cuts = mutableListOf<Int?>()
+    val usedAnchorIndexes = mutableSetOf<Int>()
+    var previousCut: Int? = null
+    anchors.indices.forEach { index ->
+        val ownIndex = anchorIndexes[index]
+        // 承重，删了重复锚点会多切一刀（行为由 epubHtmlSegments_givesNoSegmentToADuplicateAnchor 钉住）
+        if (ownIndex == null || !usedAnchorIndexes.add(ownIndex)) {
+            cuts += null
+            return@forEach
+        }
+        // 下一个**能定位到、且排在当前锚点之后**的锚点（重复的那条不算），
+        // 只用来判断候选元素有没有把它一起包住。
+        val nextAnchorIndex = anchorIndexes.subList(index + 1, anchorIndexes.size)
+            .firstOrNull { it != null && it > ownIndex }
+        val cut = anchorElementStart(html, ownIndex, nextAnchorIndex, previousCut)
+        // 切点严格递增（上一个切点之后的候选才会被选中），所以不用再去重排序
+        if (cut != null && cut in 1 until html.length) {
+            previousCut = cut
+            cuts += cut
+        } else {
+            cuts += null
+        }
+    }
+    return cuts
+}
+
+/** 锚点 `id="X"` 在 html 里的位置（单双引号都认）；找不到返回 null。 */
+private fun anchorIdIndex(html: String, anchor: String): Int? {
+    return listOf("id=\"$anchor\"", "id='$anchor'")
         .map { html.indexOf(it) }
         .filter { it >= 0 }
-        .minOrNull() ?: return null
+        .minOrNull()
+}
+
+/**
+ * 找到带 `id="X"` 的那个元素（`id` 位置在 [idIndex]）的起始位置，用来断开 html。
+ * 从锚点往前找最近的开始标签，取"在锚点之后才闭合"的最外层那个（限制在**一段距离内**，
+ * 避免一直回溯到 body/html），这样每段的标签是平衡的，也不会把上一段的样式包住。
+ *
+ * [nextAnchorIndex] = 下一个锚点的位置，包住它的候选元素不能用（否则两章会并成一章）；
+ * [previousCut] = 上一个切点，不能退回到它前面（否则段序与目录顺序不一致，标题会配错）。
+ */
+private fun anchorElementStart(
+    html: String,
+    idIndex: Int,
+    nextAnchorIndex: Int?,
+    previousCut: Int?
+): Int? {
     val anchorTagEnd = html.indexOf('>', idIndex).takeIf { it >= 0 } ?: return null
     var cursor = anchorTagEnd
     var best: Int? = null
@@ -709,8 +796,12 @@ private fun anchorElementStart(html: String, anchor: String): Int? {
             val openTag = html.substring(tagStart, openEnd + 1)
             val selfClosing = openTag.trimEnd().endsWith("/>")
             val closeIndex = html.indexOf("</$name", openEnd)
-            if (selfClosing || (closeIndex > anchorTagEnd)) {
-                best = tagStart
+            if (selfClosing || closeIndex > anchorTagEnd) {
+                // 自闭合元素包不住别的东西；closeIndex < 0 视为"一直开到文末"，同样算包住
+                val swallowsNextAnchor = !selfClosing && nextAnchorIndex != null &&
+                    tagStart < nextAnchorIndex && (closeIndex < 0 || closeIndex > nextAnchorIndex)
+                val retreatsBeforePreviousCut = previousCut != null && tagStart <= previousCut
+                if (!swallowsNextAnchor && !retreatsBeforePreviousCut) best = tagStart
             }
         }
         cursor = tagStart
@@ -1058,49 +1149,76 @@ private fun buildEpubTocEntriesFromCache(
     return ncxEntries + navEntries
 }
 
-private fun parseNcxToc(xml: String, opfBasePath: String): List<EpubTocEntry> {
-    val parser = Xml.newPullParser()
-    parser.setInput(ByteArrayInputStream(xml.toByteArray(StandardCharsets.UTF_8)), "UTF-8")
-    val entries = mutableListOf<EpubTocEntry>()
-    var inNavPoint = false
-    var inNavLabel = false
-    var inText = false
-    var currentTitle = ""
-    var currentSrc = ""
-    while (parser.next() != XmlPullParser.END_DOCUMENT) {
-        when (parser.eventType) {
-            XmlPullParser.START_TAG -> when (parser.name) {
-                "navPoint" -> {
-                    inNavPoint = true
-                    currentTitle = ""
-                    currentSrc = ""
-                }
-                "navLabel" -> if (inNavPoint) inNavLabel = true
-                "text" -> if (inNavLabel) inText = true
-                "content" -> if (inNavPoint) {
-                    currentSrc = parser.getAttributeValue(null, "src").orEmpty()
-                }
-            }
-            XmlPullParser.TEXT -> if (inText) {
-                currentTitle += parser.text.orEmpty()
-            }
-            XmlPullParser.END_TAG -> when (parser.name) {
-                "text" -> inText = false
-                "navLabel" -> inNavLabel = false
-                "navPoint" -> {
-                    val title = currentTitle.cleanTocTitle()
-                    if (title.isNotBlank() && currentSrc.isNotBlank()) {
-                        tocEntryOf(opfBasePath, currentSrc, title)?.let { entries += it }
-                    }
-                    inNavPoint = false
-                    inNavLabel = false
-                    inText = false
-                }
+/**
+ * 解析 NCX 目录，返回**前序**条目（父条目在子条目之前），`level`/`isGroup` 来自嵌套深度。
+ *
+ * 用 DOM 而不是 android.util.Xml：DOM 在 JDK 和 Android 上都有实现，JVM 单测里能直接跑，
+ * 于是不用再为"单测跑不了 pull parser"留一层事件接缝，测试也跑的是真实 XML。
+ * 节点一律按 localName 匹配（带前缀的 NCX 也认）；外部实体用 EntityResolver 吞掉
+ * —— NCX 常带 NISO 的 DOCTYPE，不能让它去解析/下载 DTD。
+ */
+internal fun parseNcxToc(xml: String, opfBasePath: String): List<EpubTocEntry> {
+    val navMap = runCatching {
+        val factory = DocumentBuilderFactory.newInstance().apply {
+            isNamespaceAware = true
+            // 额外一层：只挡外部 DTD 加载。不用 disallow-doctype-decl —— 那会让带 NISO
+            // DOCTYPE 的合法 NCX 整个解析失败（JVM 上支持该 feature，Android 上不一定，
+            // 行为还会分裂）。Android 对不认识的 feature 会抛异常，所以包在 runCatching 里。
+            runCatching {
+                setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false)
             }
         }
-    }
+        factory.newDocumentBuilder()
+            .apply { setEntityResolver { _, _ -> InputSource(StringReader("")) } }
+            .parse(InputSource(StringReader(xml)))
+            .getElementsByTagNameNS("*", "navMap")
+            .item(0) as? Element
+    }.getOrNull() ?: return emptyList()
+    val entries = mutableListOf<EpubTocEntry>()
+    readNcxNavPoints(navMap, level = 0, opfBasePath = opfBasePath, out = entries)
     return entries
 }
+
+private fun readNcxNavPoints(
+    parent: Element,
+    level: Int,
+    opfBasePath: String,
+    out: MutableList<EpubTocEntry>
+) {
+    parent.childElements()
+        .filter { it.localName == "navPoint" }
+        .forEach { navPoint ->
+            val children = navPoint.childElements()
+            val title = children.firstOrNull { it.localName == "navLabel" }
+                ?.textContent
+                .orEmpty()
+                .cleanTocTitle()
+            val src = children.firstOrNull { it.localName == "content" }
+                ?.getAttribute("src")
+                .orEmpty()
+            if (title.isNotBlank() && src.isNotBlank()) {
+                tocEntryOf(opfBasePath, src, title)?.let {
+                    out += it.copy(
+                        level = level,
+                        isGroup = children.any { child -> child.localName == "navPoint" }
+                    )
+                }
+            }
+            // 没有标题/目标的条目自己不产出，但子条目照算层级
+            readNcxNavPoints(navPoint, level + 1, opfBasePath, out)
+        }
+}
+
+private fun Element.childElements(): List<Element> =
+    (0 until childNodes.length).mapNotNull { childNodes.item(it) as? Element }
+
+/** EPUB3 nav 里取出的裸条目（href/标题还没做实体反转义 —— 那一步要用 android.text.Html）。 */
+internal data class EpubNavTocItem(
+    val href: String,
+    val title: String,
+    val level: Int,
+    val isGroup: Boolean = false
+)
 
 private fun parseNavHtmlToc(html: String, opfBasePath: String): List<EpubTocEntry> {
     val navBlock = Regex("""(?is)<nav\b(?=[^>]*(?:epub:type|type)\s*=\s*['"]?toc\b)[^>]*>(.*?)</nav>""")
@@ -1108,37 +1226,79 @@ private fun parseNavHtmlToc(html: String, opfBasePath: String): List<EpubTocEntr
         ?.groupValues
         ?.getOrNull(1)
         ?: html
-    return Regex("""(?is)<a\b[^>]*href\s*=\s*(['"])(.*?)\1[^>]*>(.*?)</a>""")
-        .findAll(navBlock)
-        .mapNotNull { match ->
-            val href = Html.fromHtml(match.groupValues[2], Html.FROM_HTML_MODE_LEGACY)
-                .toString()
-                .trim()
-            val title = Html.fromHtml(match.groupValues[3], Html.FROM_HTML_MODE_LEGACY)
-                .toString()
-                .cleanTocTitle()
-            if (href.isBlank() || title.isBlank()) null else tocEntryOf(opfBasePath, href, title)
+    return parseEpubNavTocItems(navBlock).mapNotNull { item ->
+        val href = item.href.unescapeNavText()
+        val title = item.title.unescapeNavText().cleanTocTitle()
+        if (href.isBlank() || title.isBlank()) {
+            null
+        } else {
+            tocEntryOf(opfBasePath, href, title)?.copy(level = item.level, isGroup = item.isGroup)
         }
-        .toList()
+    }
 }
 
-/** 把目录里的 src（可能带 #锚点）解析成"文件路径 + 锚点" */
-private fun tocEntryOf(opfBasePath: String, src: String, title: String): EpubTocEntry? {
-    val resolved = resolveEpubPath(opfBasePath, src)
-    if (resolved.isBlank()) return null
-    val path = resolved.substringBefore('#')
-    val fragment = resolved.substringAfter('#', "")
-        .trim()
-        .let { fragment ->
-            runCatching { java.net.URLDecoder.decode(fragment, "UTF-8") }.getOrDefault(fragment)
+private fun String.unescapeNavText(): String =
+    Html.fromHtml(this, Html.FROM_HTML_MODE_LEGACY).toString().trim()
+
+/** nav 块里我们在意的标记：`<ol>`/`</ol>`，以及带 href 的 `<a>`（连标题文本一起抓）。 */
+private val NAV_TOC_TOKEN_REGEX = Regex(
+    """(?is)<(ol|/ol)\b[^>]*>|<a\b[^>]*href\s*=\s*(['"])(.*?)\2[^>]*>(.*?)</a>"""
+)
+
+/**
+ * 按文档顺序从 nav 块里取条目，并用 `<ol>` 的嵌套深度算出层级（0 = 第一层）。
+ *
+ * 只认能定位到目标的 `<a href>`：没有链接的父条目（EPUB3 常见的
+ * `<li><span>第一卷</span><ol>…`）自己不产出条目，但层级照算，所以子条目缩进是对的。
+ */
+internal fun parseEpubNavTocItems(navBlock: String): List<EpubNavTocItem> {
+    val tokens = NAV_TOC_TOKEN_REGEX.findAll(navBlock).toList()
+    val items = mutableListOf<EpubNavTocItem>()
+    var listDepth = 0
+    tokens.forEachIndexed { index, match ->
+        when (val marker = match.groupValues[1].lowercase(Locale.US)) {
+            "ol" -> listDepth += 1
+            "/ol" -> listDepth = (listDepth - 1).coerceAtLeast(0)
+            else -> {
+                // 这一条后面紧跟 <ol> → 它还有子条目，是"大章节"
+                val isGroup = tokens.getOrNull(index + 1)
+                    ?.groupValues
+                    ?.getOrNull(1)
+                    ?.lowercase(Locale.US) == "ol"
+                items += EpubNavTocItem(
+                    href = match.groupValues[3],
+                    title = match.groupValues[4],
+                    level = (listDepth - 1).coerceAtLeast(0),
+                    isGroup = isGroup
+                )
+            }
         }
+    }
+    return items
+}
+
+/**
+ * 把目录里的 src（可能带 #锚点）解析成"文件路径 + 锚点"。
+ *
+ * 锚点必须从**原始 [src]** 里取：[resolveEpubPath] 解析的是文件路径，它会把 `#` 之后
+ * 的部分丢掉，从它的返回值里再 `substringAfter('#')` 永远是空串。锚点一旦全空，
+ * [buildEpubChaptersFromHtml] 就只剩下"一个文件一章"——像《心理学原理》这种整本正文
+ * 都排在 part0001.xhtml 里的书，目录里 20 条只有 2 个 spine 文件，于是只解析出 2 章。
+ */
+internal fun tocEntryOf(opfBasePath: String, src: String, title: String): EpubTocEntry? {
+    val path = resolveEpubPath(opfBasePath, src)
+    if (path.isBlank()) return null
+    val fragment = src.substringAfter('#', "")
+        .trim()
+        .let { raw -> runCatching { java.net.URLDecoder.decode(raw, "UTF-8") }.getOrDefault(raw) }
         .takeIf { it.isNotBlank() }
         .orEmpty()
     return EpubTocEntry(title = title, path = path, fragment = fragment)
 }
 
+/** 目录标题常用 &#160;（NBSP）等 Unicode 空格做间距，而 `\s` 不匹配它们，所以连 `\p{Zs}` 一起归一化。 */
 private fun String.cleanTocTitle(): String {
-    return replace(Regex("\\s+"), " ").trim()
+    return replace(Regex("[\\s\\p{Zs}]+"), " ").trim()
 }
 
 private fun splitTxtChapters(text: String): List<EbookChapter> {
@@ -1381,7 +1541,8 @@ private fun htmlToReaderContent(
     html: String,
     htmlBasePath: String,
     imageResources: Map<String, EpubImageResource>,
-    chapterTitle: String
+    chapterTitle: String,
+    isVolumeChapter: Boolean = false
 ): ReaderHtmlContent {
     // 按目录锚点切开的分段可能没有 </body>（正文被切在中间），所以闭合标签是可选的：
     // 否则会回退成整段 html，把 <head><title> 的文字（很多书里是书名）漏进正文。
@@ -1393,14 +1554,10 @@ private fun htmlToReaderContent(
     // 参考实现 legado 会剥离全部 h1-h6；这里只剥 h1/h2，保留 h3+ 小节标题。
     // 必须在图片/ruby 替换之前执行，保证被剥掉的元素不会产生悬空标记。
     val headingStripped = Regex("(?is)<h[12]\\b(?!/)[^>]*>.*?</h[12]>").replace(body, "")
-    // 只有标题没有正文的页面（剥掉 h1/h2 后为空）：
-    // - 卷页（"第一部分 xxx"等）：正文留空，标题只由阅读器头部显示一次；
-    // - 其他页面：保留原标题文本，避免整章被上层按空章节丢弃。
-    body = if (headingStripped.replace(Regex("<[^>]*>"), "").isBlank()) {
-        if (chapterTitle.isVolumeTitle()) "" else body
-    } else {
-        headingStripped
-    }
+    // 剥掉 h1/h2 后正文为空的页面（整页只有一个标题）：先保留原标题文本，避免整章被上层
+    // 当空章节丢掉。标题有没有和页眉重复，统一交给后面"切掉正文开头的标题"那一步处理
+    // —— 卷/大章节页会被整段切成空，正好渲染成居中标题页。
+    body = if (headingStripped.replace(Regex("<[^>]*>"), "").isBlank()) body else headingStripped
     val rubyTexts = linkedMapOf<Int, ParsedRubyHtml>()
     var rubyId = 0
     body = Regex("(?is)<ruby\\b[^>]*>.*?</ruby>").replace(body) { match ->
@@ -1439,7 +1596,20 @@ private fun htmlToReaderContent(
         .toString()
         .parseRubyMarkers(rubyTexts)
         .normalizeReaderWhitespace()
-    val text = parsedText.text
+    // 正文开头若把章节标题又排了一遍就切掉 —— 标题已经由页眉显示过一次。
+    // h1/h2 能直接剥掉（见上面的 headingStripped），但很多书（例如《心理学原理》）
+    // 用普通 <p> 排标题，剥不掉，只能在这里按文本比对。
+    val titleLength = leadingChapterTitleLength(parsedText.text, chapterTitle)
+    val titleOnlyBody = titleLength > 0 && parsedText.text.substring(titleLength).isBlank()
+    // 整章只剩标题时：卷/大章节页留空（渲染成居中标题页）；普通章节保留原样，
+    // 否则会被 buildEpubChaptersFromHtml 当成空章节丢掉，目录里凭空少一章。
+    val cut = if (titleOnlyBody && !isVolumeChapter) 0 else titleLength
+    val text = parsedText.text.substring(cut)
+    val rubySpans = if (cut == 0) {
+        parsedText.rubySpans
+    } else {
+        parsedText.rubySpans.filter { it.start >= cut }.map { it.shiftedBy(-cut) }
+    }
     val images = linkedMapOf<Int, EbookImageRef>()
     var searchStart = 0
     imageTags.forEach { tag ->
@@ -1456,7 +1626,42 @@ private fun htmlToReaderContent(
             filePath = resource.filePath
         )
     }
-    return ReaderHtmlContent(text = text, images = images, rubySpans = parsedText.rubySpans)
+    return ReaderHtmlContent(text = text, images = images, rubySpans = rubySpans)
+}
+
+/**
+ * 正文开头是不是"把章节标题又排了一遍"？返回要从正文开头切掉的字符数（0 = 不用切）。
+ *
+ * 章节标题由页眉显示一次（PageView.bodyTitleView），正文再来一遍就是重复。
+ * 比较时按**空白段**对齐，所以书里用 `&#160;`、全角空格或连续空格排的间距不会影响判定
+ * （`normalizeReaderWhitespace` 已经把 NBSP 换成了普通空格，标题侧由 [cleanTocTitle] 归一化）。
+ * 标题后面必须紧跟空白，免得把"前言"这种短标题当成"前言续论"的开头误切。
+ */
+internal fun leadingChapterTitleLength(text: String, chapterTitle: String): Int {
+    val title = chapterTitle.cleanTocTitle()
+    if (title.isEmpty() || text.isEmpty()) return 0
+    var textIndex = 0
+    while (textIndex < text.length && text[textIndex].isWhitespace()) textIndex++
+    val start = textIndex
+    var titleIndex = 0
+    while (titleIndex < title.length && textIndex < text.length) {
+        val titleChar = title[titleIndex]
+        val textChar = text[textIndex]
+        if (titleChar.isWhitespace() && textChar.isWhitespace()) {
+            while (titleIndex < title.length && title[titleIndex].isWhitespace()) titleIndex++
+            while (textIndex < text.length && text[textIndex].isWhitespace()) textIndex++
+        } else if (titleChar == textChar) {
+            titleIndex++
+            textIndex++
+        } else {
+            return 0
+        }
+    }
+    if (titleIndex < title.length) return 0
+    if (textIndex < text.length && !text[textIndex].isWhitespace()) return 0
+    // 标题后面那一段空白（通常是段落换行）一起切掉
+    while (textIndex < text.length && text[textIndex].isWhitespace()) textIndex++
+    return if (textIndex > start) textIndex else 0
 }
 
 private const val RUBY_START_MARKER: Char = '\uE100'

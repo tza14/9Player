@@ -127,6 +127,10 @@ private const val AUDIO_CUE_LOOP_RESUME_STALL_CHECK_WINDOW_MS = 500L
 /** 「sync skip」这类每 tick 都会走到的日志最多每 5 秒输出一条（见 syncToAudioPositionAt）。 */
 private const val SYNC_SKIP_LOG_INTERVAL_MS = 5_000L
 
+/** 目录里每深一层的缩进像素，以及最大缩进层数（照 Hoshi-Reader 的 indentLevel×18dp，加上限防标题被挤出屏幕）。 */
+private const val CATALOG_INDENT_STEP_DP = 18
+private const val CATALOG_MAX_INDENT_LEVEL = 4
+
 private enum class AudioCueLoopPauseAction {
     SWITCH_CUE,
     END_LOOP
@@ -3095,7 +3099,6 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         ) {
             override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
                 val view = (convertView as? TextView) ?: TextView(context).apply {
-                    setPadding(dp(16), dp(14), dp(16), dp(14))
                     textSize = 16f
                 }
                 val item = getItem(position)
@@ -3103,10 +3106,13 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
                 val chapter = item?.second
                 val chapterTitle = chapter?.title.orEmpty()
                 view.text = chapterTitle
-                // 卷/部分章节（"第一部分 xxx"等）目录特殊显示：灰色半透明背景块 +
-                // 正常文字色，与参考实现 legado 的 ChapterListAdapter 一致
-                // （btn_bg_press = #63ACACAC）；当前章高亮（accent 色）优先。
-                val isVolume = chapter?.isVolume == true
+                // 目录层级：按 level 左缩进（convertView 会复用，所以每行都要重设 padding）
+                val level = (chapter?.level ?: 0).coerceIn(0, CATALOG_MAX_INDENT_LEVEL)
+                view.setPadding(dp(16 + level * CATALOG_INDENT_STEP_DP), dp(14), dp(16), dp(14))
+                // 卷/部分章节（"第一部分 xxx"等）和**大章节**（目录条目下面还有子条目）灰底分组显示，
+                // 与参考实现 legado 的 ChapterListAdapter 一致（btn_bg_press = #63ACACAC）；
+                // 当前章高亮（accent 色）优先。
+                val isVolume = chapter?.isVolume == true || chapter?.isGroup == true
                 view.setTypeface(null, Typeface.NORMAL)
                 view.setBackgroundColor(
                     if (isVolume) 0x63ACACAC.toInt() else Color.TRANSPARENT

@@ -60,7 +60,6 @@ private const val M9_PAGE_SIMULATION_LOG_TAG = "M9PageSimulation"
 private const val M9_SELECTION_LOG_TAG = "M9Selection"
 private const val SELECTION_MENU_OPEN_SPACE_THRESHOLD_PX = 500
 private const val CROSS_PAGE_OVERLAY_FADE_MS = 220L
-private const val CROSS_PAGE_OVERLAY_TAIL_MARGIN_DP = 16
 
 private fun m9PageSimulationFormat(value: Float): String {
     return String.format(Locale.US, "%.1f", value)

@@ -19,8 +19,6 @@ import moe.tekuza.m9player.legado.reader.entities.TextLine
 import moe.tekuza.m9player.legado.reader.entities.TextPage
 import kotlin.math.max
 
-private const val SENTENCE_TAIL_LOG_TAG = "M9SentenceTail"
-
 internal class TextChapterLayout(
     private val config: M9ReadBookConfig,
     private val visibleWidth: Int,
