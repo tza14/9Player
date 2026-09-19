@@ -12,6 +12,7 @@ import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import java.util.concurrent.TimeUnit
 import kotlin.system.exitProcess
 
 /**
@@ -157,7 +158,7 @@ private class CrashDiagnosticsHandler(
                 versionCode = resolveAppVersionCode(context),
                 sdkInt = Build.VERSION.SDK_INT,
                 deviceSummary = "${Build.MANUFACTURER} ${Build.MODEL} (Android ${Build.VERSION.RELEASE})",
-                recentLogs = readOwnProcessLogs(CRASH_LOG_TAIL_LINES)
+                recentLogs = recentLogsForDiagnostics(CRASH_LOG_TAIL_LINES)
             )
         }
         previous?.uncaughtException(thread, throwable) ?: run {
@@ -249,6 +250,16 @@ internal fun truncateDiagnosticText(
     }
 }
 
+/** 等 logcat 子进程退出的上限：等不到就放弃并强杀，绝不把调用方（可能在主线程）挂住。 */
+private const val OWN_PROCESS_LOG_TIMEOUT_MS = 1_500L
+
+/**
+ * 「最近日志」的唯一口径：先取应用内环形日志（不依赖 logcat 子进程；release 构建里为空），
+ * 为空才退回读本进程 logcat。崩溃文件与「导出诊断」共用这一份，别再各写一遍。
+ */
+internal fun recentLogsForDiagnostics(maxLines: Int): String =
+    inAppLogSnapshot().ifBlank { readOwnProcessLogs(maxLines) }
+
 /** 读本进程日志（崩溃采集与导出诊断共用）。不需要额外权限：读的是自己进程的 logcat。 */
 internal fun readOwnProcessLogs(maxLines: Int): String {
     return runCatching {
@@ -260,9 +271,13 @@ internal fun readOwnProcessLogs(maxLines: Int): String {
             "--pid=${android.os.Process.myPid()}",
             "*:V"
         ).redirectErrorStream(true).start()
-        val output = process.inputStream.bufferedReader().use { it.readText().trim() }
-        process.waitFor()
-        output
+        // 先等进程退出再读管道：某些 ROM 上 logcat 会挂住不退出，直接 read 会一直阻塞
+        //（实测：导出诊断在主线程 → 输入超时 5s → ANR）。超时就放弃，宁可没有日志。
+        if (!process.waitFor(OWN_PROCESS_LOG_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+            process.destroyForcibly()
+            return@runCatching ""
+        }
+        process.inputStream.bufferedReader().use { it.readText().trim() }
     }.getOrDefault("")
 }
 

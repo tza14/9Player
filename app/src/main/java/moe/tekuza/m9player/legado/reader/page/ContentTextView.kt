@@ -38,6 +38,10 @@ private fun isAssistSentenceBreak(ch: Char): Boolean =
 
 /**
  * [start, end) 所在的整句范围（含句读符在内）：向两侧扩到句读/换行为止。
+ *
+ * **只对西文句扩**：夹在日语等 CJK 正文里的英文词（竖排里很常见，例如
+ * 「…自分はHSPだとかADHDだとか…」）若也按整句给，气泡里会塞进一整段日语
+ * （实测 150 字、铺满屏幕）。这种情况只返回被点中的那一段。
  * 整段没有句读、结果长过 [MAX_ASSIST_SENTENCE_CHARS] 时，围绕落点截断。
  */
 internal fun assistSentenceRange(text: String, start: Int, end: Int): IntRange? {
@@ -53,6 +57,8 @@ internal fun assistSentenceRange(text: String, start: Int, end: Int): IntRange? 
     while (begin < stop && text[begin].isWhitespace()) begin += 1
     while (stop > begin && text[stop - 1].isWhitespace()) stop -= 1
     if (stop <= begin) return null
+    // 含 CJK 的句子只给落点那一段，不整句
+    if ((begin until stop).any { isCjkChar(text[it]) }) return from until to
     if (stop - begin > MAX_ASSIST_SENTENCE_CHARS) {
         // 截断成宽度 ≤ MAX 的窗口：以落点为中心，夹在 [begin, stop] 内
         val center = ((from + to) / 2).coerceIn(begin, stop)
@@ -62,6 +68,20 @@ internal fun assistSentenceRange(text: String, start: Int, end: Int): IntRange? 
         stop = (truncatedBegin + MAX_ASSIST_SENTENCE_CHARS).coerceAtMost(stop)
     }
     return begin until stop
+}
+
+/** 判定"整句是不是西文"用：假名/汉字/CJK 标点/全角形/谚文都算 CJK。 */
+private fun isCjkChar(ch: Char): Boolean = when (Character.UnicodeBlock.of(ch)) {
+    Character.UnicodeBlock.HIRAGANA,
+    Character.UnicodeBlock.KATAKANA,
+    Character.UnicodeBlock.KATAKANA_PHONETIC_EXTENSIONS,
+    Character.UnicodeBlock.CJK_SYMBOLS_AND_PUNCTUATION,
+    Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS,
+    Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS_EXTENSION_A,
+    Character.UnicodeBlock.CJK_COMPATIBILITY_IDEOGRAPHS,
+    Character.UnicodeBlock.HALFWIDTH_AND_FULLWIDTH_FORMS,
+    Character.UnicodeBlock.HANGUL_SYLLABLES -> true
+    else -> false
 }
 
 internal class ContentTextView @JvmOverloads constructor(
@@ -329,11 +349,11 @@ internal class ContentTextView @JvmOverloads constructor(
     }
 
     /**
-     * 竖排中英文按单词切列、横倒绘制；点中某一列时返回**整句**（而不是那个单词）。
+     * 竖排中英文按单词切列、横倒绘制；点中某一列时取出气泡要显示的文本。
      *
      * 相邻单词列的 source 之间隔着空格、并不连续，所以按"source 连续"合并只能覆盖被切断
-     * 的长串，永远合不成一句。这里改为按正文句子范围取值：以句读或换行为界，把落点所在的
-     * 整句取出来（跨列、跨页都能覆盖），气泡只覆盖本页可见的那几列用于定位。
+     * 的长串，永远合不成一句 —— 所以改为按正文范围取值（见 [assistSentenceRange]）：
+     * 整句是西文才给整句（跨列跨页都覆盖），含 CJK 只给落点那一段，免得整段日语铺满气泡。
      */
     private fun assistTokenAround(page: TextPage, lineIndex: Int, columnIndex: Int): AssistToken? {
         val refs = buildList {

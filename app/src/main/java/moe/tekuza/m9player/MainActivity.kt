@@ -5303,7 +5303,7 @@ private fun buildDiagnosticsReport(context: Context): String {
     val persistedImports = loadPersistedImports(context)
     val persistedAnki = loadPersistedAnkiConfig(context)
     val ankiResolvedPackage = resolveAnkiPackageName(context)
-    val recentLogs = readOwnProcessLogs(200)
+    val recentLogs = recentLogsForDiagnostics(200)
 
     return buildString {
         appendLine("9Player Diagnostics")

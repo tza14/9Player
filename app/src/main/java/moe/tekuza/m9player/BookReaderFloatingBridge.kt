@@ -386,20 +386,6 @@ object BookReaderFloatingBridge {
         notifyPlaybackSpeed(BookReaderPlaybackSession.currentPlaybackSpeed())
     }
 
-    fun replayCurrentCue() {
-        val cueStartMs = currentCue()?.startMs ?: return
-        logDebug(READER_PAUSED_SEEK_LOG_TAG) {
-            "bridge replayCurrentCue target=$cueStartMs beforeSession=${BookReaderPlaybackSession.currentPositionMs()} " +
-            "beforeBridge=$playbackPositionSnapshot cue=${cueForLog(currentCue())}"
-        }
-        BookReaderPlaybackSession.seekToPosition(cueStartMs)
-        notifyPlaybackPosition(cueStartMs)
-        logDebug(READER_PAUSED_SEEK_LOG_TAG) {
-            "bridge replayCurrentCue notify target=$cueStartMs afterSession=${BookReaderPlaybackSession.currentPositionMs()} " +
-            "afterBridge=$playbackPositionSnapshot cue=${cueForLog(currentCue())}"
-        }
-    }
-
     private fun cueForLog(cue: CueSnapshot?): String {
         if (cue == null) return "null"
         return "${cue.startMs}-${cue.endMs}/${cue.text.replace('\n', ' ').take(36)}"

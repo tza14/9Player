@@ -62,6 +62,7 @@ import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import com.jaredrummler.android.colorpicker.ColorPickerDialog
 import com.jaredrummler.android.colorpicker.ColorPickerDialogListener
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CancellationException
@@ -69,6 +70,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.time.LocalDate
 import java.util.Locale
 import kotlin.math.abs
@@ -126,6 +128,13 @@ private const val AUDIO_CUE_LOOP_RESUME_STALL_CHECK_WINDOW_MS = 500L
 
 /** 「sync skip」这类每 tick 都会走到的日志最多每 5 秒输出一条（见 syncToAudioPositionAt）。 */
 private const val SYNC_SKIP_LOG_INTERVAL_MS = 5_000L
+
+/**
+ * 首屏分页前等 SRT + 存档匹配的上限。句边界（cue 匹配）是分页的输入，等到了这次分页就一次到位，
+ * 不用"先按段落排一遍、再为句边界重排一遍"。等不到（首次解析 SRT / 正在重新匹配）就先按段落排，
+ * 匹配到齐后由 relayoutIfPagesLackSentenceBoundaries 补一次重排。
+ */
+private const val SENTENCE_BOUNDARY_WAIT_MS = 400L
 
 /** 目录里每深一层的缩进像素，以及最大缩进层数（照 Hoshi-Reader 的 indentLevel×18dp，加上限防标题被挤出屏幕）。 */
 private const val CATALOG_INDENT_STEP_DP = 18
@@ -250,7 +259,8 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
     private var pages: List<TextPage> = emptyList()
     private var pageIndex: Int = 0
     private var cues: List<EbookSrtCue> = emptyList()
-    private var srtLoading: Boolean = false
+    /** 正在进行的 SRT 加载：既是"在加载吗"的唯一状态，也让"已经在加载"的调用方等到真实结果（见 loadSrtSyncIfNeeded）。 */
+    private var srtLoadInFlight: CompletableDeferred<Boolean>? = null
     private var srtLoadError: String? = null
     private var loadedSrtUriText: String? = null
     private var cueMatchesByCueIndex: Map<Int, EbookCueMatch> = emptyMap()
@@ -360,7 +370,18 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
     private var audioCueRepeatTailPauseEnabled: Boolean = false
     private var audioCueRepeatFollowCueEnabled: Boolean = false
     private var sentenceNoCrossPage: Boolean = false
+    /**
+     * 本卷页面是在「还没有 cue 匹配」时切出来的：首屏等匹配超过 [SENTENCE_BOUNDARY_WAIT_MS]。
+     * 那样句边界没参与分页、「句子不跨页」等于没开，匹配到齐后补一次重排
+     * （见 [relayoutIfPagesLackSentenceBoundaries]）—— 只是等不到时的兜底，正常路径不会走到。
+     */
+    private var pagesPinnedWithoutSentenceBoundaries: Boolean = false
     private var pauseAfterPageEnd: Boolean = false
+    /**
+     * 「读完此页暂停」**本次阅读**是否生效：由右下角按钮切换，只活在这一趟（不落设置、不进 UI 状态，
+     * 转屏/退出重进都回到默认关）。设置里的 [pauseAfterPageEnd] 只决定那个按钮管哪个功能。
+     */
+    private var pageEndPauseActive: Boolean = false
     private var audioCueRepeatRemainingCount: Int = 0
     private var audioCueRepeatDelayJob: Job? = null
     private var audioCueRepeatDelayGeneration: Long = 0L
@@ -592,6 +613,8 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         floatingOverlayStartJob = null
         suppressFloatingOverlayOnStop = false
         stopAudiobookFloatingOverlayService(this)
+        // 回到阅读器：别的界面可能换过音频，先跟播放器对账，免得拿过期的本地裁剪旗标算位置
+        reconcileAudioClipStateWithPlayer()
     }
 
     override fun onStop() {
@@ -613,6 +636,8 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
             "Legado onStop overlayEnabled=$overlayEnabled " +
             "showOnReaderExit=${settings.floatingOverlayShowOnReaderExit} playing=$playing"
         }
+        // 两种"裁剪型"武装（读完此页暂停 / 重复）退出后照常生效：裁剪与监视都留在共享播放器上。
+        // 显示侧位置由 BookReaderPlaybackSession 换算；**写方向别再加一层偏移**（那里的注释有实测教训）。
         if (!overlayEnabled || !playing) {
             return
         }
@@ -5071,6 +5096,12 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
                     0,
                     lastUnlockedChapterIndex(loaded)
                 )
+                val boundaryWaitStartMs = SystemClock.elapsedRealtime()
+                awaitSrtAndMatchesForPagination()
+                logDebug(LEGADO_MATCH_LOG_TAG) {
+                    "readerStartup boundaryWait=${SystemClock.elapsedRealtime() - boundaryWaitStartMs}ms " +
+                        "matches=${cueMatchesByCueIndex.size}"
+                }
                 val previewStartMs = SystemClock.elapsedRealtime()
                 val previewPages = getOrPaginateChapterPages(
                     document = loaded,
@@ -5233,6 +5264,7 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
             "boundaryChapters=${sentenceBoundariesByChapter.size} cues=${cueMatchesByCueIndex.size} " +
             "chapterBoundarySizes=${sentenceBoundariesByChapter.mapValues { it.value.first.size }}"
         }
+        pagesPinnedWithoutSentenceBoundaries = sentenceNoCrossPage && cueMatchesByCueIndex.isEmpty()
         return TextPageFactory(
             config = M9ReadBookConfig(
                 textSizePx = readView.textSizePx,
@@ -5258,6 +5290,40 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
             sentenceStartsByChapter = sentenceBoundariesByChapter.mapValues { it.value.first },
             sentenceEndsByChapter = sentenceBoundariesByChapter.mapValues { it.value.second }
         )
+    }
+
+    /**
+     * 首屏分页前等 SRT + 存档匹配就位：句边界是分页输入，等到了这次分页一次到位，
+     * 不必"先按段落排一遍、再为句边界重排一遍"。
+     *
+     * 「句子不跨页」没开时句边界压根不参与分页，直接返回、一秒都不等（SRT 仍按老路在首屏后加载）。
+     * 开着但等不到（首次解析 SRT / 正在重新匹配 / 没有 SRT）也直接返回、按段落排，
+     * 之后由 [relayoutIfPagesLackSentenceBoundaries] 兜底。
+     */
+    private suspend fun awaitSrtAndMatchesForPagination() {
+        if (!sentenceNoCrossPage) return
+        if (cueMatchesByCueIndex.isNotEmpty()) return
+        if (srtUri == null) return
+        // 这次分页会重新判定，先清掉上一轮（别的章节/别的文档）留下的旗标，
+        // 免得在等匹配期间被兜底钩子当成"已分页且缺边界"而触发多余重排。
+        pagesPinnedWithoutSentenceBoundaries = false
+        val done = CompletableDeferred<Unit>()
+        loadSrtSyncIfNeeded { done.complete(Unit) }
+        withTimeoutOrNull(SENTENCE_BOUNDARY_WAIT_MS) { done.await() }
+    }
+
+    /**
+     * 兜底：首屏没等到匹配就分了页，匹配到齐后补一次重排，让「句子不跨页」在本次会话也生效；
+     * 已经带边界分过页则什么都不做。
+     */
+    private fun relayoutIfPagesLackSentenceBoundaries() {
+        if (!pagesPinnedWithoutSentenceBoundaries) return
+        if (!sentenceNoCrossPage || cueMatchesByCueIndex.isEmpty()) return
+        pagesPinnedWithoutSentenceBoundaries = false
+        logDebug(M9_SENTENCE_TAIL_LOG_TAG) {
+            "sentences: boundaries arrived after paginate -> relayout once matches=${cueMatchesByCueIndex.size}"
+        }
+        requestBookRelayout(immediate = false)
     }
 
     private fun currentContentWidthPx(): Int {
@@ -5651,7 +5717,7 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         playbackSpeed: Float
     ) {
         if (generation != audioSeekSyncGeneration) return
-        currentPlayer.setMediaItem(currentAudioMediaItem(), audioPlayerPositionFor(targetMs))
+        currentPlayer.setMediaItem(currentAudioMediaItem(), audioPositionInClipFor(targetMs))
         currentPlayer.prepare()
         currentPlayer.playbackParameters = PlaybackParameters(playbackSpeed)
         if (resumePlayback) {
@@ -6480,21 +6546,28 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
             disableAudioCueLoop(updateUi = true)
             return
         }
-        if (repeatButtonControlsPageEndPause) {
-            // 操控模式：重复按钮反复开关「读完此页暂停」（设置里关闭后恢复为正常重复按钮）
-            pauseAfterPageEnd = !pauseAfterPageEnd
-            if (!pauseAfterPageEnd) {
+        if (pauseAfterPageEnd) {
+            // 按钮只切「本次阅读」的运行状态，不动设置——设置决定这个按钮管哪个功能
+            pageEndPauseActive = !pageEndPauseActive
+            if (pageEndPauseActive) {
+                // 先取绝对位置：清掉重复状态之前本地旗标还在，此时 currentAudioPositionMs() 才对；
+                // 清完旗标但没换 MediaItem 时，读出来的会是"裁剪内相对位置"。
+                val absoluteMs = currentAudioPositionMs()
+                if (audioCueLoopEnabled) {
+                    // 读完此页暂停与逐句重复共用同一个播放窗口：只关掉重复、不重载，
+                    // 紧接着的页尾武装会做唯一一次重载（省掉一次可感知的 prepare）
+                    disableAudioCueLoop(updateUi = true, reloadAudio = false)
+                }
+                // 暂停态就地把本页整页裁剪武装好（播放中则退化为句尾监视兜底）
+                absoluteMs?.let { refreshPageEndPauseArming(it) }
+            } else {
                 releasePageEndPauseClipIfActive()
             }
             logDebug(M9_SENTENCE_TAIL_LOG_TAG) {
-                "pageEndPause: repeat button toggle -> $pauseAfterPageEnd"
+                "pageEndPause: repeat button toggle active=$pageEndPauseActive " +
+                    "(setting=$pauseAfterPageEnd)"
             }
-            persistReaderSettings(updateAnchor = false)
             updateAudioCueLoopLabel()
-            if (pauseAfterPageEnd) {
-                // 重新开启：暂停态就地把本页整页裁剪武装好（播放中则退化为句尾监视兜底）
-                currentAudioPositionMs()?.let { refreshPageEndPauseArming(it) }
-            }
             return
         }
         val currentPlayer = player
@@ -6530,7 +6603,12 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         updateAudioCueLoopLabel()
     }
 
-    private fun disableAudioCueLoop(updateUi: Boolean) {
+    /**
+     * 关闭逐句重复（并顺带解除页尾裁剪：两者共用同一个播放窗口）。
+     * [reloadAudio]=false 只清状态、不换 MediaItem —— 给"紧接着一定会重新武装"的调用方用
+     * （否则会白换一次，用户能感觉到那一次 `prepare` 的延迟）。
+     */
+    private fun disableAudioCueLoop(updateUi: Boolean, reloadAudio: Boolean = true) {
         cancelAudioCueRepeatDelay()
         // 页尾整页裁剪也用同一个播放窗口：这里一并解除，避免残留一段被裁短的音频
         val wasClipActive = audioCueLoopClipActive || pageEndPauseRange != null
@@ -6544,16 +6622,11 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         audioCueLoopPauseAction = null
         audioCueLoopPauseCueIndex = -1
         audioCueRepeatRemainingCount = initialAudioCueRepeatRemainingCount()
-        if (wasClipActive) {
-            val currentPlayer = player
-            if (currentPlayer != null && audioUri != null) {
-                logDebug(AUDIO_CUE_LOOP_CLIP_LOG_TAG) {
-                    "clipDisabled restoreAt=$absoluteMs playWhenReady=${currentPlayer.playWhenReady}"
-                }
-                currentPlayer.setMediaItem(currentAudioMediaItem(), absoluteMs)
-                currentPlayer.prepare()
-                BookReaderFloatingBridge.notifyPlaybackPosition(absoluteMs)
+        if (wasClipActive && reloadAudio) {
+            logDebug(AUDIO_CUE_LOOP_CLIP_LOG_TAG) {
+                "clipDisabled restoreAt=$absoluteMs playWhenReady=${player?.playWhenReady}"
             }
+            reloadAudioAt(absoluteMs)
         }
         if (updateUi) {
             updateAudioCueLoopLabel()
@@ -6643,41 +6716,54 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         }
     }
 
+    /**
+     * 把播放器换回"当前该有的音频"（按 [activeAudioClipRangeMs] 是否带裁剪）并定位到 [absoluteMs]。
+     * 三处解除路径共用：重复解除、销毁前恢复、页尾裁剪解除 —— 换回音频只有这一份写法。
+     */
+    private fun reloadAudioAt(absoluteMs: Long) {
+        val currentPlayer = player ?: return
+        if (audioUri == null) return
+        val safeMs = absoluteMs.coerceAtLeast(0L)
+        currentPlayer.setMediaItem(currentAudioMediaItem(), safeMs)
+        currentPlayer.prepare()
+        BookReaderFloatingBridge.notifyPlaybackPosition(safeMs)
+    }
+
     private fun restoreAudioCueLoopMediaIfNeeded() {
         if (!audioCueLoopClipActive && pageEndPauseRange == null) return
-        val currentPlayer = player ?: return
         val absoluteMs = currentAudioPositionMs() ?: audioCueLoopClipBaseMs
         audioCueLoopClipActive = false
         pageEndPauseClipActive = false
         pageEndPauseRange = null
         cancelPageEndPauseWatch()
-        currentPlayer.setMediaItem(currentAudioMediaItem(), absoluteMs)
-        currentPlayer.prepare()
-        BookReaderFloatingBridge.notifyPlaybackPosition(absoluteMs)
+        reloadAudioAt(absoluteMs)
     }
 
     private fun updateAudioCueLoopLabel() {
         if (!::playbackBarRepeatButton.isInitialized) return
-        // 读完此页暂停开启（或操控模式下未关闭）时，重复按钮显示为该功能的激活态
-        val active = audioCueLoopEnabled || pauseAfterPageEnd
+        // "开着"的图形分开：逐句重复=repeat-one（重复的就是当前这一句），读完此页暂停=repeat_on
+        // （方框底+镂空箭头，按钮的 on 态）。只改颜色/透明度在日间主题里几乎分不出来。
+        val active = audioCueLoopEnabled || pageEndPauseActive
         playbackBarRepeatButton.setImageResource(
-            if (audioCueLoopEnabled) R.drawable.reader_ic_repeat_one else R.drawable.reader_ic_repeat
+            when {
+                audioCueLoopEnabled -> R.drawable.reader_ic_repeat_one
+                pageEndPauseActive -> R.drawable.reader_ic_repeat_on
+                else -> R.drawable.reader_ic_repeat
+            }
         )
         playbackBarRepeatButton.alpha = if (active) 1f else 0.72f
         playbackBarRepeatButton.imageTintList = ColorStateList.valueOf(
             if (active) NIGHT_ACCENT else MENU_TEXT
         )
-        val label = if (repeatButtonControlsPageEndPause) {
-            // 操控模式：按钮可反复开关「读完此页暂停」
+        val label = if (pauseAfterPageEnd) {
+            // 按钮处于「读完此页暂停」模式：短按反复开关该功能（本次阅读）
             getString(
-                if (pauseAfterPageEnd) {
+                if (pageEndPauseActive) {
                     R.string.reader_pause_after_page_end_on
                 } else {
                     R.string.reader_pause_after_page_end_off
                 }
             )
-        } else if (pauseAfterPageEnd) {
-            getString(R.string.reader_pause_after_page_end)
         } else if (audioCueLoopEnabled) {
             getString(R.string.reader_repeat_enabled_content_description, currentAudioCueRepeatPauseLabel())
         } else {
@@ -6886,20 +6972,18 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
                 val oldPauseAfterPageEnd = pauseAfterPageEnd
                 sentenceNoCrossPage = tailHandlingEnabled
                 pauseAfterPageEnd = pauseAfterPageEndValue
-                // 设置里开启后按钮接管为「读完此页暂停」开关；设置里关闭则恢复为正常重复按钮
-                repeatButtonControlsPageEndPause = pauseAfterPageEndValue
+                // 按钮不再管这个功能时，把运行状态一并收掉（不落盘，退出重进即回到默认关）
+                if (!pauseAfterPageEndValue) {
+                    pageEndPauseActive = false
+                }
                 val relayoutNeeded = tailHandlingEnabled != oldTailHandling ||
                     pauseAfterPageEndValue != oldPauseAfterPageEnd
-                if (!pauseAfterPageEndValue || relayoutNeeded) {
-                    // 关闭功能 / 重新分页会换掉页面与句尾：先解除武装并恢复完整音频，
+                if (!pageEndPauseActive || relayoutNeeded) {
+                    // 功能没在生效 / 重新分页会换掉页面与句尾：先解除武装并恢复完整音频，
                     // 重新分页后由 sync 按新的页面重新武装
                     releasePageEndPauseClipIfActive()
                 }
                 audioCueRepeatRemainingCount = initialAudioCueRepeatRemainingCount()
-                if (pauseAfterPageEndValue) {
-                    // 读完此页暂停开启时，逐句重复不适用：关闭正在进行的重复
-                    disableAudioCueLoop(updateUi = true)
-                }
                 // 句尾处理（排版规则）与读完此页暂停需要重新分页才能生效
                 if (relayoutNeeded) {
                     logDebug(M9_SENTENCE_TAIL_LOG_TAG) {
@@ -7190,13 +7274,16 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         return playerPositionMs(currentPlayer)
     }
 
-    private fun playerPositionMs(currentPlayer: ExoPlayer): Long {
-        val raw = currentPlayer.currentPosition.coerceAtLeast(0L)
-        val clip = activeAudioClipRangeMs()
-        return if (clip != null) clip.first + raw else raw
-    }
+    /** 播放器 raw 位置 → 正文绝对位置（与显示侧共用同一处换算；裁剪真值=播放器实配，不是本地旗标）。 */
+    private fun playerPositionMs(currentPlayer: ExoPlayer): Long =
+        BookReaderPlaybackSession.toAbsolutePositionMs(currentPlayer, currentPlayer.currentPosition)
 
-    private fun audioPlayerPositionFor(absoluteMs: Long): Long {
+    /**
+     * 给 [currentAudioMediaItem]（本地旗标决定裁不裁）算**窗口内**起点，只用在 `setMediaItem`：那一刻
+     * 播放器采用的就是这份"意图"，所以口径跟本地旗标走。对**已经装上的** item 做 seek 不要用它，走
+     * [BookReaderPlaybackSession.toPlayerPositionMs]（按播放器实配换算）。
+     */
+    private fun audioPositionInClipFor(absoluteMs: Long): Long {
         val clip = activeAudioClipRangeMs()
         return if (clip != null) {
             (absoluteMs - clip.first)
@@ -7216,7 +7303,7 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
     }
 
     private fun seekAudioPlayerTo(currentPlayer: ExoPlayer, absoluteMs: Long) {
-        currentPlayer.seekTo(audioPlayerPositionFor(absoluteMs))
+        currentPlayer.seekTo(BookReaderPlaybackSession.toPlayerPositionMs(currentPlayer, absoluteMs))
     }
 
     private fun clearCurrentChapterImageStops() {
@@ -7434,19 +7521,13 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
     private var pageEndPauseRange: Pair<Long, Long>? = null
 
     /**
-     * 重复按钮是否处于「读完此页暂停」操控模式：
-     * 设置对话框里开启后接管（短按反复开关该功能），设置里关闭后恢复为正常重复按钮。
-     */
-    private var repeatButtonControlsPageEndPause = false
-
-    /**
      * 读完此页暂停：保证「本页」已武装。
      *
      * 暂停态 → 整页裁剪（无声重载，播到页尾由解码层精确截断，零泄漏零重读）；
      * 播放态 → 不能重载（会把当前句从头重读），退化为句尾监视兜底。
      */
     private fun refreshPageEndPauseArming(absoluteMs: Long) {
-        if (!pauseAfterPageEnd || pageEndPausePending) return
+        if (!pageEndPauseActive || pageEndPausePending) return
         val page = pageForAudioPosition(absoluteMs)
         val range = page?.let { pageEndPauseRangeForPage(it, absoluteMs) }
         if (page == null || range == null) {
@@ -7533,18 +7614,43 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         publishReaderPlaybackBridgeSnapshot(notifyState = true)
     }
 
-    /** 解除整页裁剪：恢复完整音频（从 absoluteMs 继续）。未裁剪时只清状态，不重载播放器 */
+    /**
+     * 解除整页裁剪：恢复完整音频（从 absoluteMs 继续）。播放器上本来就没有裁剪时只清状态、不重载。
+     * 判据取**播放器实配**而不是本地旗标：按钮路径可能已经把旗标清掉、而播放器上还留着别的裁剪
+     * （例如逐句重复的窗口），那时按旗标判断会漏掉这次重载，播放就被留在旧窗口里。
+     */
     private fun restoreFullAudioFromPageEndPauseClip(absoluteMs: Long) {
-        val wasClipped = pageEndPauseRange != null
+        val playerHasClip = player?.let { BookReaderPlaybackSession.activeClipRangeMs(it) } != null
         pageEndPauseRange = null
-        if (!wasClipped) return
+        if (!playerHasClip) return
+        logDebug(M9_SENTENCE_TAIL_LOG_TAG) {
+            "pageEndPause: restore full audio at=${absoluteMs.coerceAtLeast(0L)}"
+        }
+        reloadAudioAt(absoluteMs)
+    }
+
+    /**
+     * 对账：播放器上**实际**没有裁剪，而本地旗标还说有 —— 说明别的界面（主页 / 播放器页）换过音频
+     * （`prepareAudioIfNeeded` 写入的是无裁剪的 MediaItem），本地旗标过期了。
+     *
+     * 以播放器为唯一真相清掉本地裁剪状态，清理动作复用 [disableAudioCueLoop]（`reloadAudio = false`：
+     * 播放器已经在放新的完整音频了，不该再换一次 MediaItem）。那句"位置也不取 `currentAudioPositionMs()`"
+     * 说的是**不要拿它定位**：这里的假位置只会落进一个不会被读取的局部变量。
+     *
+     * 只对账"真有裁剪窗口"的那两路（重复窗口 / 页尾裁剪）：页尾在**播放态是故意不裁剪**的，只挂句尾
+     * 监视（`pageEndPauseClipActive=true` 而 `pageEndPauseRange=null`），拿它当判据会把监视每个同步
+     * tick 清一次，功能直接失效。
+     */
+    private fun reconcileAudioClipStateWithPlayer() {
         val currentPlayer = player ?: return
-        if (audioUri == null) return
-        val safeMs = absoluteMs.coerceAtLeast(0L)
-        logDebug(M9_SENTENCE_TAIL_LOG_TAG) { "pageEndPause: restore full audio at=$safeMs" }
-        currentPlayer.setMediaItem(currentAudioMediaItem(), safeMs)
-        currentPlayer.prepare()
-        BookReaderFloatingBridge.notifyPlaybackPosition(safeMs)
+        if (BookReaderPlaybackSession.activeClipRangeMs(currentPlayer) != null) return
+        if (!audioCueLoopClipActive && pageEndPauseRange == null) return
+        logDebug(M9_SENTENCE_TAIL_LOG_TAG) {
+            "audioClip: player has no clip -> drop stale local clip state " +
+                "loop=$audioCueLoopClipActive pageEndRange=${pageEndPauseRange != null} " +
+                "raw=${currentPlayer.currentPosition}"
+        }
+        disableAudioCueLoop(updateUi = true, reloadAudio = false)
     }
 
     /** 句尾监视（兜底）：轮询播放位置，到达句尾（endMs）时暂停；会有下游缓冲的一点泄漏 */
@@ -7556,7 +7662,7 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         pageEndPauseWatchEndMs = safeEndMs
         pageEndPauseWatchJob = lifecycleScope.launch {
             while (isActive) {
-                if (!pauseAfterPageEnd || pageEndPausePending) return@launch
+                if (!pageEndPauseActive || pageEndPausePending) return@launch
                 if (pageEndPauseWatchEndMs != safeEndMs) return@launch
                 val currentPlayer = player ?: return@launch
                 if (!currentPlayer.isPlaying) {
@@ -7630,9 +7736,9 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
     /** @return true 表示已触发「读完此页暂停」（调用方应保持当前页、不再翻页） */
     private fun maybePauseForPageEnd(justFinishedCueIndex: Int): Boolean {
         logDebug(M9_SENTENCE_TAIL_LOG_TAG) {
-            "pageEndPause: check cue=$justFinishedCueIndex pauseAfterPageEnd=$pauseAfterPageEnd"
+            "pageEndPause: check cue=$justFinishedCueIndex active=$pageEndPauseActive setting=$pauseAfterPageEnd"
         }
-        if (!pauseAfterPageEnd) return false
+        if (!pageEndPauseActive) return false
         val finishedMatch = cueMatchesByCueIndex[justFinishedCueIndex]
         if (finishedMatch == null) {
             logDebug(M9_SENTENCE_TAIL_LOG_TAG) {
@@ -8117,12 +8223,20 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
             "restore applied matches=${restoredMatches.size} totalCues=${snapshot.totalCues} unmatched=$restoredUnmatched " +
             "sampleUnmatched=${unmatchedCueDebugSample(restoredData)}"
         }
+        revealPendingPlayerOpenAudioPositionIfNeeded()
+        relayoutIfPagesLackSentenceBoundaries()
     }
 
     private fun revealPendingPlayerOpenAudioPositionIfNeeded() {
         if (!pendingPlayerOpenAudioReveal) return
         if (cueMatchesByCueIndex.isEmpty()) {
             logDebug(LEGADO_READER_LOG_TAG) { "readerProgress revealFromPlayer skipped matches empty" }
+            return
+        }
+        // 匹配可能早于首屏分页到齐（首屏等匹配那条路走的就是这个顺序）：没有页面就无从定位，
+        // 这时别把标记消费掉，留给首屏之后的 sync。
+        if (pages.isEmpty()) {
+            logDebug(LEGADO_READER_LOG_TAG) { "readerProgress revealFromPlayer skipped pages empty" }
             return
         }
         pendingPlayerOpenAudioReveal = false
@@ -8209,6 +8323,8 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         rebuildCurrentChapterImageStops()
         syncToAudioPosition(allowPageJump = isAudioPlaying())
         renderCurrentPage()
+        revealPendingPlayerOpenAudioPositionIfNeeded()
+        relayoutIfPagesLackSentenceBoundaries()
     }
 
     private fun restoreReaderSettings() {
@@ -8315,7 +8431,6 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         audioCueRepeatFollowCueEnabled = state.audioCueRepeatFollowCueEnabled
         sentenceNoCrossPage = state.sentenceNoCrossPage
         pauseAfterPageEnd = state.pauseAfterPageEnd
-        repeatButtonControlsPageEndPause = state.pauseAfterPageEnd
         audioCueRepeatRemainingCount = initialAudioCueRepeatRemainingCount()
         if (::readView.isInitialized) {
             readView.selectionJumpToCueEnabled = hasReaderSelectionCueJump()
@@ -8861,12 +8976,21 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
             onComplete?.invoke(true)
             return
         }
-        if (srtLoading) {
-            onComplete?.invoke(false)
+        // 已经在加载：in-flight 的 deferred 就是唯一状态（不再另设布尔旗标）。语义是"在加载"，
+        // 不是"加载失败"——有等待方就等这一趟结束、回它的真实结果，没有等待方直接返回。
+        // force 在这里**有意一并合并**：走到这一步的调用方（重复按钮 / 跳句 / 目录）要的是"SRT 现在
+        // 可用"，不是"重新解析磁盘"；而换字幕走的是另一个 Activity 实例（srtUri 只在 onCreate 赋值
+        // 一次），所以不会等到别的 URI 的那一趟。别按字面给 force 再加"排队重跑一次"。
+        val inFlight = srtLoadInFlight
+        if (inFlight != null) {
+            if (onComplete != null) {
+                lifecycleScope.launch { onComplete(inFlight.await()) }
+            }
             return
         }
-        srtLoading = true
         srtLoadError = null
+        val loadResult = CompletableDeferred<Boolean>()
+        srtLoadInFlight = loadResult
         lifecycleScope.launch {
             val srtStartMs = SystemClock.elapsedRealtime()
             runCatching {
@@ -8929,6 +9053,7 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
                     restorePersistedMatchIfPossible()
                 }
                 onComplete?.invoke(loadedCues.isNotEmpty())
+                loadResult.complete(loadedCues.isNotEmpty())
             }.onFailure { error ->
                 Log.w(
                     LEGADO_READER_LOG_TAG,
@@ -8943,8 +9068,9 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
                 loadedSrtUriText = null
                 publishReaderSubtitleBridgeSnapshot(clearWhenMissing = true)
                 onComplete?.invoke(false)
+                loadResult.complete(false)
             }
-            srtLoading = false
+            srtLoadInFlight = null
             if (srtLoadError != null && force) {
                 Toast.makeText(this@LegadoReaderActivity, srtLoadError, Toast.LENGTH_LONG).show()
             }
@@ -9072,6 +9198,20 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
             audioCueIndex = cueIndex
         }
         val match = cueMatchesByCueIndex[cueIndex]
+        // 外部播放键（悬浮字幕 / 通知 / 手表 / 耳机）在页尾暂停后恢复播放：播放器已经在放了，但
+        // "翻页续播"这条流程没走。这里补上和阅读器自己的播放键同一处理——翻到下一页再继续；
+        // 否则画面仍停在旧页、"刚播完的那一句"仍被认作本页最后一句，下面的兜底检查会在下一拍又把
+        // 它停住（表现就是"点了播放又停一下，得再点一次"，同 6397 那段注释）。
+        if (pageEndPausePending && isAudioPlaybackRequested()) {
+            logDebug(M9_SENTENCE_TAIL_LOG_TAG) {
+                "pageEndPause: external resume while pending -> move page"
+            }
+            movePage(1)
+            // 本章最后一页会走换章加载那条路（movePage 里不会调 resume）→ 这里把 pending 收掉，
+            // 免得每一拍都再翻一次页。
+            pageEndPausePending = false
+            return
+        }
         if (!cueChanged && !forceReveal) {
             if (match != null && maybePausePlaybackForImage(
                     currentPosition = currentPosition,
@@ -9154,7 +9294,7 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         // 读完此页暂停：保证「本页」已武装——暂停态换成本页整页裁剪（播到页尾由解码层
         // 精确截断，既不重读最后一句也不读进下一页第一句）；播放中途无法重载时退化为
         // 句尾监视兜底。功能关闭时解除武装并恢复完整音频。
-        if (!pauseAfterPageEnd) {
+        if (!pageEndPauseActive) {
             releasePageEndPauseClipIfActive()
         } else {
             refreshPageEndPauseArming(currentPosition)
