@@ -251,6 +251,8 @@ internal class ContentTextView @JvmOverloads constructor(
         scrollOffset = offset
         scrollHorizontal = horizontal
         scrollReverse = reverse
+        // 让"当前页"跟着上下文中心走：否则滚动之后命中/选区几何还指着上一页（两个来源）。
+        pages.getOrNull(scrollCenterIndex)?.let { page = it }
         invalidate()
     }
 
@@ -333,33 +335,73 @@ internal class ContentTextView @JvmOverloads constructor(
      * 正文是按 `canvas.translate(offsetX/offsetY = scrollOffset)` 平移绘制的（drawPageLines），
      * 命中测试（点图/选区/手柄）如果不减这一段，点选与手柄、菜单就会整体错位——滚动余量越大越明显。
      */
-    private fun contentX(x: Float): Float = x - paddingLeft - (if (scrollHorizontal) scrollOffset else 0f)
+    /** 当前"命中页"的滚动偏移：当前页用 [scrollOffset]，命中邻页时用那一页的偏移。 */
+    private fun offsetForPage(target: TextPage?): Float {
+        if (target == null) return scrollOffset
+        val center = scrollPages.getOrNull(scrollCenterIndex)
+        if (center == null || target === center) return scrollOffset
+        val index = scrollPages.indexOfFirst { it === target }
+        return if (index >= 0) scrollOffsetForIndex(index) else scrollOffset
+    }
 
-    private fun contentY(y: Float): Float = y - paddingTop - (if (scrollHorizontal) 0f else scrollOffset)
+    /**
+     * 手指可能落在的页：当前页 → 后页 → 前页，**偏移已超出视口就停**（照 legado 的遍历规则，
+     * 不按固定 ±N）。命中测试用它替代"只看当前页"——滚动模式下屏面常有一部分属于相邻页。
+     */
+    private fun hitCandidates(): List<Pair<TextPage, Float>> {
+        val center = scrollPages.getOrNull(scrollCenterIndex)
+        if (center == null) return page?.let { listOf(it to scrollOffset) } ?: emptyList()
+        val viewport = if (scrollHorizontal) {
+            (width - paddingLeft - paddingRight).coerceAtLeast(1).toFloat()
+        } else {
+            (height - paddingTop - paddingBottom).coerceAtLeast(1).toFloat()
+        }
+        val out = ArrayList<Pair<TextPage, Float>>(3)
+        for (index in scrollCenterIndex until scrollPages.size) {
+            val candidate = scrollPages[index] ?: continue
+            val offset = scrollOffsetForIndex(index)
+            if (index > scrollCenterIndex && offset >= viewport) break
+            out += candidate to offset
+        }
+        for (index in scrollCenterIndex - 1 downTo 0) {
+            val candidate = scrollPages[index] ?: continue
+            val offset = scrollOffsetForIndex(index)
+            if (offset + pageScrollExtent(candidate, scrollHorizontal) <= 0f) continue
+            out += candidate to offset
+        }
+        return out
+    }
+
+    private fun contentX(x: Float): Float = x - paddingLeft - (if (scrollHorizontal) offsetForPage(page) else 0f)
+
+    private fun contentY(y: Float): Float = y - paddingTop - (if (scrollHorizontal) 0f else offsetForPage(page))
 
     /** 内容坐标 → 视图坐标（[contentX]/[contentY] 的反函数）：画手柄/选区菜单要用。 */
-    private fun viewX(x: Float): Float = x + paddingLeft + (if (scrollHorizontal) scrollOffset else 0f)
+    private fun viewX(x: Float): Float = x + paddingLeft + (if (scrollHorizontal) offsetForPage(page) else 0f)
 
-    private fun viewY(y: Float): Float = y + paddingTop + (if (scrollHorizontal) 0f else scrollOffset)
+    private fun viewY(y: Float): Float = y + paddingTop + (if (scrollHorizontal) 0f else offsetForPage(page))
 
     fun findImageAt(x: Float, y: Float): EbookImageRef? {
-        val current = page ?: return null
-        val localX = contentX(x)
-        val localY = contentY(y)
-        current.lines.forEach { line ->
-            val inLineBounds = when (line.layoutMode) {
-                M9LayoutMode.HORIZONTAL -> localY >= line.lineTop && localY <= line.lineBottom
-                M9LayoutMode.VERTICAL -> localX >= line.lineTop && localX <= line.lineBottom
-            }
-            if (!inLineBounds) return@forEach
-            line.columns.forEach { column ->
-                if (column !is ImageColumn) return@forEach
-                val hit = when (line.layoutMode) {
-                    M9LayoutMode.HORIZONTAL -> localX >= column.start && localX <= column.end
-                    M9LayoutMode.VERTICAL -> localY >= column.start && localY <= column.end
+        for ((candidate, offset) in hitCandidates()) {
+            val localX = x - paddingLeft - (if (scrollHorizontal) offset else 0f)
+            val localY = y - paddingTop - (if (scrollHorizontal) 0f else offset)
+            candidate.lines.forEach { line ->
+                val inLineBounds = when (line.layoutMode) {
+                    M9LayoutMode.HORIZONTAL -> localY >= line.lineTop && localY <= line.lineBottom
+                    M9LayoutMode.VERTICAL -> localX >= line.lineTop && localX <= line.lineBottom
                 }
-                if (hit) {
-                    return column.image
+                if (!inLineBounds) return@forEach
+                line.columns.forEach { column ->
+                    if (column !is ImageColumn) return@forEach
+                    val hit = when (line.layoutMode) {
+                        M9LayoutMode.HORIZONTAL -> localX >= column.start && localX <= column.end
+                        M9LayoutMode.VERTICAL -> localY >= column.start && localY <= column.end
+                    }
+                    if (hit) {
+                        // 命中邻页：把"当前页"对齐过去，后续 rect/手柄/菜单都用这一页的几何与偏移。
+                        page = candidate
+                        return column.image
+                    }
                 }
             }
         }
@@ -544,29 +586,32 @@ internal class ContentTextView @JvmOverloads constructor(
     }
 
     fun findTextHitAt(x: Float, y: Float): TextHit? {
-        val current = page ?: return null
-        val localX = contentX(x)
-        val localY = contentY(y)
-        current.lines.forEachIndexed { lineIndex, line ->
-            val inLineBounds = when (line.layoutMode) {
-                M9LayoutMode.HORIZONTAL -> localY >= line.lineTop && localY <= line.lineBottom
-                M9LayoutMode.VERTICAL -> localX >= line.lineTop && localX <= line.lineBottom
-            }
-            if (!inLineBounds) return@forEachIndexed
-            line.columns.forEachIndexed { columnIndex, column ->
-                if (column !is TextColumn) return@forEachIndexed
-                val hit = when (line.layoutMode) {
-                    M9LayoutMode.HORIZONTAL -> localX >= column.start && localX <= column.end
-                    M9LayoutMode.VERTICAL -> localY >= column.start && localY <= column.end
+        for ((candidate, offset) in hitCandidates()) {
+            val localX = x - paddingLeft - (if (scrollHorizontal) offset else 0f)
+            val localY = y - paddingTop - (if (scrollHorizontal) 0f else offset)
+            candidate.lines.forEachIndexed { lineIndex, line ->
+                val inLineBounds = when (line.layoutMode) {
+                    M9LayoutMode.HORIZONTAL -> localY >= line.lineTop && localY <= line.lineBottom
+                    M9LayoutMode.VERTICAL -> localX >= line.lineTop && localX <= line.lineBottom
                 }
-                if (hit) {
-                    return TextHit(
-                        sourceStart = column.sourceStart,
-                        sourceEnd = column.sourceEnd,
-                        lineIndex = lineIndex,
-                        columnIndex = columnIndex,
-                        rect = columnRect(line, column)
-                    )
+                if (!inLineBounds) return@forEachIndexed
+                line.columns.forEachIndexed { columnIndex, column ->
+                    if (column !is TextColumn) return@forEachIndexed
+                    val hit = when (line.layoutMode) {
+                        M9LayoutMode.HORIZONTAL -> localX >= column.start && localX <= column.end
+                        M9LayoutMode.VERTICAL -> localY >= column.start && localY <= column.end
+                    }
+                    if (hit) {
+                        // 命中邻页：先对齐"当前页"，再算 rect —— 否则手柄/菜单会用上一页的偏移。
+                        page = candidate
+                        return TextHit(
+                            sourceStart = column.sourceStart,
+                            sourceEnd = column.sourceEnd,
+                            lineIndex = lineIndex,
+                            columnIndex = columnIndex,
+                            rect = columnRect(line, column)
+                        )
+                    }
                 }
             }
         }
