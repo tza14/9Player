@@ -303,6 +303,10 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
 
     /** 阅读配置代次：任何样式类变更（字号/行距/边距/排版模式…）都会自增，用来"硬失效"分页缓存。 */
     private var chapterPageConfigGeneration: Int = 0
+
+    /** 邻页预览反馈的去重状态（见 [notifyPreviewBlocked]）。 */
+    private var lastPreviewBlockedReason: String? = null
+    private var lastPreviewBlockedAtMs: Long = 0L
     private var pendingAudioRestorePositionMs: Long = 0L
     private var pendingAudioRestoreDurationMs: Long = 0L
     /** 最近一次已知的整轨时长：裁剪窗口（逐句重复/页尾整页裁剪）期间 player.duration 只是窗口长度 */
@@ -3310,17 +3314,58 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
             ?: pages.indexOfLast { it.chapterIndex == chapterIndex }
     }
 
-    private fun pagePreviewForDelta(delta: Int): TextPage? {
-        if (delta == 0 || pages.isEmpty()) return pages.getOrNull(pageIndex)
-        pages.getOrNull(pageIndex + delta)?.let { return it }
-        val currentPage = pages.getOrNull(pageIndex) ?: return null
+    /** 邻页预览的三种结果：区分"还没排好"与"章节被锁"，便于在拖动开始时给出正确的反馈。 */
+    private sealed interface PagePreview {
+        data class Ready(val page: TextPage) : PagePreview
+        object NotPaginated : PagePreview
+        object Locked : PagePreview
+        object Absent : PagePreview
+    }
+
+    private fun resolvePagePreview(delta: Int): PagePreview {
+        if (delta == 0) {
+            return pages.getOrNull(pageIndex)?.let { PagePreview.Ready(it) } ?: PagePreview.Absent
+        }
+        if (pages.isEmpty()) return PagePreview.Absent
+        pages.getOrNull(pageIndex + delta)?.let { return PagePreview.Ready(it) }
+        val currentPage = pages.getOrNull(pageIndex) ?: return PagePreview.Absent
         val targetChapter = currentPage.chapterIndex + delta.coerceIn(-1, 1)
-        val loaded = document ?: return null
-        if (targetChapter !in loaded.chapters.indices) return null
-        if (!isChapterUnlocked(targetChapter, loaded)) return null
-        val cacheKey = currentChapterPageCacheKey(targetChapter)
-        val cachedPages = chapterPageCache[cacheKey].orEmpty()
-        return if (delta > 0) cachedPages.firstOrNull() else cachedPages.lastOrNull()
+        val loaded = document ?: return PagePreview.Absent
+        if (targetChapter !in loaded.chapters.indices) return PagePreview.Absent
+        if (!isChapterUnlocked(targetChapter, loaded)) return PagePreview.Locked
+        val cachedPages = chapterPageCache[currentChapterPageCacheKey(targetChapter)].orEmpty()
+        val neighbour = if (delta > 0) cachedPages.firstOrNull() else cachedPages.lastOrNull()
+        return neighbour?.let { PagePreview.Ready(it) } ?: PagePreview.NotPaginated
+    }
+
+    private fun pagePreviewForDelta(delta: Int): TextPage? =
+        when (val preview = resolvePagePreview(delta)) {
+            is PagePreview.Ready -> preview.page
+            PagePreview.Locked -> {
+                notifyPreviewBlocked(delta.coerceIn(-1, 1), locked = true)
+                null
+            }
+            PagePreview.NotPaginated -> {
+                notifyPreviewBlocked(delta.coerceIn(-1, 1), locked = false)
+                null
+            }
+            PagePreview.Absent -> null
+        }
+
+    /**
+     * 邻页预览拿不到时的反馈。
+     * - 被锁：**在判定方向时就提示**（照 legado 的时机：拖动一开始就挡），而不是等抬手提交；
+     * - 只是还没排好：只记日志——通常几十毫秒后就绪，弹提示反而吵。
+     * 去重：同一原因 2 秒内只提示一次（`handleMove` 每次移动都会探测方向）。
+     */
+    private fun notifyPreviewBlocked(direction: Int, locked: Boolean) {
+        val nowMs = System.currentTimeMillis()
+        val reason = if (locked) "locked" else "notReady"
+        if (reason == lastPreviewBlockedReason && nowMs - lastPreviewBlockedAtMs < 2000L) return
+        lastPreviewBlockedReason = reason
+        lastPreviewBlockedAtMs = nowMs
+        logDebug(LEGADO_READER_LOG_TAG) { "previewBlocked direction=$direction reason=$reason" }
+        if (locked) showSimulatedReadingLockedToast()
     }
 
     private fun showAnchorOrLoad(
