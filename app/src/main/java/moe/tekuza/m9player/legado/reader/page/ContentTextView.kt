@@ -374,8 +374,6 @@ internal class ContentTextView @JvmOverloads constructor(
     private fun hitCandidates(): List<Pair<TextPage, Float>> {
         val center = scrollPages.getOrNull(scrollCenterIndex)
         if (center == null) return page?.let { listOf(it to scrollOffset) } ?: emptyList()
-        // 选区编辑期间也允许逐页命中：选区状态已改为章节坐标，跨页端点可比、可选。
-        if (false) return listOf(center to scrollOffset)
         val viewport = if (scrollHorizontal) {
             (width - paddingLeft - paddingRight).coerceAtLeast(1).toFloat()
         } else {
@@ -505,10 +503,12 @@ internal class ContentTextView @JvmOverloads constructor(
 
     /** 用章节坐标记录选区（含章号），并把"当前页那一部分"派生回页内区间。 */
     private fun setChapterSelection(chapterIndex: Int, startChapter: Int, endChapter: Int) {
+        val from = minOf(startChapter, endChapter)
+        val to = maxOf(startChapter, endChapter)
         selectionChapterIndex = chapterIndex
-        selectionStartChapter = minOf(startChapter, endChapter)
-        selectionEndChapter = maxOf(startChapter, endChapter)
-        selectionChapterRange = selectionStartChapter!!..selectionEndChapter!!
+        selectionStartChapter = from
+        selectionEndChapter = to
+        selectionChapterRange = from..to
         syncPageLocalSelection()
     }
 
