@@ -940,6 +940,8 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
             selectionJumpToCueEnabled = hasReaderSelectionCueJump()
             canJumpSelectionToCue = { selection -> hasReaderSelectionCueJump(selection) }
             onPagePreview = { delta -> pagePreviewForDelta(delta) }
+        // 跨页选区取整句：选区用章节坐标记录，文本由这里从章节原文切出来（取词/Anki/复制/分享共用）。
+        chapterTextProvider = { chapterIndex -> document?.chapters?.getOrNull(chapterIndex)?.text }
             onDisplayedPageCommitted = { page -> updateChapterTitleSurfaces(page) }
             onMovePages = { delta -> movePage(delta) }
             onPrevPage = { movePage(-1) }

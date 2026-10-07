@@ -212,6 +212,13 @@ internal class PageView(context: Context) : LinearLayout(context) {
 
     fun selectedText(): String = contentView.selectedText()
 
+    /** 章节原文提供者（跨页选区取整句用），转发到内容视图。 */
+    var chapterTextProvider: ((Int) -> String?)?
+        get() = contentView.chapterTextProvider
+        set(value) {
+            contentView.chapterTextProvider = value
+        }
+
     fun selectedTextSnapshot(): SelectedTextSnapshot? {
         val page = currentPage ?: return null
         val text = contentView.selectedText().trim()

@@ -104,6 +104,13 @@ internal class ReadView @JvmOverloads constructor(
     var onTextSelectionStateChanged: ((Boolean) -> Unit)? = null
     var onImageClick: ((EbookImageRef) -> Unit)? = null
     var onPagePreview: ((Int) -> TextPage?)? = null
+
+    /** 章节原文提供者（跨页选区取整句用），转发到 PageView。 */
+    var chapterTextProvider: ((Int) -> String?)?
+        get() = pageView.chapterTextProvider
+        set(value) {
+            pageView.chapterTextProvider = value
+        }
     var onDisplayedPageCommitted: ((TextPage) -> Unit)? = null
     var canJumpSelectionToCue: ((SelectionInfo) -> Boolean)? = null
     var selectionJumpToCueEnabled: Boolean

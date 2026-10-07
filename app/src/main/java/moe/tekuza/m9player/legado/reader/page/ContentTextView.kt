@@ -604,7 +604,24 @@ internal class ContentTextView @JvmOverloads constructor(
         return role
     }
 
+    /**
+     * 宿主提供的**章节原文**（按章节下标取）。跨页选区要拿整句，页内文本不够用；
+     * 不设置时退回页内拼接，行为与以前一致。
+     */
+    var chapterTextProvider: ((Int) -> String?)? = null
+
     fun selectedText(): String {
+        // 章节坐标选区优先：直接取章节原文的子串 ⇒ 跨页选中拿到的就是完整一句。
+        val chapterRange = selectionChapterRange
+        val provider = chapterTextProvider
+        if (chapterRange != null && provider != null) {
+            val chapterText = provider(selectionChapterIndex)
+            if (chapterText != null) {
+                val from = chapterRange.first.coerceIn(0, chapterText.length)
+                val to = (chapterRange.last + 1).coerceIn(from, chapterText.length)
+                return chapterText.substring(from, to).trim()
+            }
+        }
         val range = selectionRange ?: return ""
         val current = page ?: return ""
         return current.lines.joinToString(separator = "\n") { line ->
