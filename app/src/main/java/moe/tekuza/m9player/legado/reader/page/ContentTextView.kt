@@ -382,12 +382,15 @@ internal class ContentTextView @JvmOverloads constructor(
         val out = ArrayList<Pair<TextPage, Float>>(3)
         for (index in scrollCenterIndex until scrollPages.size) {
             val candidate = scrollPages[index] ?: continue
+            // 占位页（邻章未排好时的标题页）不是真实内容：不可命中，选中/取词都不该落在它上面。
+            if (candidate.isPlaceholder) continue
             val offset = scrollOffsetForIndex(index)
             if (index > scrollCenterIndex && offset >= viewport) break
             out += candidate to offset
         }
         for (index in scrollCenterIndex - 1 downTo 0) {
             val candidate = scrollPages[index] ?: continue
+            if (candidate.isPlaceholder) continue
             val offset = scrollOffsetForIndex(index)
             if (offset + pageScrollExtent(candidate, scrollHorizontal) <= 0f) continue
             out += candidate to offset
