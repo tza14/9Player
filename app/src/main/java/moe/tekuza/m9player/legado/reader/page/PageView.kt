@@ -220,14 +220,18 @@ internal class PageView(context: Context) : LinearLayout(context) {
         }
 
     fun selectedTextSnapshot(): SelectedTextSnapshot? {
-        val page = currentPage ?: return null
         val text = contentView.selectedText().trim()
         if (text.isBlank()) return null
-        val sourceRange = contentView.selectedSourceRange() ?: return null
+        // 选区以**章节坐标**为准：跨页时页内区间只覆盖当前页，拿它换算会漏掉另一半。
+        // （单页选区下两种口径结果相同，所以这里不改变既有行为。）
+        val chapterRange = contentView.selectedChapterRange() ?: return null
+        val chapterIndex = contentView.selectedChapterIndex()
+            ?: currentPage?.chapterIndex
+            ?: return null
         return SelectedTextSnapshot(
             text = text,
-            chapterIndex = page.chapterIndex,
-            chapterRange = (page.charStart + sourceRange.first)..(page.charStart + sourceRange.last)
+            chapterIndex = chapterIndex,
+            chapterRange = chapterRange
         )
     }
 

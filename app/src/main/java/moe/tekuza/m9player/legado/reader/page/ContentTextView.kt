@@ -638,7 +638,8 @@ internal class ContentTextView @JvmOverloads constructor(
         }.trim()
     }
 
-    fun selectedSourceRange(): IntRange? = selectionRange
+    /** 选区所在章号（章节坐标口径，配合 selectedChapterRange() 使用）。 */
+    fun selectedChapterIndex(): Int? = selectionChapterIndex.takeIf { it >= 0 }
 
     /**
      * 章节坐标 → 该位置所在页的（列矩形, 起始行顶）。
@@ -667,13 +668,18 @@ internal class ContentTextView @JvmOverloads constructor(
     fun selectionBounds(): SelectionBounds? {
         val chapterRange = selectionChapterRange
         if (chapterRange != null) {
-            val start = chapterPositionRect(chapterRange.first) ?: return null
+            val start = chapterPositionRect(chapterRange.first)
             val end = chapterPositionRect(chapterRange.last) ?: start
-            return SelectionBounds(
-                startRect = start.first,
-                endRect = end.first,
-                startLineTop = start.second
-            )
+            // 两端都在绘制上下文里 ⇒ 手柄贴真实端点页。
+            if (start != null && end != null) {
+                return SelectionBounds(
+                    startRect = start.first,
+                    endRect = end.first,
+                    startLineTop = start.second
+                )
+            }
+            // 端点页已被滚出上下文（视图坐标只对上下文内的页有意义）：退回"当前页那一段"的端点，
+            // 手柄宁可位置不精确也不能凭空消失 —— 章节坐标仍然精确，滚回去就重新贴回真实端点。
         }
         val range = selectionRange ?: return null
         val startSource = selectionStartSource ?: range.first
