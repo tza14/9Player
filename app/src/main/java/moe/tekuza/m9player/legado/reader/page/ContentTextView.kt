@@ -153,6 +153,16 @@ internal class ContentTextView @JvmOverloads constructor(
     private var selectionRange: IntRange? = null
     private var selectionStartSource: Int? = null
     private var selectionEndSource: Int? = null
+
+    /**
+     * 同一段选区在**章节坐标**下的表示（跨页选择的唯一真相）。
+     * 页内区间只能表达一页；章节区间才能让相邻页各自画出自己那一段、并把整句交给取词/Anki。
+     * 切换期间两份状态同时维护：章节区间是权威，页内区间由 [syncPageLocalSelection] 派生。
+     */
+    private var selectionChapterRange: IntRange? = null
+    private var selectionStartChapter: Int? = null
+    private var selectionEndChapter: Int? = null
+    private var selectionChapterIndex: Int = -1
     private var pendingSelectionHandleRole: SelectionHandleRole? = null
     private var highlightRange: IntRange? = null
     private var searchRange: IntRange? = null
@@ -491,6 +501,39 @@ internal class ContentTextView @JvmOverloads constructor(
             hitSourceStart = hit.column.sourceStart
         )
     }
+
+    /** 用章节坐标记录选区（含章号），并把"当前页那一部分"派生回页内区间。 */
+    private fun setChapterSelection(chapterIndex: Int, startChapter: Int, endChapter: Int) {
+        selectionChapterIndex = chapterIndex
+        selectionStartChapter = minOf(startChapter, endChapter)
+        selectionEndChapter = maxOf(startChapter, endChapter)
+        selectionChapterRange = selectionStartChapter!!..selectionEndChapter!!
+        syncPageLocalSelection()
+    }
+
+    /**
+     * 把章节区间裁剪到**当前页**，写回 selectionRange/StartSource/EndSource。
+     * 高亮、手柄、取词仍读页内区间，所以现有消费者不需要改；页不在区间内时清空。
+     */
+    private fun syncPageLocalSelection() {
+        val chapterRange = selectionChapterRange ?: return
+        val current = page ?: return
+        val start = maxOf(chapterRange.first, current.charStart) - current.charStart
+        val end = minOf(chapterRange.last, current.charEnd - 1) - current.charStart
+        if (start <= end) {
+            selectionRange = start..end
+            selectionStartSource = start
+            selectionEndSource = end
+        } else {
+            selectionRange = null
+            selectionStartSource = null
+            selectionEndSource = null
+        }
+        invalidate()
+    }
+
+    /** 章节坐标下的选区（跨页选择的权威值），供宿主取整句用。 */
+    fun selectedChapterRange(): IntRange? = selectionChapterRange
 
     fun beginSelectionAt(x: Float, y: Float): Boolean {
         val hit = findTextHitAt(x, y) ?: return false
