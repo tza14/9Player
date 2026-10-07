@@ -617,7 +617,41 @@ internal class ContentTextView @JvmOverloads constructor(
 
     fun selectedSourceRange(): IntRange? = selectionRange
 
+    /**
+     * 章节坐标 → 该位置所在页的（列矩形, 起始行顶）。
+     * 跨页选区的两个端点可能落在不同页上，必须各自按**那一页**的偏移算，手柄才贴得住。
+     */
+    private fun chapterPositionRect(chapterPosition: Int): Pair<RectF, Float>? {
+        val contextPages = if (scrollPages.isNotEmpty()) scrollPages else listOf(page)
+        contextPages.forEachIndexed { index, candidate ->
+            val target = candidate ?: return@forEachIndexed
+            if (chapterPosition < target.charStart || chapterPosition >= target.charEnd) return@forEachIndexed
+            val local = chapterPosition - target.charStart
+            val offset = if (scrollPages.isNotEmpty()) scrollOffsetForIndex(index) else scrollOffset
+            target.lines.forEach { line ->
+                line.columns.filterIsInstance<TextColumn>().forEach { column ->
+                    if (local >= column.sourceStart && local < column.sourceEnd) {
+                        val rect = columnRectWithOffset(line, column, offset)
+                        val lineTop = line.lineTop + paddingTop + (if (scrollHorizontal) 0f else offset)
+                        return rect to lineTop
+                    }
+                }
+            }
+        }
+        return null
+    }
+
     fun selectionBounds(): SelectionBounds? {
+        val chapterRange = selectionChapterRange
+        if (chapterRange != null) {
+            val start = chapterPositionRect(chapterRange.first) ?: return null
+            val end = chapterPositionRect(chapterRange.last) ?: start
+            return SelectionBounds(
+                startRect = start.first,
+                endRect = end.first,
+                startLineTop = start.second
+            )
+        }
         val range = selectionRange ?: return null
         val startSource = selectionStartSource ?: range.first
         val endSource = selectionEndSource ?: range.last
@@ -762,19 +796,25 @@ internal class ContentTextView @JvmOverloads constructor(
         return null
     }
 
-    private fun columnRect(line: TextLine, column: TextColumn): RectF {
+    private fun columnRect(line: TextLine, column: TextColumn): RectF =
+        columnRectWithOffset(line, column, offsetForPage(page))
+
+    /** 用**显式偏移**算列矩形：跨页端点的手柄必须按"端点所在那一页"的偏移算，否则会差一页。 */
+    private fun columnRectWithOffset(line: TextLine, column: TextColumn, offset: Float): RectF {
+        val dx = if (scrollHorizontal) offset else 0f
+        val dy = if (scrollHorizontal) 0f else offset
         return when (line.layoutMode) {
             M9LayoutMode.HORIZONTAL -> RectF(
-                viewX(column.start),
-                viewY(line.lineTop),
-                viewX(column.end),
-                viewY(line.lineBottom)
+                column.start + paddingLeft + dx,
+                line.lineTop + paddingTop + dy,
+                column.end + paddingLeft + dx,
+                line.lineBottom + paddingTop + dy
             )
             M9LayoutMode.VERTICAL -> RectF(
-                viewX(line.lineTop),
-                viewY(column.start),
-                viewX(line.lineBottom),
-                viewY(column.end)
+                line.lineTop + paddingLeft + dx,
+                column.start + paddingTop + dy,
+                line.lineBottom + paddingLeft + dx,
+                column.end + paddingTop + dy
             )
         }
     }
