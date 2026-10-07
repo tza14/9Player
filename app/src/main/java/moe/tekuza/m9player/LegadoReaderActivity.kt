@@ -3412,6 +3412,23 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
                 persistAnchor = persistAnchor
             )
         } else {
+            // 跨章：先用**已缓存的邻章页**同步渲染一帧，画面当帧就有内容（这就是"流式排版"里
+            // 用户真正能感知到的那部分收益，不需要动排版管线）；随后照旧异步加载校正。
+            val cachedPages = chapterPageCache[currentChapterPageCacheKey(safeAnchor.chapterIndex)]
+            if (cachedPages != null && cachedPages.isNotEmpty()) {
+                pages = cachedPages
+                pageIndex = cachedPages
+                    .indexOfFirst { safeAnchor.charPosition in it.charStart..<it.charEnd }
+                    .takeIf { it >= 0 } ?: 0
+                renderCurrentPage(
+                    forward = forward,
+                    persistAnchor = persistAnchor
+                )
+                logDebug(LEGADO_READER_LOG_TAG) {
+                    "crossChapterFastPath chapter=${safeAnchor.chapterIndex} " +
+                        "pages=${cachedPages.size} index=$pageIndex"
+                }
+            }
             loadDisplayedBook(anchor = safeAnchor, forceDocumentReload = false)
             if (persistAnchor) {
                 persistReaderAnchor(safeAnchor)
