@@ -3436,6 +3436,20 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         }
     }
 
+    /** 书末/书首提示的去重时间戳（照 legado 到书末只弹一次，别每次翻页都弹）。 */
+    private var lastReaderEndToastAtMs: Long = 0L
+
+    private fun showReaderEndToast(first: Boolean) {
+        val nowMs = System.currentTimeMillis()
+        if (nowMs - lastReaderEndToastAtMs < 2000L) return
+        lastReaderEndToastAtMs = nowMs
+        Toast.makeText(
+            this,
+            getString(if (first) R.string.reader_no_prev_page else R.string.reader_no_next_page),
+            Toast.LENGTH_SHORT
+        ).show()
+    }
+
     private fun showStyleDialog() {
         ReadStyleDialog(
             activity = this,
@@ -6411,7 +6425,18 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         val targetChapter = currentChapter + if (delta > 0) 1 else -1
         val lastChapter = lastUnlockedChapterIndex(document)
         if (delta > 0 && targetChapter > lastChapter) {
-            showSimulatedReadingLockedToast()
+            // 区分"真书末"和"模拟阅读上限"：前者是读完整本书，后者是被锁住（照 legado，
+            // 撞上限时拖动一开始就被挡，提示在提交处给出）。两者文案不同。
+            val bookLastIndex = document?.chapters?.lastIndex ?: lastChapter
+            if (lastChapter < bookLastIndex) {
+                showSimulatedReadingLockedToast()
+            } else {
+                showReaderEndToast(first = false)
+            }
+            return
+        }
+        if (delta < 0 && targetChapter < 0) {
+            showReaderEndToast(first = true)
             return
         }
         if (targetChapter in 0..lastChapter) {
