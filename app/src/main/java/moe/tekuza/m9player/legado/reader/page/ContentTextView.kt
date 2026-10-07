@@ -359,6 +359,10 @@ internal class ContentTextView @JvmOverloads constructor(
     private fun hitCandidates(): List<Pair<TextPage, Float>> {
         val center = scrollPages.getOrNull(scrollCenterIndex)
         if (center == null) return page?.let { listOf(it to scrollOffset) } ?: emptyList()
+        // 正在编辑选区（拖手柄）时只认当前页：选区状态目前用"页内下标"，跨页命中会把两页的
+        // 页内下标混进同一个区间 ⇒ 出现"看着选中、范围其实错"的选区。
+        // 跨页选择要用**章节坐标**重做（下一步），在那之前这里保持单页语义。
+        if (selectionRange != null) return listOf(center to scrollOffset)
         val viewport = if (scrollHorizontal) {
             (width - paddingLeft - paddingRight).coerceAtLeast(1).toFloat()
         } else {
