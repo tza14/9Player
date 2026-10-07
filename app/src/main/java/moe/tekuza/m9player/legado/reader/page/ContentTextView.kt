@@ -24,6 +24,7 @@ import moe.tekuza.m9player.legado.reader.entities.ImageColumn
 import moe.tekuza.m9player.legado.reader.entities.TextColumn
 import moe.tekuza.m9player.legado.reader.entities.TextLine
 import moe.tekuza.m9player.legado.reader.entities.TextPage
+import moe.tekuza.m9player.logDebug
 import java.text.BreakIterator
 import java.util.Locale
 import kotlin.math.abs
@@ -154,6 +155,9 @@ internal class ContentTextView @JvmOverloads constructor(
     private var scrollPages: List<TextPage?> = emptyList()
     private var scrollCenterIndex: Int = 0
     private var scrollOffset: Float = 0f
+
+    /** `pageScrollExtent` 诊断日志的时间节流（毫秒）。 */
+    private var lastExtentLogAtMs: Long = 0L
     private var scrollHorizontal: Boolean = false
     private var scrollReverse: Boolean = false
     val textSizePx: Float get() = textSizePxValue
@@ -288,6 +292,25 @@ internal class ContentTextView @JvmOverloads constructor(
         val viewportWidth = (width - paddingLeft - paddingRight).coerceAtLeast(1).toFloat()
         val viewportHeight = (height - paddingTop - paddingBottom).coerceAtLeast(1).toFloat()
         if (page == null) return if (horizontal) viewportWidth else viewportHeight
+        // 图片页/空页按**整屏一步**（照 legado ScrollPageDelegate.calcNextPageOffset：
+        // book.isImage 以及 !isTextStyle && visiblePage.hasImageOrEmpty() 都直接返回 -visibleHeight）。
+        // 否则图片页要按"图片内容高度"滑完才跨得过去，表现就是滑不动/一直是同一页。
+        // 诊断日志按时间节流（≤2 行/秒）：logDebug 是 inline + VERBOSE_LOGS 门控（release 零成本），
+        // 但 debug 包里原来每次调用都要扫全页找 max（滚动时每帧 20+ 次）⇒ 复现问题时反而加重卡顿。
+        // 不用"页身份"做键：滚动上下文里的临时页/邻页对象每次都可能不同，那样等于没节流。
+        val nowMs = System.currentTimeMillis()
+        if (nowMs - lastExtentLogAtMs >= 500L) {
+            lastExtentLogAtMs = nowMs
+            logDebug("M9PageScroll") {
+                "extent page=${page.chapterIndex}:${page.pageInChapter} horizontal=$horizontal " +
+                    "viewport=${if (horizontal) viewportWidth else viewportHeight} pageHeight=${page.height} " +
+                    "pageWidth=${page.width} maxCrossEnd=${page.lines.maxOfOrNull { it.crossEnd } ?: 0f} " +
+                    "maxLineBottom=${page.lines.maxOfOrNull { it.lineBottom } ?: 0f} lines=${page.lines.size}"
+            }
+        }
+        if (page.lines.isEmpty() || page.hasImageColumn()) {
+            return if (horizontal) viewportWidth else viewportHeight
+        }
         val contentExtent = if (horizontal) {
             maxOf(
                 page.width,
@@ -296,7 +319,10 @@ internal class ContentTextView @JvmOverloads constructor(
         } else {
             maxOf(
                 page.height,
-                page.lines.maxOfOrNull { it.crossEnd } ?: 0f
+                page.lines.maxOfOrNull { it.crossEnd } ?: 0f,
+                // 末尾行/段距可能没有计入 crossEnd（实测同一页 crossEnd=1805.8 而 lineBottom=1928.0），
+                // 少算这 122px 就会让相邻页画近一截，两页的行交错 ⇒ 正文"字叠字"。
+                page.lines.maxOfOrNull { it.lineBottom } ?: 0f
             )
         }
         return contentExtent.coerceAtLeast(if (horizontal) viewportWidth else viewportHeight)
@@ -306,10 +332,24 @@ internal class ContentTextView @JvmOverloads constructor(
         return lines.any { line -> line.columns.any { it is ImageColumn } }
     }
 
+    /**
+     * 视图坐标 → 当前页内容坐标：扣掉 padding，并扣掉滚动模式下的滚动偏移。
+     * 正文是按 `canvas.translate(offsetX/offsetY = scrollOffset)` 平移绘制的（drawPageLines），
+     * 命中测试（点图/选区/手柄）如果不减这一段，点选与手柄、菜单就会整体错位——滚动余量越大越明显。
+     */
+    private fun contentX(x: Float): Float = x - paddingLeft - (if (scrollHorizontal) scrollOffset else 0f)
+
+    private fun contentY(y: Float): Float = y - paddingTop - (if (scrollHorizontal) 0f else scrollOffset)
+
+    /** 内容坐标 → 视图坐标（[contentX]/[contentY] 的反函数）：画手柄/选区菜单要用。 */
+    private fun viewX(x: Float): Float = x + paddingLeft + (if (scrollHorizontal) scrollOffset else 0f)
+
+    private fun viewY(y: Float): Float = y + paddingTop + (if (scrollHorizontal) 0f else scrollOffset)
+
     fun findImageAt(x: Float, y: Float): EbookImageRef? {
         val current = page ?: return null
-        val localX = x - paddingLeft
-        val localY = y - paddingTop
+        val localX = contentX(x)
+        val localY = contentY(y)
         current.lines.forEach { line ->
             val inLineBounds = when (line.layoutMode) {
                 M9LayoutMode.HORIZONTAL -> localY >= line.lineTop && localY <= line.lineBottom
@@ -332,8 +372,8 @@ internal class ContentTextView @JvmOverloads constructor(
 
     fun findAssistTokenAt(x: Float, y: Float): AssistToken? {
         val current = page ?: return null
-        val localX = x - paddingLeft
-        val localY = y - paddingTop
+        val localX = contentX(x)
+        val localY = contentY(y)
         current.lines.forEachIndexed { lineIndex, line ->
             if (line.layoutMode != M9LayoutMode.VERTICAL) return@forEachIndexed
             val inLineBounds = localX >= line.lineTop && localX <= line.lineBottom
@@ -509,8 +549,8 @@ internal class ContentTextView @JvmOverloads constructor(
 
     fun findTextHitAt(x: Float, y: Float): TextHit? {
         val current = page ?: return null
-        val localX = x - paddingLeft
-        val localY = y - paddingTop
+        val localX = contentX(x)
+        val localY = contentY(y)
         current.lines.forEachIndexed { lineIndex, line ->
             val inLineBounds = when (line.layoutMode) {
                 M9LayoutMode.HORIZONTAL -> localY >= line.lineTop && localY <= line.lineBottom
@@ -611,7 +651,8 @@ internal class ContentTextView @JvmOverloads constructor(
                 if (hit) {
                     return SelectionColumnAnchor(
                         rect = columnRect(line, column),
-                        lineTop = line.lineTop + paddingTop
+                        // 菜单/手柄的锚点同样要带滚动偏移，否则滚动出余量后菜单会整体下移一截。
+                        lineTop = viewY(line.lineTop)
                     )
                 }
             }
@@ -622,16 +663,16 @@ internal class ContentTextView @JvmOverloads constructor(
     private fun columnRect(line: TextLine, column: TextColumn): RectF {
         return when (line.layoutMode) {
             M9LayoutMode.HORIZONTAL -> RectF(
-                column.start + paddingLeft,
-                line.lineTop + paddingTop,
-                column.end + paddingLeft,
-                line.lineBottom + paddingTop
+                viewX(column.start),
+                viewY(line.lineTop),
+                viewX(column.end),
+                viewY(line.lineBottom)
             )
             M9LayoutMode.VERTICAL -> RectF(
-                line.lineTop + paddingLeft,
-                column.start + paddingTop,
-                line.lineBottom + paddingLeft,
-                column.end + paddingTop
+                viewX(line.lineTop),
+                viewY(column.start),
+                viewX(line.lineBottom),
+                viewY(column.end)
             )
         }
     }

@@ -828,7 +828,9 @@ private fun BookReaderScreen(
                     audioUri = audioUri,
                     srtUri = srtUri,
                     coverUri = coverUri
-                )
+                ),
+                currentPositionMsProvider = { BookReaderPlaybackSession.currentPositionMs() },
+                durationMsProvider = { BookReaderPlaybackSession.currentFullDurationMs() }
             )
         }
     }

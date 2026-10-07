@@ -22,6 +22,13 @@ object BookReaderPlaybackSession {
     @Volatile
     private var currentAudioUriText: String? = null
 
+    /** 阅读器发布的「裁剪前完整时长」；用 [publishedFullDurationUri] 标记它属于哪条音轨。 */
+    @Volatile
+    private var publishedFullDurationMs: Long = 0L
+
+    @Volatile
+    private var publishedFullDurationUri: String? = null
+
     @Synchronized
     fun acquirePlayer(context: Context): ExoPlayer {
         val existing = player
@@ -117,10 +124,40 @@ object BookReaderPlaybackSession {
     }
 
     /**
-     * 注意：裁剪态下这是**裁剪段**时长（手表进度会显示成一小段）；完整时长目前没有发布路径，
-     * 需要时要由阅读器把裁剪前的完整时长发到 [BookReaderFloatingBridge]。
+     * 播放器上的实际时长：裁剪态下这是**裁剪段**长度。
+     * 手表 / 通知 / 进度存档要的是整轨时长，请用 [currentFullDurationMs]。
      */
     fun currentDurationMs(): Long = player?.duration?.takeIf { it > 0L } ?: 0L
+
+    /**
+     * 阅读器把「裁剪前的完整时长」发布到这里（[currentFullDurationMs] 的唯一外部来源）。
+     * 按当前音轨打标签：换书/换轨后旧值自动失效，不需要调用方手工清理；传 0/负值即清除。
+     */
+    fun publishFullDurationMs(durationMs: Long) {
+        val normalized = durationMs.takeIf { it > 0L } ?: 0L
+        publishedFullDurationMs = normalized
+        publishedFullDurationUri = if (normalized > 0L) currentAudioUriText else null
+    }
+
+    /**
+     * 手表与通知看到的**整轨**时长。裁剪态下 [currentDurationMs] 只是窗口长度（进度会显示成一小段），
+     * 所以优先用阅读器发布的完整时长；没有裁剪时 player.duration 本身就是整轨时长，顺手记为真值。
+     * 两者都拿不到才退回 [currentDurationMs]（旧行为：至多显示未知，不会把进度截断成一小段）。
+     */
+    fun currentFullDurationMs(): Long {
+        val sharedPlayer = player
+        val rawDurationMs = sharedPlayer?.duration?.takeIf { it > 0L } ?: 0L
+        val hasActiveClip = sharedPlayer != null && activeClipRangeMs(sharedPlayer) != null
+        if (rawDurationMs > 0L && !hasActiveClip) {
+            // 没有裁剪时 player.duration 就是整轨时长：顺手记为真值，之后进入裁剪态也有得用
+            publishedFullDurationMs = rawDurationMs
+            publishedFullDurationUri = currentAudioUriText
+        }
+        val published = publishedFullDurationMs
+            .takeIf { it > 0L && publishedFullDurationUri == currentAudioUriText }
+            ?: 0L
+        return resolveFullDurationMs(rawDurationMs, hasActiveClip, published)
+    }
 
     fun currentPlaybackSpeed(): Float = player?.playbackParameters?.speed ?: 1f
 
@@ -192,4 +229,21 @@ object BookReaderPlaybackSession {
         }
         return sharedPlayer
     }
+}
+
+/**
+ * [BookReaderPlaybackSession.currentFullDurationMs] 的**纯决策**部分（只依赖 JVM，可直接单测）：
+ * - 没有裁剪：播放器自己的时长就是整轨时长，直接用它；
+ * - 有裁剪：player.duration 只是窗口长度（一段/一句），只信已发布的完整时长；
+ * - 都拿不到：退回 raw（旧行为：至多显示成一小段，不会把进度断成未知）。
+ */
+internal fun resolveFullDurationMs(
+    rawDurationMs: Long,
+    hasActiveClip: Boolean,
+    publishedDurationMs: Long,
+): Long {
+    val raw = rawDurationMs.takeIf { it > 0L } ?: 0L
+    if (raw > 0L && !hasActiveClip) return raw
+    val published = publishedDurationMs.takeIf { it > 0L } ?: 0L
+    return if (published > 0L) published else raw
 }

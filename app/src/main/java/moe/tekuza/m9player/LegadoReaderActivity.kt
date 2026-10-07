@@ -99,6 +99,9 @@ private const val LEGADO_MATCH_LOG_TAG = "LegadoMatch"
 private const val FLOATING_OVERLAY_EXIT_LOG_TAG = "FloatingOverlayExit"
 private const val READER_PAUSED_SEEK_LOG_TAG = "ReaderPausedSeek"
 private const val AUDIO_CUE_LOOP_CLIP_LOG_TAG = "LegadoRepeatClip"
+
+/** 布局/分页事件：logcat 里 `adb logcat -s M9Layout` 看内容区高度与分页是否被反复触发。 */
+private const val READER_LAYOUT_LOG_TAG = "M9Layout"
 private const val NIGHT_BOTTOM_BG = 0xFF3A3A3A.toInt()
 private const val NIGHT_BRIGHTNESS_BG = 0x80303030.toInt()
 private const val NIGHT_ACCENT = 0xFFE36A3C.toInt()
@@ -154,7 +157,9 @@ private data class ReaderChapterPageCacheKey(
     val chapterIndex: Int,
     val contentWidthPx: Int,
     val contentHeightPx: Int,
-    val firstPageReservePx: Int = 0
+    val firstPageReservePx: Int = 0,
+    /** 配置代次：样式/字号/行距/边距等变更时由 clearChapterPageCache() 自增。 */
+    val configGeneration: Int = 0
 )
 
 private data class ReaderSearchHit(
@@ -213,6 +218,17 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
     private lateinit var readMenu: View
     private lateinit var statusBarScrim: View
     private lateinit var navigationBarScrim: View
+
+    /** [READER_LAYOUT_LOG_TAG] 的变化检测状态：只在 top/bottom 真的变了时打一行。 */
+    private var lastInsetsLogTop: Int = -1
+    private var lastInsetsLogBottom: Int = -1
+
+    /**
+     * 当前被"导航栏避让"吃掉的高度（就是 inset 里算出的 bottom）。分页基准要把它加回来，
+     * 见 [currentNoTitleContentHeightPx]：它是**瞬时**的（只有阅读菜单打开时导航栏才露出），
+     * 一旦进入分页高度，每次菜单显隐都会让所有章节的分页缓存失效并全量重排。
+     */
+    private var navigationBarInsetReservedPx: Int = 0
     private lateinit var moreSettingsPanel: MoreConfigDialog
     private lateinit var audioControlPanel: View
     private lateinit var playbackBar: View
@@ -284,6 +300,9 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
     private var paginationJob: Job? = null
     private var chapterPreloadJob: Job? = null
     private val chapterPageCache: MutableMap<ReaderChapterPageCacheKey, List<TextPage>> = linkedMapOf()
+
+    /** 阅读配置代次：任何样式类变更（字号/行距/边距/排版模式…）都会自增，用来"硬失效"分页缓存。 */
+    private var chapterPageConfigGeneration: Int = 0
     private var pendingAudioRestorePositionMs: Long = 0L
     private var pendingAudioRestoreDurationMs: Long = 0L
     /** 最近一次已知的整轨时长：裁剪窗口（逐句重复/页尾整页裁剪）期间 player.duration 只是窗口长度 */
@@ -727,7 +746,23 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
             val hideStatusForReader = shouldHideStatusBarForReaderChrome()
             val hideNavigationForReader = shouldHideNavigationBarForReaderChrome()
             val top = if (hideStatusBar && readBodyToLh) 0 else safeInsets.top
-            val bottom = if (hideNavigationBar) 0 else bars.bottom
+            // 导航栏是否真的要隐藏，看 shouldHideNavigationBarForReaderChrome（阅读菜单打开时它会把
+            // 导航栏放出来）——这里必须和下面 navigationBarScrim 的口径一致：旧写法只看 hideNavigationBar
+            // 设置，于是"菜单打开 + 设置里关了导航栏"这个状态下栏被放出来、padding 仍是 0，底部菜单
+            // 就被系统导航栏压住（截图那个样子）。原型期（ba3b8ce）留下的写法，2026-06-06 换成
+            // 感知菜单的版本时漏改了这一行。
+            val bottom = if (hideNavigationForReader) 0 else bars.bottom
+            navigationBarInsetReservedPx = bottom
+            if (top != lastInsetsLogTop || bottom != lastInsetsLogBottom) {
+                lastInsetsLogTop = top
+                lastInsetsLogBottom = bottom
+                logDebug(READER_LAYOUT_LOG_TAG) {
+                    "insets top=$top bottom=$bottom safeTop=${safeInsets.top} barsBottom=${bars.bottom} " +
+                        "hideStatus=$hideStatusBar hideNav=$hideNavigationBar navForReader=$hideNavigationForReader " +
+                        "chrome=${isReaderChromeVisibleForSystemBars()} containerH=${contentContainer.height} " +
+                        "padding=${contentContainer.paddingTop}/${contentContainer.paddingBottom} viewH=${readView.height}"
+                }
+            }
             contentContainer.setPadding(0, top, 0, bottom)
             fitMoreSettingsPanelToAvailableHeight()
             applyReadMenuTopInset(safeInsets.top)
@@ -792,8 +827,16 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
                 Gravity.BOTTOM
             )
         )
-        contentContainer.addOnLayoutChangeListener { _, _, top, _, bottom, _, _, _, _ ->
+        contentContainer.addOnLayoutChangeListener { _, _, top, _, bottom, _, oldTop, _, oldBottom ->
             fitMoreSettingsPanelToAvailableHeight()
+            val height = bottom - top
+            val oldHeight = oldBottom - oldTop
+            if (height != oldHeight) {
+                logDebug(READER_LAYOUT_LOG_TAG) {
+                    "container height $oldHeight -> $height top=$top oldTop=$oldTop " +
+                        "padding=${contentContainer.paddingTop}/${contentContainer.paddingBottom} viewH=${readView.height}"
+                }
+            }
         }
 
         audioControlPanel = buildAudioControlPanel().apply {
@@ -5069,7 +5112,7 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
     }
 
     private fun loadDisplayedBook(anchor: ReaderPageAnchor?, forceDocumentReload: Boolean = false) {
-        val pageWidth = readView.contentWidth.takeIf { it > 0 } ?: (resources.displayMetrics.widthPixels - dp(44))
+        val pageWidth = currentContentWidthPx()
         val pageHeight = readView.contentHeight.takeIf { it > 0 } ?: (resources.displayMetrics.heightPixels - dp(220))
         val book = importedBook
         paginationJob?.cancel()
@@ -5231,12 +5274,19 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         document: EbookDocument,
         contentWidthPx: Int
     ): List<TextPage> {
-        return buildTextPageFactory().createPages(
+        val contentHeightPx = currentNoTitleContentHeightPx()
+        val pages = buildTextPageFactory().createPages(
             document = document,
             contentWidthPx = contentWidthPx,
-            contentHeightPx = currentNoTitleContentHeightPx(),
+            contentHeightPx = contentHeightPx,
             firstPageReservePx = 0f
         )
+        logDebug(READER_LAYOUT_LOG_TAG) {
+            "paginate width=$contentWidthPx height=$contentHeightPx pages=${pages.size} " +
+                "chapters=${document.chapters.size} padding=${contentContainer.paddingTop}/${contentContainer.paddingBottom} " +
+                "view=${readView.width}x${readView.height} sentenceNoCrossPage=$sentenceNoCrossPage"
+        }
+        return pages
     }
 
     private fun buildTextPageFactory(paragraphIndentOverride: String? = null): TextPageFactory {
@@ -5334,15 +5384,27 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
     private fun currentNoTitleContentHeightPx(): Int {
         // 分页高度基准 = 无标题时的正文区高度：当前正文区实测高度 +
         // （若此刻标题正显示）标题占用高度，保证任何时刻分页都在同一基准上。
+        //
+        // 实测高度还要**加回导航栏避让吃掉的那一段**（照 legado：正文尺寸/分页与系统栏显隐解耦）。
+        // 导航栏只在阅读菜单打开时露出（shouldHideNavigationBarForReaderChrome），那一段本来就被
+        // 菜单自己盖住；若把它算进分页高度，菜单一显隐就改高度 ⇒ 所有章节的分页缓存键失效 ⇒
+        // 整章重排（滚动模式下快速滑动就表现为"一直重复"）。实测日志：同一章在 1836/2032、
+        // 1908/1960 两组高度之间交替，cacheSize 每次掉回 1。
+        // 分页高度 = 正文区**实测**高度（正文区已经让开了状态栏/导航栏，见 contentContainer 的
+        // padding=安全区）。原来在这里再加一次导航栏避让量，会让分页高度比可视区高 63~124px，
+        // 于是每页最后一行被挤到可视区外——就是"下面的字被吞了"。
         val measured = readView.contentHeight.takeIf { it > 0 }
             ?: (resources.displayMetrics.heightPixels - dp(220))
-        val extra = if (bodyTitleShownOnCurrentPage()) {
-            readView.bodyTitleReserveFor(
-                pages.getOrNull(pageIndex)?.title.orEmpty(),
-                currentContentWidthPx()
-            )
-        } else {
-            0
+        // 标题占用问**视图本身**（此刻是否真的占着标题那一行），不要按"当前显示页"重算：
+        // 后者在"显示 A 章、同时给 B 章分页"时会算出另一种基准（实测同一章在 1960/2032 间跳），
+        // 每跳一次整章分页缓存就作废 ⇒ 章末相邻页取不到 ⇒ 卡住/重复。
+        val extra = readView.appliedBodyTitleReservePx
+        // 分页基准日志：正文区实测高度 + 标题预留 + 导航栏预留 = 用于分页的高度。
+        // 与 paginateChapter 打出的 height 对不上时，就是"最后一行被吞"的来源。
+        logDebug(READER_LAYOUT_LOG_TAG) {
+            "basis measured=$measured extra=$extra navReserve=$navigationBarInsetReservedPx " +
+                "total=${(measured + extra).coerceAtLeast(dp(120))} view=${readView.contentHeight} " +
+                "width=${readView.contentWidth} page=$pageIndex"
         }
         return (measured + extra).coerceAtLeast(dp(120))
     }
@@ -5376,7 +5438,8 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
             chapterIndex = safeChapterIndex,
             contentWidthPx = contentWidthPx,
             contentHeightPx = contentHeightPx,
-            firstPageReservePx = firstPageReservePx
+            firstPageReservePx = firstPageReservePx,
+            configGeneration = chapterPageConfigGeneration
         )
         chapterPageCache[cacheKey]?.let { cachedPages ->
             logDebug(LEGADO_READER_LOG_TAG) {
@@ -5395,6 +5458,12 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
             )
         }
         chapterPageCache[cacheKey] = pages
+        // 缓存未命中 = 真的重排了一次；同一章反复出现（尤其 height 在抖）就是"一直重复"的入口。
+        logDebug(READER_LAYOUT_LOG_TAG) {
+            "paginateChapter chapter=$safeChapterIndex pages=${pages.size} width=$contentWidthPx " +
+                "height=$contentHeightPx reserve=$firstPageReservePx cacheSize=${chapterPageCache.size} " +
+                "view=${readView.width}x${readView.height}"
+        }
         return pages
     }
 
@@ -5405,7 +5474,8 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
             chapterIndex = chapterIndex,
             contentWidthPx = pageWidth,
             contentHeightPx = currentNoTitleContentHeightPx(),
-            firstPageReservePx = loaded?.let { chapterFirstPageReservePx(chapterIndex, it) } ?: 0
+            firstPageReservePx = loaded?.let { chapterFirstPageReservePx(chapterIndex, it) } ?: 0,
+            configGeneration = chapterPageConfigGeneration
         )
     }
 
@@ -5416,7 +5486,7 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
     ) {
         if (document.chapters.size <= 1) return
         val safeCenter = clampChapterToUnlocked(centerChapterIndex, document)
-        pruneChapterPageCache(safeCenter, contentWidthPx, currentNoTitleContentHeightPx(), document)
+        pruneChapterPageCache(safeCenter)
         chapterPreloadJob?.cancel()
         chapterPreloadJob = lifecycleScope.launch {
             listOf(safeCenter - 1, safeCenter + 1)
@@ -5443,17 +5513,24 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         }
     }
 
-    private fun pruneChapterPageCache(
-        centerChapterIndex: Int,
-        contentWidthPx: Int,
-        contentHeightPx: Int,
-        loaded: EbookDocument
-    ) {
+    /**
+     * 只清"硬失效"：配置代次不同（样式/字号/行距/边距变更时 clearChapterPageCache() 已自增），
+     * 或离当前章太远（±2 之外）。
+     *
+     * 宽/高/首页标题预留这类**软失效不再删条目**：缓存键里带的就是当前几何，读不到自然是 miss →
+     * 重排。靠"逐条比对几何再删"维持一致，会在 layout 还没落定（标题显隐刚改、正文区高度要下一趟
+     * 才更新）时把刚排好的正确条目一起删掉 —— 那就是 `cacheSize` 每次掉回 1、跨章预览取不到的来源。
+     * 顺带去掉旧实现里"每个 key 算一次标题预留"的量测开销。
+     */
+    private fun pruneChapterPageCache(centerChapterIndex: Int) {
         chapterPageCache.keys.removeAll { key ->
-            key.contentWidthPx != contentWidthPx ||
-                key.contentHeightPx != contentHeightPx ||
-                key.firstPageReservePx != chapterFirstPageReservePx(key.chapterIndex, loaded) ||
+            key.configGeneration != chapterPageConfigGeneration ||
                 abs(key.chapterIndex - centerChapterIndex) > 2
+        }
+        while (chapterPageCache.size > 12) {
+            val farthest = chapterPageCache.keys
+                .maxByOrNull { abs(it.chapterIndex - centerChapterIndex) } ?: break
+            chapterPageCache.remove(farthest)
         }
     }
 
@@ -5461,6 +5538,8 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         chapterPreloadJob?.cancel()
         chapterPreloadJob = null
         chapterPageCache.clear()
+        // 代次自增：即使有并发中的分页任务在 clear 之后才写回缓存，也会因代次不同而自然失效。
+        chapterPageConfigGeneration += 1
     }
 
     private fun renderCurrentPage(
@@ -5581,8 +5660,14 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         if (clip != null) {
             // 裁剪窗口下 player.duration 只是窗口长度（不是整轨时长），
             // 用缓存/存档里的整轨时长，避免进度条与进度存档把「本页窗口」当成整本书
-            lastKnownFullAudioDurationMs.takeIf { it > 0L }?.let { return it }
-            pendingAudioRestoreDurationMs.takeIf { it > 0L }?.let { return it }
+            lastKnownFullAudioDurationMs.takeIf { it > 0L }?.let {
+                publishFullAudioDurationIfKnown(it)
+                return it
+            }
+            pendingAudioRestoreDurationMs.takeIf { it > 0L }?.let {
+                publishFullAudioDurationIfKnown(it)
+                return it
+            }
             // 实在不知道整轨时长时退回窗口终点（旧行为：至少不会把当前位置截断掉）
             return clip.second
         }
@@ -5593,8 +5678,19 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         }
         if (durationMs > 0L) {
             lastKnownFullAudioDurationMs = durationMs
+            publishFullAudioDurationIfKnown(durationMs)
         }
         return durationMs.takeIf { it > 0L }
+    }
+
+    /**
+     * 把「裁剪前的完整时长」发布给手表 / 通知（见 [BookReaderPlaybackSession.currentFullDurationMs]）：
+     * 裁剪态下播放器自己的 duration 只是本页/本句窗口长度，进度条与手表进度环会显示成一小段。
+     */
+    private fun publishFullAudioDurationIfKnown(durationMs: Long) {
+        if (durationMs > 0L) {
+            BookReaderPlaybackSession.publishFullDurationMs(durationMs)
+        }
     }
 
     private fun seekReaderAudioToTarget(
@@ -5924,8 +6020,8 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         val chapterText = document?.chapters?.getOrNull(match.chapterIndex)?.text ?: return null
         // 临时页只用于整页覆盖模式：排版尺寸 = 正文区完整尺寸（与正常页面一致，
         // 不减去小窗模式的 16dp 余量，保证行宽、行尾位置与本页完全一致）
-        val contentWidth = readView.contentWidth.takeIf { it > 0 }
-            ?: (resources.displayMetrics.widthPixels - dp(44))
+        // 宽度收敛到与分页/查缓存同一个来源，避免"调用侧走兜底、查询侧用实测"的分叉（那会让预览恒 miss）。
+        val contentWidth = currentContentWidthPx()
         val contentHeight = readView.contentHeight.takeIf { it > 0 }
             ?: (resources.displayMetrics.heightPixels - dp(220))
         val isVertical = readerLayoutMode == M9LayoutMode.VERTICAL
@@ -8013,7 +8109,7 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
             loadDisplayedBook(anchor = anchor, forceDocumentReload = false)
             return
         }
-        val pageWidth = readView.contentWidth.takeIf { it > 0 } ?: (resources.displayMetrics.widthPixels - dp(44))
+        val pageWidth = currentContentWidthPx()
         paginationJob?.cancel()
         clearChapterPageCache()
         paginationJob = lifecycleScope.launch {

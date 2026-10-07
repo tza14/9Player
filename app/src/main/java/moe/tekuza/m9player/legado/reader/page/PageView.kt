@@ -76,6 +76,11 @@ internal class PageView(context: Context) : LinearLayout(context) {
     private var showHeaderLine: Boolean = false
     private var showFooterLine: Boolean = true
     private var alternateInfoSlots: Set<ReaderInfoSlot> = emptySet()
+
+    /** 提示条上时钟/电量的按秒缓存（见 [updateTipText]）。 */
+    private var tipInfoUpdatedAtMs: Long = 0L
+    private var cachedClockText: String = ""
+    private var cachedBatteryPercent: Int = 0
     var onReaderInfoClick: ((ReaderInfoSlot) -> Unit)? = null
 
     init {
@@ -110,6 +115,9 @@ internal class PageView(context: Context) : LinearLayout(context) {
         addView(view.apply {
             textSize = 12f
             maxLines = 1
+            // 单行 + 固定高（dp(36)）本来就不会被撑开，但没有省略号时过长文本会直接截断；
+            // 加 END 省略号与 legado 的 singleLine+ellipsize=end 观感一致。
+            ellipsize = android.text.TextUtils.TruncateAt.END
             gravity = viewGravity
             includeFontPadding = true
         }, LayoutParams(0, dp(36), 1f))
@@ -407,9 +415,17 @@ internal class PageView(context: Context) : LinearLayout(context) {
     }
 
     private fun updateTipText() {
+        // 时钟/电量按秒缓存：原来每次 updateTipText 都各算一次（电量是一次 BatteryManager binder、
+        // 时钟是一个 SimpleDateFormat），而换页、滚动跨页都会触发；用户可见信息只到分钟，1 秒足够。
+        val nowMs = System.currentTimeMillis()
+        if (nowMs - tipInfoUpdatedAtMs >= 1000L) {
+            tipInfoUpdatedAtMs = nowMs
+            cachedClockText = readerClockText()
+            cachedBatteryPercent = readerBatteryPercent(context)
+        }
+        val clockText = cachedClockText
+        val batteryPercent = cachedBatteryPercent
         val page = currentPage
-        val clockText = readerClockText()
-        val batteryPercent = readerBatteryPercent(context)
         updateTipView(headerLeftView, tipHeaderLeft, page, ReaderInfoSlot.HEADER_LEFT, clockText, batteryPercent)
         updateTipView(headerMiddleView, tipHeaderMiddle, page, ReaderInfoSlot.HEADER_MIDDLE, clockText, batteryPercent)
         updateTipView(headerRightView, tipHeaderRight, page, ReaderInfoSlot.HEADER_RIGHT, clockText, batteryPercent)
@@ -464,9 +480,15 @@ internal class PageView(context: Context) : LinearLayout(context) {
         titleMeasureView.typeface = bodyTitleView.typeface
         titleMeasureView.textSize = contentTextSizeSp + bodyTitleSizeAddSp
         (bodyTitleView.layoutParams as? LayoutParams)?.let { params ->
-            params.topMargin = dp(bodyTitleTopSpacingDp)
-            params.bottomMargin = dp(bodyTitleBottomSpacingDp)
-            bodyTitleView.layoutParams = params
+            val top = dp(bodyTitleTopSpacingDp)
+            val bottom = dp(bodyTitleBottomSpacingDp)
+            // 只在真的变了时写：无条件赋值会每次换页多触发一趟 requestLayout
+            //（滚动模式每跨一页都会跑一次 updateTipText）。
+            if (params.topMargin != top || params.bottomMargin != bottom) {
+                params.topMargin = top
+                params.bottomMargin = bottom
+                bodyTitleView.layoutParams = params
+            }
         }
     }
 
@@ -484,6 +506,19 @@ internal class PageView(context: Context) : LinearLayout(context) {
         )
         return titleMeasureView.measuredHeight + dp(bodyTitleTopSpacingDp) + dp(bodyTitleBottomSpacingDp)
     }
+
+    /**
+     * 当前**已显示**的正文标题实际吃掉的高度（未显示为 0）。分页基准要用它把正文区还原成
+     * "无标题"高度，而且必须问这个视图本身：用"当前页的标题"重算，只要与真实渲染的折行差一行
+     * （≈72px），分页高度就会抖，进而把整章分页缓存冲掉（表现为滚动模式下快速滑动"一直重复"）。
+     */
+    val appliedBodyTitleReservePx: Int
+        get() = if (bodyTitleView.visibility == VISIBLE) {
+            val params = bodyTitleView.layoutParams as? LayoutParams
+            bodyTitleView.measuredHeight + (params?.topMargin ?: 0) + (params?.bottomMargin ?: 0)
+        } else {
+            0
+        }
 
     private fun tipText(
         content: ReaderTipContent,

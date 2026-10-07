@@ -184,7 +184,8 @@ object BookReaderFloatingBridge {
     fun currentPlaybackPositionMs(): Long =
         if (BookReaderPlaybackSession.currentAudioUri() != null) BookReaderPlaybackSession.currentPositionMs() else playbackPositionSnapshot
     fun currentPlaybackDurationMs(): Long =
-        if (BookReaderPlaybackSession.currentAudioUri() != null) BookReaderPlaybackSession.currentDurationMs() else 0L
+        // 手表进度环要的是整轨时长：裁剪态下 currentDurationMs 只是本页/本句窗口的长度。
+        if (BookReaderPlaybackSession.currentAudioUri() != null) BookReaderPlaybackSession.currentFullDurationMs() else 0L
     fun currentPlaybackSpeed(): Float =
         if (BookReaderPlaybackSession.currentAudioUri() != null) BookReaderPlaybackSession.currentPlaybackSpeed() else playbackSpeedSnapshot
     fun currentBookKey(): String? = currentBookKeySnapshot

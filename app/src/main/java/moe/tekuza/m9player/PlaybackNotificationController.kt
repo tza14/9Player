@@ -26,7 +26,11 @@ internal class PlaybackNotificationController(
     context: Context,
     private val player: Player,
     private val title: String,
-    private val contentIntent: PendingIntent?
+    private val contentIntent: PendingIntent?,
+    // 进度口径由调用方给：裁剪态（读完此页暂停 / 逐句重复）下 player 的 position/duration 只是窗口内的值，
+    // 共享播放器路径要传「正文绝对位置 + 整轨时长」，否则通知里的百分比会按一页来算。
+    private val currentPositionMsProvider: () -> Long = { player.currentPosition.coerceAtLeast(0L) },
+    private val durationMsProvider: () -> Long = { player.duration },
 ) {
     private val appContext = context.applicationContext
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -78,11 +82,11 @@ internal class PlaybackNotificationController(
                 }
 
                 override fun getCurrentContentText(player: Player): CharSequence {
-                    val durationMs = player.duration.takeIf { it > 0L }
+                    val durationMs = durationMsProvider().takeIf { it > 0L }
                     if (durationMs == null) {
                         return appContext.getString(R.string.playback_progress_unknown)
                     }
-                    val currentMs = player.currentPosition.coerceIn(0L, durationMs)
+                    val currentMs = currentPositionMsProvider().coerceIn(0L, durationMs)
                     val percent = ((currentMs.toDouble() / durationMs.toDouble()) * 100.0)
                         .toInt()
                         .coerceIn(0, 100)
@@ -151,7 +155,7 @@ internal class PlaybackNotificationController(
     }
 
     private fun syncProgressLoop() {
-        if (!player.isPlaying || player.duration <= 0L) {
+        if (!player.isPlaying || durationMsProvider() <= 0L) {
             progressJob?.cancel()
             progressJob = null
             return

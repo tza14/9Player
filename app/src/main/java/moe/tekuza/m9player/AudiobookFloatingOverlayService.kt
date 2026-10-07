@@ -3542,7 +3542,12 @@ companion object {
             settings.setSupportZoom(false)
             webViewClient = PopupMessageWebViewClient(
                 callbackHolder = callbackHolder,
-                assets = floatingHoshiLookupAssets
+                assets = floatingHoshiLookupAssets,
+                // renderer 进程死掉时这个 WebView 已经不可用：从缓存里摘掉并收起卡片，下次查词重建一个
+                onRendererGone = {
+                    floatingHoshiLookupWebViews.remove(layerIndex)
+                    closeFloatingLookupLayer(layerIndex)
+                }
             )
             addJavascriptInterface(
                 PopupWebViewBridge(

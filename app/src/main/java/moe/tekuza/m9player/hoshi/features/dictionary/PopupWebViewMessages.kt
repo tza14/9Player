@@ -4,7 +4,9 @@ import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import android.view.ViewGroup
 import android.webkit.JavascriptInterface
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
@@ -16,6 +18,7 @@ import moe.tekuza.m9player.hoshi.dictionary.LookupEngine
 import moe.tekuza.m9player.hoshi.features.reader.ReaderSelectionData
 import moe.tekuza.m9player.hoshi.features.reader.ReaderSelectionRect
 import moe.tekuza.m9player.AnkiDuplicateCheckResult
+import moe.tekuza.m9player.destroyWebViewSafely
 import moe.tekuza.m9player.logDebug
 import org.json.JSONArray
 import org.json.JSONObject
@@ -148,6 +151,8 @@ internal class PopupMessageWebViewClient(
     private val callbackHolder: PopupWebViewCallbackHolder,
     private val assets: LookupPopupAssets? = null,
     private val imageRequestHandler: DictionaryImageRequestHandler = DictionaryImageRequestHandler(),
+    /** renderer 进程被杀/崩溃后的收尾：宿主负责把这张 WebView 从 UI 上摘掉并按需重建。 */
+    private val onRendererGone: (() -> Unit)? = null,
 ) : WebViewClient() {
     override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean =
         handlePopupUrl(request.url)
@@ -197,6 +202,22 @@ internal class PopupMessageWebViewClient(
             "tapOutside" -> callbackHolder.callbacks.onTapOutside()
             "swipeDismiss" -> callbackHolder.callbacks.onSwipeDismiss()
         }
+        return true
+    }
+
+    /**
+     * WebView 的渲染进程是独立进程，被系统回收或崩溃时**必须**在这里接管：不接管的话框架会直接杀掉
+     * 我们整个进程（表现是查词时 App 突然消失）。接管动作 = 从视图树上摘掉并销毁这个已死的 WebView，
+     * 再让宿主重建一个（弹窗 Compose 侧按 generation 重建；悬浮层把卡片收起，下次查词重建）。
+     */
+    override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail?): Boolean {
+        logDebug(HOSHI_LOOKUP_POPUP_LOG_TAG) {
+            "popup webview renderer gone didCrash=${detail?.didCrash()} " +
+                "priority=${detail?.rendererPriorityAtExit()}"
+        }
+        onRendererGone?.invoke()
+        runCatching { (view.parent as? ViewGroup)?.removeView(view) }
+        destroyWebViewSafely(view)
         return true
     }
 }

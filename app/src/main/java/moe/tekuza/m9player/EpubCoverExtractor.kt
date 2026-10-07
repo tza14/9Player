@@ -10,7 +10,6 @@ import java.io.File
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
 import java.util.Locale
-import java.util.zip.ZipInputStream
 
 private data class EpubCoverOpfItem(
     val href: String,
@@ -64,42 +63,37 @@ private data class EpubCoverBytes(
 private fun extractEpubCoverBytes(context: Context, uri: Uri): EpubCoverBytes? {
     val xmlEntries = linkedMapOf<String, ByteArray>()
     val imageCandidates = linkedSetOf<String>()
-    openEpubCoverInputStream(context, uri)?.use { input ->
-        ZipInputStream(input.buffered()).use { zip ->
-            var entryCount = 0
-            var totalBytes = 0L
-            while (true) {
-                val entry = zip.nextEntry ?: break
-                entryCount += 1
-                requireEpubReaderMemoryEntryBudget(entryCount)
-                val normalized = normalizeSafeEpubArchivePath(entry.name)
-                if (normalized.isNullOrBlank() || entry.isDirectory) {
-                    zip.closeEntry()
-                    continue
-                }
-                if (isRasterEpubImagePath(normalized)) {
-                    imageCandidates += normalized
-                    zip.closeEntry()
-                    continue
-                }
-                val shouldReadXml = normalized.equals("META-INF/container.xml", ignoreCase = true) ||
-                    normalized.endsWith(".opf", ignoreCase = true)
-                if (!shouldReadXml) {
-                    zip.closeEntry()
-                    continue
-                }
-                requireKnownEpubEntrySize(entry.size, maxEntryBytes = EPUB_READER_MEMORY_MAX_ENTRY_BYTES)
-                val remaining = EPUB_READER_MEMORY_MAX_TOTAL_BYTES - totalBytes
-                val bytes = zip.readBytesLimited(
+    val input = openEpubCoverInputStream(context, uri) ?: return null
+    // 走中央目录读（见 withEpubZipFile）：流式读法对"stored + 本地头尺寸为 0"的书取不到任何条目
+    withZipFileFromStream(input, context.cacheDir) { zip ->
+        var entryCount = 0
+        var totalBytes = 0L
+        val entries = zip.entries()
+        while (entries.hasMoreElements()) {
+            val entry = entries.nextElement()
+            entryCount += 1
+            requireEpubReaderMemoryEntryBudget(entryCount)
+            val normalized = normalizeSafeEpubArchivePath(entry.name)
+            if (normalized.isNullOrBlank() || entry.isDirectory) continue
+            if (isRasterEpubImagePath(normalized)) {
+                imageCandidates += normalized
+                continue
+            }
+            val shouldReadXml = normalized.equals("META-INF/container.xml", ignoreCase = true) ||
+                normalized.endsWith(".opf", ignoreCase = true)
+            if (!shouldReadXml) continue
+            requireKnownEpubEntrySize(entry.size, maxEntryBytes = EPUB_READER_MEMORY_MAX_ENTRY_BYTES)
+            val remaining = EPUB_READER_MEMORY_MAX_TOTAL_BYTES - totalBytes
+            val bytes = zip.getInputStream(entry).use { stream ->
+                stream.readBytesLimited(
                     maxEntryBytes = EPUB_READER_MEMORY_MAX_ENTRY_BYTES,
                     remainingTotalBytes = remaining
                 )
-                totalBytes += bytes.size
-                xmlEntries[normalized] = bytes
-                zip.closeEntry()
             }
+            totalBytes += bytes.size
+            xmlEntries[normalized] = bytes
         }
-    } ?: return null
+    }
 
     val containerXml = xmlEntries["META-INF/container.xml"]?.toString(StandardCharsets.UTF_8)
     val opfPath = containerXml?.let { parseEpubCoverContainerRootFile(it) }
@@ -122,37 +116,33 @@ private fun readEpubCoverImage(
     targetPath: String
 ): EpubCoverBytes? {
     val normalizedTarget = targetPath.normalizeEpubCoverZipPath()
-    openEpubCoverInputStream(context, uri)?.use { input ->
-        ZipInputStream(input.buffered()).use { zip ->
-            var entryCount = 0
-            while (true) {
-                val entry = zip.nextEntry ?: break
-                entryCount += 1
-                requireEpubReaderMemoryEntryBudget(entryCount)
-                val normalized = normalizeSafeEpubArchivePath(entry.name)
-                if (normalized.isNullOrBlank() || entry.isDirectory) {
-                    zip.closeEntry()
-                    continue
-                }
-                if (!normalized.equals(normalizedTarget, ignoreCase = true)) {
-                    zip.closeEntry()
-                    continue
-                }
-                requireKnownEpubEntrySize(entry.size, maxEntryBytes = EPUB_READER_MEMORY_MAX_ENTRY_BYTES)
-                val bytes = zip.readBytesLimited(
+    val input = openEpubCoverInputStream(context, uri) ?: return null
+    var found: EpubCoverBytes? = null
+    withZipFileFromStream(input, context.cacheDir) { zip ->
+        val entries = zip.entries()
+        var entryCount = 0
+        while (found == null && entries.hasMoreElements()) {
+            val entry = entries.nextElement()
+            entryCount += 1
+            requireEpubReaderMemoryEntryBudget(entryCount)
+            val normalized = normalizeSafeEpubArchivePath(entry.name)
+            if (normalized.isNullOrBlank() || entry.isDirectory) continue
+            if (!normalized.equals(normalizedTarget, ignoreCase = true)) continue
+            requireKnownEpubEntrySize(entry.size, maxEntryBytes = EPUB_READER_MEMORY_MAX_ENTRY_BYTES)
+            val bytes = zip.getInputStream(entry).use { stream ->
+                stream.readBytesLimited(
                     maxEntryBytes = EPUB_READER_MEMORY_MAX_ENTRY_BYTES,
                     remainingTotalBytes = EPUB_READER_MEMORY_MAX_ENTRY_BYTES
                 )
-                zip.closeEntry()
-                return EpubCoverBytes(
-                    path = normalized,
-                    mediaType = mediaTypeFromEpubImagePath(normalized),
-                    bytes = bytes
-                )
             }
+            found = EpubCoverBytes(
+                path = normalized,
+                mediaType = mediaTypeFromEpubImagePath(normalized),
+                bytes = bytes
+            )
         }
     }
-    return null
+    return found
 }
 
 private fun openEpubCoverInputStream(context: Context, uri: Uri) =

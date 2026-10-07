@@ -242,6 +242,8 @@ internal fun LookupPopupView(
                         backSignal = requestedBackSignal,
                         forwardSignal = requestedForwardSignal,
                         warmShell = warmShell,
+                        // renderer 进程被杀/崩溃时这个 WebView 已经废了：收起弹窗，下次查词会重建一个
+                        onRendererGone = onSwipeDismiss,
                         callbacks = PopupWebViewCallbacks(
                             onTapOutside = onTapOutside,
                             onSwipeDismiss = onSwipeDismiss,
@@ -414,6 +416,7 @@ private fun LookupPopupWebView(
     forwardSignal: Int = 0,
     warmShell: Boolean = false,
     callbacks: PopupWebViewCallbacks,
+    onRendererGone: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val callbackHolder = remember { PopupWebViewCallbackHolder(callbacks) }
@@ -467,7 +470,7 @@ private fun LookupPopupWebView(
                     ),
                     "HoshiPopup",
                 )
-                webViewClient = PopupMessageWebViewClient(callbackHolder, assets)
+                webViewClient = PopupMessageWebViewClient(callbackHolder, assets, onRendererGone = onRendererGone)
             }
         },
         update = { webView ->

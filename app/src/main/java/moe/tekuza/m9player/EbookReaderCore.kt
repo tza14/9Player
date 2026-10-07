@@ -19,7 +19,6 @@ import java.net.URLDecoder
 import java.nio.charset.Charset
 import java.nio.charset.StandardCharsets
 import java.util.Locale
-import java.util.zip.ZipInputStream
 import javax.xml.parsers.DocumentBuilderFactory
 import kotlin.math.max
 
@@ -367,11 +366,11 @@ private fun loadEpubDocument(
     if (cacheRoot != null) {
         return loadEpubDocumentFromCache(cacheRoot, fallbackTitle, preferredCharsetName)
     }
-    return loadEpubDocumentFromZip(context.contentResolver, uri, fallbackTitle, preferredCharsetName)
+    return loadEpubDocumentFromZip(context, uri, fallbackTitle, preferredCharsetName)
 }
 
 private fun loadEpubDocumentFromZip(
-    contentResolver: ContentResolver,
+    context: Context,
     uri: Uri,
     fallbackTitle: String,
     preferredCharsetName: String?
@@ -384,39 +383,39 @@ private fun loadEpubDocumentFromZip(
     var imageBytes = 0L
     var readerBytes = 0L
     val zipStartMs = SystemClock.elapsedRealtime()
-    contentResolver.openInputStream(uri)?.use { input ->
-        ZipInputStream(input).use { zip ->
-            while (true) {
-                val entry = zip.nextEntry ?: break
-                if (!entry.isDirectory) {
-                    entryCount += 1
-                    requireEpubEntryBudget(entryCount)
-                    requireEpubReaderMemoryEntryBudget(entryCount)
-                    requireKnownEpubEntrySize(
-                        size = entry.size,
-                        maxEntryBytes = EPUB_READER_MEMORY_MAX_ENTRY_BYTES
+    // 走中央目录读（见 withEpubZipFile）：流式读法对"stored + 本地头尺寸为 0"的书会静默读出 0 条目
+    withEpubZipFile(context, uri) { zip ->
+        val zipEntries = zip.entries()
+        while (zipEntries.hasMoreElements()) {
+            val entry = zipEntries.nextElement()
+            if (entry.isDirectory) continue
+            entryCount += 1
+            requireEpubEntryBudget(entryCount)
+            requireEpubReaderMemoryEntryBudget(entryCount)
+            requireKnownEpubEntrySize(
+                size = entry.size,
+                maxEntryBytes = EPUB_READER_MEMORY_MAX_ENTRY_BYTES
+            )
+            val path = normalizeSafeEpubArchivePath(entry.name)
+            if (path != null && path.isReaderEpubEntry()) {
+                val bytes = zip.getInputStream(entry).use { stream ->
+                    stream.readBytesLimited(
+                        maxEntryBytes = EPUB_READER_MEMORY_MAX_ENTRY_BYTES,
+                        remainingTotalBytes = EPUB_READER_MEMORY_MAX_TOTAL_BYTES - readerBytes
                     )
-                    val path = normalizeSafeEpubArchivePath(entry.name)
-                    if (path != null && path.isReaderEpubEntry()) {
-                        val bytes = zip.readBytesLimited(
-                            maxEntryBytes = EPUB_READER_MEMORY_MAX_ENTRY_BYTES,
-                            remainingTotalBytes = EPUB_READER_MEMORY_MAX_TOTAL_BYTES - readerBytes
-                        )
-                        entries[path] = bytes
-                        readerBytes += bytes.size.toLong()
-                        if (path.isEpubImagePath()) {
-                            imageEntryCount += 1
-                            imageBytes += bytes.size.toLong()
-                        } else if (
-                            path.endsWith(".xhtml", true) ||
-                            path.endsWith(".html", true) ||
-                            path.endsWith(".htm", true)
-                        ) {
-                            htmlEntryCount += 1
-                        }
-                    }
                 }
-                zip.closeEntry()
+                entries[path] = bytes
+                readerBytes += bytes.size.toLong()
+                if (path.isEpubImagePath()) {
+                    imageEntryCount += 1
+                    imageBytes += bytes.size.toLong()
+                } else if (
+                    path.endsWith(".xhtml", true) ||
+                    path.endsWith(".html", true) ||
+                    path.endsWith(".htm", true)
+                ) {
+                    htmlEntryCount += 1
+                }
             }
         }
     }
@@ -493,11 +492,17 @@ private fun loadEpubDocumentFromCache(
             .firstOrNull { it.isFile && it.name.endsWith(".opf", ignoreCase = true) }
             ?.relativeTo(root)
             ?.invariantSeparatorsPath
-        ?: return fallbackHtmlEpubFromCache(root, fallbackTitle, preferredCharsetName)
-    val opfText = root.resolveSafeEpubPath(opfPath)
-        ?.takeIf { it.isFile }
+    val opfText = opfPath
+        ?.let { root.resolveSafeEpubPath(it)?.takeIf { file -> file.isFile } }
         ?.readText(StandardCharsets.UTF_8)
-        ?: return fallbackHtmlEpubFromCache(root, fallbackTitle, preferredCharsetName)
+    if (opfPath == null || opfText == null) {
+        // 旧行为是静默回退：缓存不完整时整本书会变成"1 章空正文"，日志里却什么都没有（真机上查了很久）。
+        Log.w(
+            EBOOK_READER_CORE_LOG_TAG,
+            "epub cache incomplete (no readable opf) root=${root.name}; falling back to html-only parse"
+        )
+        return fallbackHtmlEpubFromCache(root, fallbackTitle, preferredCharsetName)
+    }
     val opf = parseOpf(opfText)
     val basePath = opfPath.substringBeforeLast('/', missingDelimiterValue = "")
     val title = opf.title.ifBlank { fallbackTitle }

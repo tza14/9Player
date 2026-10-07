@@ -58,6 +58,7 @@ import moe.tekuza.m9player.logDebug
 
 private const val M9_PAGE_SIMULATION_LOG_TAG = "M9PageSimulation"
 private const val M9_SELECTION_LOG_TAG = "M9Selection"
+private const val M9_PAGE_TURN_LOG_TAG = "M9PageTurn"
 private const val SELECTION_MENU_OPEN_SPACE_THRESHOLD_PX = 500
 private const val CROSS_PAGE_OVERLAY_FADE_MS = 220L
 
@@ -169,6 +170,12 @@ internal class ReadView @JvmOverloads constructor(
         return pageView.bodyTitleReserveFor(title, contentWidthPx)
     }
 
+    /**
+     * 当前**已显示**的正文标题实际吃掉的高度（未显示为 0）。分页基准用这个值才能与
+     * "此刻显示的是哪一页"解耦——否则显示 A 章时给 B 章分页会算出另一种高度，缓存反复作废。
+     */
+    val appliedBodyTitleReservePx: Int get() = pageView.appliedBodyTitleReservePx
+
     init {
         addView(targetPageView, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
         addView(pageView, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
@@ -195,7 +202,21 @@ internal class ReadView @JvmOverloads constructor(
         updateAssistOverlayStyle()
     }
 
+    private var lastSetPageLogKey: String? = null
+    private var lastSetPageLogAtMs: Long = 0L
+    private var setPageRepeatCount: Int = 0
+
     fun setPage(page: TextPage, highlight: IntRange? = null, search: IntRange? = null, forward: Boolean = true) {
+        val logKey = "${page.chapterIndex}:${page.pageInChapter}:${page.charStart}-${page.charEnd}"
+        val nowMs = System.currentTimeMillis()
+        setPageRepeatCount = if (logKey == lastSetPageLogKey) setPageRepeatCount + 1 else 1
+        lastSetPageLogKey = logKey
+        logDebug(M9_PAGE_TURN_LOG_TAG) {
+            "stage=setPage anim=$pageAnim forward=$forward repeat=$setPageRepeatCount sinceLastMs=${nowMs - lastSetPageLogAtMs} " +
+                "chapter=${page.chapterIndex} pageInChapter=${page.pageInChapter} chars=${page.charStart}-${page.charEnd} " +
+                "dragging=$isDraggingPage animating=$isGestureAnimating"
+        }
+        lastSetPageLogAtMs = nowMs
         hideAssistOverlay()
         pageView.setPage(page, highlight, search)
         if (suppressNextSetAnimation) {
@@ -492,7 +513,13 @@ internal class ReadView @JvmOverloads constructor(
             MotionEvent.ACTION_DOWN -> {
                 parent?.requestDisallowInterceptTouchEvent(true)
                 hideAssistOverlay()
+                // 上一次没走完的翻页动画/fling 里"已经决定"的那一转要先落地，再取消动画
+                //（快速连点时最容易丢：动画约 300ms，点击间隔 70~90ms ⇒ 大部分点都被 abort 掉）。
+                commitPendingTurnBeforeInterrupt()
                 abortGestureAnimation()
+                // 新的一次按下开始：上一条"抑制换页动画"标记到此作废。补交的那一转如果没真换页
+                // （撞锁定章/书末），标记会残留下来，静默吞掉后面某次真正换页的动画。
+                suppressNextSetAnimation = false
                 velocityTracker.clear()
                 velocityTracker.addMovement(event)
                 if (!scrollScroller.isFinished) scrollScroller.abortAnimation()
@@ -509,6 +536,10 @@ internal class ReadView @JvmOverloads constructor(
                     return true
                 }
                 consumedByDragProbe = false
+                logDebug(M9_PAGE_TURN_LOG_TAG) {
+                    "stage=gestureDown anim=$pageAnim retainedOffset=${m9PageSimulationFormat(scrollContentOffset)} " +
+                        "step=${m9PageSimulationFormat(scrollPageStep)} axis=${if (isScrollHorizontalAxis()) "x" else "y"}"
+                }
                 if (!isTextSelected) {
                     postDelayed(longPressRunnable, ViewConfiguration.getLongPressTimeout().toLong())
                 }
@@ -566,10 +597,27 @@ internal class ReadView @JvmOverloads constructor(
                     parent?.requestDisallowInterceptTouchEvent(false)
                     return true
                 }
+                logDebug(M9_PAGE_TURN_LOG_TAG) {
+                    "stage=gestureUp anim=$pageAnim dragging=$isDraggingPage consumed=$consumedByDragProbe " +
+                        "direction=$dragDirection animating=$isGestureAnimating offset=${m9PageSimulationFormat(scrollContentOffset)} " +
+                        "anchor=$scrollAnchorDelta step=${m9PageSimulationFormat(scrollPageStep)} global=${pageView.currentPage?.globalIndex}"
+                }
                 if (isDraggingPage) {
                     finishDrag(commit = if (pageAnim == M9PageAnim.SCROLL) true else shouldCommitDrag())
                 } else if (consumedByDragProbe && dragDirection != 0) {
-                    if (shouldCommitPreviewlessTurn(event)) {
+                    // scroll 模式下"本方向没有相邻页"就等于"这一章这个方向没有内容了"（章首/章末）：
+                    // 照 legado 的连续内容语义，这时应当直接进入相邻章，而不是要求拖够 22% 或甩一下才动
+                    // —— 那条门槛正是"本章最后一页一直卡住/重复"的原因。
+                    val commitPreviewless = pageAnim == M9PageAnim.SCROLL || shouldCommitPreviewlessTurn(event)
+                    logDebug(M9_PAGE_TURN_LOG_TAG) {
+                        "stage=previewlessTurn direction=$dragDirection commit=$commitPreviewless " +
+                            "axis=${if (isScrollHorizontalAxis()) "x" else "y"}"
+                    }
+                    if (commitPreviewless) {
+                        // 滚动模式下不要走 runPageAnimation 那条"整页平移再滑回来"的假动画：
+                        // 内容本来就已经滚过去了，再整页平移只会和滚动上下文叠着画（字叠字），
+                        // 而且动画被打断就留下半截偏移。和 finishScrollMotion 一样直接无动画换页。
+                        suppressNextSetAnimation = true
                         invokeTurnCallback(direction = dragDirection)
                     }
                     resetPageLayers()
@@ -773,42 +821,21 @@ internal class ReadView @JvmOverloads constructor(
         }
     }
 
+    /** 只有非滚动模式会走到这里（唯一调用点 `finishDrag` 对 SCROLL 恒传 `commit = true`），
+     *  所以不再保留永远走不到的 SCROLL 分支。 */
     private fun shouldCommitDrag(): Boolean {
-        val distance = if (pageAnim == M9PageAnim.SCROLL && !isScrollHorizontalAxis()) {
-            abs(scrollContentOffset)
-        } else if (pageAnim == M9PageAnim.SCROLL) {
-            abs(scrollContentOffset)
-        } else if (pageAnim == M9PageAnim.SIMULATION) {
+        val distance = if (pageAnim == M9PageAnim.SIMULATION) {
             abs(simulationTouchX - downX)
         } else {
             abs(pageView.translationX)
         }
-        val size = if (pageAnim == M9PageAnim.SCROLL) {
-            clickScrollDistance(dragDirection).toInt()
-        } else {
-            width
-        }
-        val velocity = if (pageAnim == M9PageAnim.SCROLL && !isScrollHorizontalAxis()) {
-            abs(velocityTracker.yVelocity)
-        } else {
-            abs(velocityTracker.xVelocity)
-        }
-        return shouldCommitTurn(distance, size, velocity)
+        return shouldCommitTurn(distance, width, abs(velocityTracker.xVelocity))
     }
 
+    /** 同上：SCROLL 在调用点就被短路（`pageAnim == SCROLL || shouldCommitPreviewlessTurn(event)`），
+     *  这里只服务覆盖/滑动/仿真。 */
     private fun shouldCommitPreviewlessTurn(event: MotionEvent): Boolean {
-        val distance = if (pageAnim == M9PageAnim.SCROLL && !isScrollHorizontalAxis()) {
-            abs(event.y - downY)
-        } else {
-            abs(event.x - downX)
-        }
-        val size = if (pageAnim == M9PageAnim.SCROLL && !isScrollHorizontalAxis()) height else width
-        val velocity = if (pageAnim == M9PageAnim.SCROLL && !isScrollHorizontalAxis()) {
-            abs(velocityTracker.yVelocity)
-        } else {
-            abs(velocityTracker.xVelocity)
-        }
-        return shouldCommitTurn(distance, size, velocity)
+        return shouldCommitTurn(abs(event.x - downX), width, abs(velocityTracker.xVelocity))
     }
 
     private fun shouldCommitTurn(distance: Float, size: Int, velocity: Float): Boolean {
@@ -865,6 +892,17 @@ internal class ReadView @JvmOverloads constructor(
         scrollPageStep = currentScrollExtent()
         if (!commit) {
             startScrollSettle(scrollStartOffset, PAGE_DRAG_ANIM_MS)
+            return
+        }
+        // 抬手时若滚动已经跨过页边界，立刻按既有结算逻辑提交（finishScrollMotion 会把余量留在新页上，
+        // 不会让新页从顶部开始）。否则提交要等 fling/settle 走完——实测抬起后约 2 秒才 setPage，
+        // 这期间用户再次按下就会把这一转丢掉，连续快滑时表现就是"翻页没反应/一直重复"。
+        if (scrollAnchorDelta != 0) {
+            logDebug(M9_PAGE_TURN_LOG_TAG) {
+                "stage=scrollCommitOnUp pagesCrossed=${abs(scrollAnchorDelta)} " +
+                    "offset=${m9PageSimulationFormat(scrollContentOffset)} step=${m9PageSimulationFormat(scrollPageStep)}"
+            }
+            finishScrollMotion()
             return
         }
         val velocity = if (isScrollHorizontalAxis()) velocityTracker.xVelocity else velocityTracker.yVelocity
@@ -1111,12 +1149,75 @@ internal class ReadView @JvmOverloads constructor(
             .coerceIn(dp(24).toFloat(), if (isScrollHorizontalAxis()) width * 0.28f else height * 0.22f)
     }
 
+    /**
+     * 新的按下到来时，把上一次没走完的 fling/settle 里**已经跨过**的页先提交掉，避免丢掉那一转：
+     * 拖动本身没跨页（anchor=0）、靠 fling 补上的情况，提交要等 fling 结束（实测约 2 秒），
+     * 这期间再次按下会把 scroller abort 掉。正方向（下一页）偏移为负，anchor 增量与偏移符号相反。
+     */
+    private fun commitCrossedPagesBeforeInterrupt() {
+        if (pageAnim != M9PageAnim.SCROLL) return
+        val step = currentScrollExtent().coerceAtLeast(1f)
+        var crossed = scrollAnchorDelta
+        if (!scrollScroller.isFinished) {
+            val target = if (isScrollHorizontalAxis()) {
+                scrollScroller.finalX.toFloat()
+            } else {
+                scrollScroller.finalY.toFloat()
+            }
+            val pagesInTarget = (abs(target) / step).toInt().let { if (target <= 0f) it else -it }
+            if (crossed == 0 || (crossed > 0) == (pagesInTarget > 0)) {
+                if (abs(pagesInTarget) > abs(crossed)) crossed = pagesInTarget
+            }
+        }
+        if (crossed == 0 && isDraggingPage && dragDirection != 0 && !scrollScroller.isFinished) {
+            // 点击驱动的 settle 还没跨够一整页就被打断：点击的意图就是翻一页，按 1 页补上，
+            // 否则"快速连点"里落在动画中的那几次同样会静默丢掉。
+            crossed = dragDirection
+        }
+        if (crossed == 0) return
+        logDebug(M9_PAGE_TURN_LOG_TAG) {
+            "stage=interruptCommit pagesCrossed=${abs(crossed)} " +
+                "offset=${m9PageSimulationFormat(scrollContentOffset)} step=${m9PageSimulationFormat(step)}"
+        }
+        scrollAnchorDelta = crossed
+        finishScrollMotion()
+    }
+
+    /**
+     * 新手势到来前，把上一次翻页"已经决定、但动画/fling 还没走完"的那一转先落地。
+     * - 滚动模式：跨页已经记在 [scrollAnchorDelta] / scroller 目标里，交给 [commitCrossedPagesBeforeInterrupt]；
+     * - 覆盖/滑动/仿真：那一转写在翻页动画的结束回调里（`animateDragLayer { invokeTurnCallback() }`），
+     *   动画被 `abortGestureAnimation()` 取消后回调不会执行 ⇒ 这一转会**整页丢掉**。这里直接补上。
+     * 这就是"慢慢点没事、快速连点会丢页"的原因。
+     */
+    private fun commitPendingTurnBeforeInterrupt() {
+        if (pageAnim == M9PageAnim.SCROLL) {
+            commitCrossedPagesBeforeInterrupt()
+            return
+        }
+        if (!isDraggingPage || dragDirection == 0) return
+        val pendingDirection = dragDirection
+        logDebug(M9_PAGE_TURN_LOG_TAG) {
+            "stage=interruptCommitTurn direction=$pendingDirection anim=$pageAnim"
+        }
+        suppressNextSetAnimation = true
+        // 先清掉拖动态，避免 invokeTurnCallback → setPage → resetPageLayers 再次走回本函数。
+        isDraggingPage = false
+        dragDirection = 0
+        invokeTurnCallback(direction = pendingDirection)
+    }
+
     private fun abortGestureAnimation() {
         pageView.animate().cancel()
         targetPageView.animate().cancel()
         simulationAnimator?.cancel()
         simulationAnimator = null
         if (!scrollScroller.isFinished) scrollScroller.abortAnimation()
+        // 动画被打断时必须把整页的平移量复位：滚动模式那条"整页平移再滑回来"的假动画
+        // （runPageAnimation 的 SCROLL 分支）被中断后会留下半截偏移，和滚动上下文叠着画
+        // ⇒ 正文里出现**字叠字**。取消动画不会自动回到 0，所以这里显式复位。
+        pageView.translationX = 0f
+        pageView.translationY = 0f
         isGestureAnimating = false
     }
 
@@ -1191,6 +1292,13 @@ internal class ReadView @JvmOverloads constructor(
 
     override fun onDetachedFromWindow() {
         super.onDetachedFromWindow()
+        // 收口：动画/惯性/手势状态一个都不留（残留会让下次进入时的 handleMove / turnPageByTap 直接 return，
+        // 表现就是"点击拖动都没反应"）。
+        if (!scrollScroller.isFinished) scrollScroller.abortAnimation()
+        isGestureAnimating = false
+        isDraggingPage = false
+        dragDirection = 0
+        suppressNextSetAnimation = false
         simulationAnimator?.cancel()
         simulationAnimator = null
         simulationCurrentBitmap?.recycle()
