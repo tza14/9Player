@@ -434,18 +434,21 @@ internal class ContentTextView @JvmOverloads constructor(
     }
 
     fun findAssistTokenAt(x: Float, y: Float): AssistToken? {
-        val current = page ?: return null
-        val localX = contentX(x)
-        val localY = contentY(y)
-        current.lines.forEachIndexed { lineIndex, line ->
-            if (line.layoutMode != M9LayoutMode.VERTICAL) return@forEachIndexed
-            val inLineBounds = localX >= line.lineTop && localX <= line.lineBottom
-            if (!inLineBounds) return@forEachIndexed
-            line.columns.forEachIndexed { columnIndex, column ->
-                if (column !is TextColumn) return@forEachIndexed
-                if (!isSidewaysAsciiText(column.charData)) return@forEachIndexed
-                if (localY < column.start || localY > column.end) return@forEachIndexed
-                return assistTokenAround(current, lineIndex, columnIndex)
+        for ((candidate, offset) in hitCandidates()) {
+            val localX = x - paddingLeft - (if (scrollHorizontal) offset else 0f)
+            val localY = y - paddingTop - (if (scrollHorizontal) 0f else offset)
+            candidate.lines.forEachIndexed { lineIndex, line ->
+                if (line.layoutMode != M9LayoutMode.VERTICAL) return@forEachIndexed
+                val inLineBounds = localX >= line.lineTop && localX <= line.lineBottom
+                if (!inLineBounds) return@forEachIndexed
+                line.columns.forEachIndexed { columnIndex, column ->
+                    if (column !is TextColumn) return@forEachIndexed
+                    if (!isSidewaysAsciiText(column.charData)) return@forEachIndexed
+                    if (localY < column.start || localY > column.end) return@forEachIndexed
+                    // 命中邻页：先对齐"当前页"，气泡 rect（columnRect）才会用那一页的偏移。
+                    page = candidate
+                    return assistTokenAround(candidate, lineIndex, columnIndex)
+                }
             }
         }
         return null
