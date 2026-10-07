@@ -173,6 +173,8 @@
     <string name="dictionary_import_stage_analyze">辞書を解析中</string>
     <string name="dictionary_import_stage_import">辞書をインポート中、数分かかる場合があります</string>
     <string name="dictionary_import_stage_finalize">辞書を整理中</string>
+    <string name="reader_no_next_page">これが最後のページです</string>
+    <string name="reader_no_prev_page">これが最初のページです</string>
     <string name="dictionary_import_stage_done">完了</string>
     <string name="dictionary_display_settings">表示設定</string>
     <string name="dictionary_collapse_expand_all">すべて展開</string>
