@@ -61,6 +61,12 @@ internal class TextPageFactory(
         return assignGlobalPageNumbers(allPages, document, contentWidthPx, contentHeightPx)
     }
 
+    /**
+     * 页脚/进度的"总章数"口径覆盖：模拟阅读下应传"已解锁章数"，与目录、进度条一致
+     *（legado 也是把 simulatedChapterSize 当 chapterSize 传进排版）；为空表示用真实章数。
+     */
+    var chapterCountOverride: Int? = null
+
     fun createChapterPages(
         document: EbookDocument,
         chapterIndex: Int,
@@ -82,7 +88,7 @@ internal class TextPageFactory(
                         globalIndex = 0,
                         totalPages = 1,
                         chapterIndex = safeIndex,
-                        chapterSize = document.chapters.size.coerceAtLeast(1),
+                        chapterSize = chapterCountOverride ?: document.chapters.size.coerceAtLeast(1),
                         title = document.title,
                         text = emptyPageText,
                         charStart = 0,
@@ -108,7 +114,7 @@ internal class TextPageFactory(
             chapterIndex = index,
             title = chapter.title,
             text = chapter.text,
-            chaptersSize = document.chapters.size,
+            chaptersSize = chapterCountOverride ?: document.chapters.size,
             images = chapter.images,
             rubySpans = if (config.showRubyText) chapter.rubySpans else emptyList(),
             isVolume = chapter.isVolume,

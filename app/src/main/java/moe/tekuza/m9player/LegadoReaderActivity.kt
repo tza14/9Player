@@ -5447,7 +5447,11 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
             }
             return cachedPages
         }
-        val factory = buildTextPageFactory()
+        val factory = buildTextPageFactory().apply {
+            // 模拟阅读下页脚/进度的分母用"已解锁章数"，与目录/进度条口径一致（照 legado）。
+            chapterCountOverride =
+                if (simulatedReadingConfig.enabled) unlockedChapterCount(document) else null
+        }
         val pages = withContext(Dispatchers.Default) {
             factory.createChapterPages(
                 document = document,

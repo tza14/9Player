@@ -267,25 +267,16 @@ internal class ContentTextView @JvmOverloads constructor(
         val current = page ?: return fallback
         val viewportWidth = (width - paddingLeft - paddingRight).coerceAtLeast(1).toFloat()
         val viewportHeight = (height - paddingTop - paddingBottom).coerceAtLeast(1).toFloat()
-        if (current.hasImageColumn()) {
+        // 图片页/空页：一整屏（照 legado 的**点击**语义 hasImageOrEmpty → visibleHeight。
+        // 注意 legado 的"滚动"语义对图片页用的是图片内容高，两者本来就分开）。
+        if (current.hasImageColumn() || current.lines.isEmpty()) {
             return if (horizontal) viewportWidth else viewportHeight
         }
-        val distance = if (horizontal) {
-            val line = if (direction > 0) current.lines.lastOrNull() else current.lines.firstOrNull()
-            val keep = line?.width?.takeIf { it > 0f } ?: textSizePxValue * 2f
-            viewportWidth - keep
-        } else {
-            val line = if (direction > 0) current.lines.lastOrNull() else current.lines.firstOrNull()
-            if (direction > 0) {
-                line?.crossStart ?: fallback
-            } else {
-                line?.let { viewportHeight - it.crossEnd } ?: fallback
-            }
-        }
-        return distance.coerceIn(
-            (if (horizontal) viewportWidth else viewportHeight) * 0.45f,
-            (if (horizontal) viewportWidth else viewportHeight) * 0.95f
-        )
+        // 其余页面：点击距离 = 本页沿滚动轴的真实跨度（与 pageScrollExtent 同一个函数）⇒
+        // "点一次正好落到下一页页首"，页码/进度与所见同步、静止余量回到 0。
+        // 不照搬 legado 的"保留一行"：legado 的页之间有重叠内容，我们的页是离散位图，
+        // 减去一行等于**跳过一行**。
+        return pageScrollExtent(current, horizontal)
     }
 
     fun pageScrollExtent(page: TextPage?, horizontal: Boolean): Float {
@@ -308,7 +299,8 @@ internal class ContentTextView @JvmOverloads constructor(
                     "maxLineBottom=${page.lines.maxOfOrNull { it.lineBottom } ?: 0f} lines=${page.lines.size}"
             }
         }
-        if (page.lines.isEmpty() || page.hasImageColumn()) {
+        if (page.lines.isEmpty()) {
+            // 空页占满一屏，避免滚动上下文里出现"没内容也没高度"的洞。
             return if (horizontal) viewportWidth else viewportHeight
         }
         val contentExtent = if (horizontal) {
@@ -325,7 +317,11 @@ internal class ContentTextView @JvmOverloads constructor(
                 page.lines.maxOfOrNull { it.lineBottom } ?: 0f
             )
         }
-        return contentExtent.coerceAtLeast(if (horizontal) viewportWidth else viewportHeight)
+        // 页边界 = 该页沿滚动轴的**真实跨度**（照 legado 的紧贴拼接，不再向上取整到整屏、不留空白带）。
+        // 只保一个很小的下限：滚动上下文固定 ±4 页（ReadView.SCROLL_CONTEXT_RADIUS），
+        // 9 × 下限必须 ≥ 视口，否则屏幕边缘会露出没画到的空白 ⇒ 下限取 视口 / 4。
+        val minSpan = (if (horizontal) viewportWidth else viewportHeight) / 4f
+        return contentExtent.coerceAtLeast(minSpan)
     }
 
     private fun TextPage.hasImageColumn(): Boolean {
