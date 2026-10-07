@@ -18,6 +18,11 @@ internal data class TextPage(
     var documentCharEnd: Int = 0,
     var documentCharCount: Int = 0,
     var isVolume: Boolean = false,
+    /**
+     * 占位页（邻章未排好时临时顶上的"假页"，照 legado 的 nextPage 语义）。
+     * 它没有正文行、没有真实字符区间 ⇒ 命中/选区/进度都不认它，只用于让拖动有内容跟着走。
+     */
+    var isPlaceholder: Boolean = false,
     var height: Float = 0f,
     var width: Float = 0f,
     private val textLines: ArrayList<TextLine> = arrayListOf()

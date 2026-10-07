@@ -3337,8 +3337,30 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         if (!isChapterUnlocked(targetChapter, loaded)) return PagePreview.Locked
         val cachedPages = chapterPageCache[currentChapterPageCacheKey(targetChapter)].orEmpty()
         val neighbour = if (delta > 0) cachedPages.firstOrNull() else cachedPages.lastOrNull()
-        return neighbour?.let { PagePreview.Ready(it) } ?: PagePreview.NotPaginated
+        // 邻章还没排好：给一页**占位页**（照 legado 的 nextPage —— 它永远返回一个 TextPage）。
+        // 拖动因此有内容跟着走；抬手的提交会触发真正的加载并把真页换上来。
+        return neighbour?.let { PagePreview.Ready(it) }
+            ?: PagePreview.Ready(placeholderPage(targetChapter, loaded))
     }
+
+    /**
+     * 邻章未就绪时的占位页：只有章名、没有正文行（画出来是一页空白）。
+     * 带 isPlaceholder 标记，命中/选区/进度都不认它；被锁的章仍走 D-3 的提示，不造占位页。
+     */
+    private fun placeholderPage(chapterIndex: Int, loaded: EbookDocument): TextPage = TextPage(
+        index = 0,
+        text = "",
+        title = loaded.chapters.getOrNull(chapterIndex)?.title.orEmpty(),
+        chapterSize = loaded.chapters.size.coerceAtLeast(1),
+        chapterIndex = chapterIndex,
+        pageInChapter = 0,
+        chapterPageCount = 1,
+        globalIndex = 0,
+        totalPages = 1,
+        charStart = 0,
+        charEnd = 0,
+        isPlaceholder = true
+    )
 
     private fun pagePreviewForDelta(delta: Int): TextPage? =
         when (val preview = resolvePagePreview(delta)) {
