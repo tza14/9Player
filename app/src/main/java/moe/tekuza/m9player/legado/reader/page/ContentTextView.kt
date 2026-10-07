@@ -374,10 +374,8 @@ internal class ContentTextView @JvmOverloads constructor(
     private fun hitCandidates(): List<Pair<TextPage, Float>> {
         val center = scrollPages.getOrNull(scrollCenterIndex)
         if (center == null) return page?.let { listOf(it to scrollOffset) } ?: emptyList()
-        // 正在编辑选区（拖手柄）时只认当前页：选区状态目前用"页内下标"，跨页命中会把两页的
-        // 页内下标混进同一个区间 ⇒ 出现"看着选中、范围其实错"的选区。
-        // 跨页选择要用**章节坐标**重做（下一步），在那之前这里保持单页语义。
-        if (selectionRange != null) return listOf(center to scrollOffset)
+        // 选区编辑期间也允许逐页命中：选区状态已改为章节坐标，跨页端点可比、可选。
+        if (false) return listOf(center to scrollOffset)
         val viewport = if (scrollHorizontal) {
             (width - paddingLeft - paddingRight).coerceAtLeast(1).toFloat()
         } else {
@@ -540,9 +538,12 @@ internal class ContentTextView @JvmOverloads constructor(
         val current = page ?: return false
         val wordRange = wordRangeAround(current, hit.lineIndex, hit.columnIndex)
         val range = wordRange ?: orderedRange(hit.sourceStart, hit.sourceEnd)
-        selectionRange = range
-        selectionStartSource = range.first
-        selectionEndSource = range.last
+        // 以命中页为基准换算成章节坐标（跨页唯一可比），页内区间由 syncPageLocalSelection 派生。
+        setChapterSelection(
+            chapterIndex = current.chapterIndex,
+            startChapter = hit.chapterStartOffset + range.first,
+            endChapter = hit.chapterStartOffset + range.last
+        )
         pendingSelectionHandleRole = null
         invalidate()
         return true
@@ -550,50 +551,49 @@ internal class ContentTextView @JvmOverloads constructor(
 
     fun updateSelectionStartAt(x: Float, y: Float): Boolean {
         val hit = findTextHitAt(x, y) ?: return false
-        val currentEnd = selectionEndSource ?: selectionRange?.last ?: hit.sourceEnd - 1
-        if (hit.sourceStart <= currentEnd) {
-            selectionStartSource = hit.sourceStart
-            selectionEndSource = currentEnd
+        val current = page ?: return false
+        // 选区不跨章：命中落到别的章就忽略（章节区间跨章没有意义）。
+        if (current.chapterIndex != selectionChapterIndex) return false
+        val hitChapterStart = current.charStart + hit.sourceStart
+        val hitChapterEnd = current.charStart + hit.sourceEnd - 1
+        val keepEnd = selectionEndChapter ?: hitChapterEnd
+        if (hitChapterStart <= keepEnd) {
+            setChapterSelection(current.chapterIndex, hitChapterStart, keepEnd)
             pendingSelectionHandleRole = null
         } else {
-            selectionStartSource = currentEnd
-            selectionEndSource = hit.sourceEnd - 1
+            // 起点被拖到终点之后：交换两端，手柄角色跟着翻转
+            setChapterSelection(current.chapterIndex, keepEnd, hitChapterEnd)
             pendingSelectionHandleRole = SelectionHandleRole.END
         }
-        selectionRange = orderedRange(
-            selectionStartSource ?: hit.sourceStart,
-            (selectionEndSource ?: currentEnd) + 1
-        )
-        invalidate()
         return true
     }
 
     fun updateSelectionEndAt(x: Float, y: Float): Boolean {
         val hit = findTextHitAt(x, y) ?: return false
-        val currentStart = selectionStartSource ?: selectionRange?.first ?: hit.sourceStart
-        val hitEnd = hit.sourceEnd - 1
-        if (hitEnd >= currentStart) {
-            selectionStartSource = currentStart
-            selectionEndSource = hitEnd
+        val current = page ?: return false
+        if (current.chapterIndex != selectionChapterIndex) return false
+        val hitChapterStart = current.charStart + hit.sourceStart
+        val hitChapterEnd = current.charStart + hit.sourceEnd - 1
+        val keepStart = selectionStartChapter ?: hitChapterStart
+        if (hitChapterEnd >= keepStart) {
+            setChapterSelection(current.chapterIndex, keepStart, hitChapterEnd)
             pendingSelectionHandleRole = null
         } else {
-            selectionStartSource = hit.sourceStart
-            selectionEndSource = currentStart
+            setChapterSelection(current.chapterIndex, hitChapterStart, keepStart)
             pendingSelectionHandleRole = SelectionHandleRole.START
         }
-        selectionRange = orderedRange(
-            selectionStartSource ?: currentStart,
-            (selectionEndSource ?: hitEnd) + 1
-        )
-        invalidate()
         return true
     }
 
     fun clearSelection() {
-        val hadSelection = selectionRange != null
+        val hadSelection = selectionRange != null || selectionChapterRange != null
         selectionRange = null
         selectionStartSource = null
         selectionEndSource = null
+        selectionChapterRange = null
+        selectionStartChapter = null
+        selectionEndChapter = null
+        selectionChapterIndex = -1
         pendingSelectionHandleRole = null
         if (hadSelection) invalidate()
     }
@@ -853,6 +853,12 @@ internal class ContentTextView @JvmOverloads constructor(
     ) {
         canvas.save()
         canvas.translate(offsetX, offsetY)
+        // 跨页选区：这一页只画"本页 ∩ 章节区间"的那一段（页内区间只覆盖当前页）。
+        val pageSelection = selectionChapterRange?.let { chapterRange ->
+            val start = maxOf(chapterRange.first, current.charStart) - current.charStart
+            val end = minOf(chapterRange.last, current.charEnd - 1) - current.charStart
+            if (start <= end) start..end else null
+        } ?: selectionRange
         current.lines.forEach { line ->
             when (line.layoutMode) {
                 M9LayoutMode.HORIZONTAL -> {
