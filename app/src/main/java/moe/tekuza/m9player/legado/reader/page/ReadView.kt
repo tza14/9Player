@@ -517,6 +517,8 @@ internal class ReadView @JvmOverloads constructor(
                 //（快速连点时最容易丢：动画约 300ms，点击间隔 70~90ms ⇒ 大部分点都被 abort 掉）。
                 commitPendingTurnBeforeInterrupt()
                 abortGestureAnimation()
+                // 命中邻页时把"当前页"临时切过去了，新手势开始先复位，免得没命中的点击用错页的几何。
+                pageView.syncCurrentPageToScrollCenter()
                 // 新的一次按下开始：上一条"抑制换页动画"标记到此作废。补交的那一转如果没真换页
                 // （撞锁定章/书末），标记会残留下来，静默吞掉后面某次真正换页的动画。
                 suppressNextSetAnimation = false

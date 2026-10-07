@@ -239,6 +239,15 @@ internal class ContentTextView @JvmOverloads constructor(
         invalidate()
     }
 
+    /**
+     * 把"当前页"复位到滚动上下文的中心页。
+     * 命中邻页时会临时把当前页切过去（这样手柄/菜单用对几何），手势结束后要复位，
+     * 否则下一次没有命中的点击会拿上一页的偏移去算几何。
+     */
+    fun syncCurrentPageToScrollCenter() {
+        scrollPages.getOrNull(scrollCenterIndex)?.let { page = it }
+    }
+
     fun setScrollContext(
         pages: List<TextPage?>,
         centerIndex: Int,

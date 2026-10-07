@@ -153,6 +153,11 @@ internal class PageView(context: Context) : LinearLayout(context) {
         contentView.clearScrollContext()
     }
 
+    /** 命中邻页后把"当前页"复位到上下文中心（见 ContentTextView.syncCurrentPageToScrollCenter）。 */
+    fun syncCurrentPageToScrollCenter() {
+        contentView.syncCurrentPageToScrollCenter()
+    }
+
     fun clickScrollDistance(horizontal: Boolean, direction: Int, fallback: Float): Float {
         return contentView.clickScrollDistance(horizontal, direction, fallback)
     }
