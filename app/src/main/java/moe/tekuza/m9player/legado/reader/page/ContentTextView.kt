@@ -306,10 +306,9 @@ internal class ContentTextView @JvmOverloads constructor(
             return if (horizontal) viewportWidth else viewportHeight
         }
         val contentExtent = if (horizontal) {
-            maxOf(
-                page.width,
-                page.lines.maxOfOrNull { it.lineBottom } ?: 0f
-            )
+            // 竖排（滚动轴 = X）：本页**实际消耗的列宽**。lineBottom 是"列右边缘的绝对坐标"，
+            // 首列右边缘恒等于视口宽 ⇒ 再取 max 就永远等于整屏，内容没占满时会多滑一段空白。
+            page.width
         } else {
             maxOf(
                 page.height,

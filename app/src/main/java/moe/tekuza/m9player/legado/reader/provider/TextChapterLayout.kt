@@ -438,6 +438,10 @@ internal class TextChapterLayout(
             line.lineTop += offset
             line.lineBase += offset
             line.lineBottom += offset
+            // cross* 是 line* 的平行副本（page.height 取自 crossEnd）：这里不同步就会出现
+            // "page.height=1805.8 而 maxLineBottom=1928.0" 的分叉 ⇒ 相邻页画近 122px ⇒ 字叠字。
+            line.crossStart += offset
+            line.crossEnd += offset
             if (index < lines.lastIndex) offset += gap
         }
     }
