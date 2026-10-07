@@ -103,7 +103,12 @@ internal class ContentTextView @JvmOverloads constructor(
         val sourceEnd: Int,
         val lineIndex: Int,
         val columnIndex: Int,
-        val rect: RectF
+        val rect: RectF,
+        /**
+         * 命中页在章节原文里的起始下标（= page.charStart）。加上它就能把"页内下标"换算成
+         * **章节坐标**，跨页选区的端点才可比、才能取到整句。
+         */
+        val chapterStartOffset: Int = 0
     )
 
     internal data class SelectionBounds(
@@ -621,7 +626,8 @@ internal class ContentTextView @JvmOverloads constructor(
                             sourceEnd = column.sourceEnd,
                             lineIndex = lineIndex,
                             columnIndex = columnIndex,
-                            rect = columnRect(line, column)
+                            rect = columnRect(line, column),
+                            chapterStartOffset = candidate.charStart
                         )
                     }
                 }
