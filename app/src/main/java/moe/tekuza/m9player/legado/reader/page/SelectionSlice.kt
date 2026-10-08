@@ -71,16 +71,13 @@ internal fun resolveTextHit(
     horizontal: Boolean,
     preferChapterPosition: Int? = null
 ): TextHitPoint? {
-    // 先用几何把候选收窄到"带区含触点"的那一页（含一条行高的容差）。
-    // 注意：这**不会改变结果** —— 精确命中按定义就落在某一行内，而行必然在该页带区之内；
-    // 它省的只是"把 9 页的每一列都扫一遍"的成本。没有任何候选合格时回退全量（绝不丢命中）。
-    val eligible = candidates.filter { (page, offset) ->
-        isWithinPageBand(page, offset, x, y, paddingLeft, paddingTop)
-    }
-    val searchSet = eligible.ifEmpty { candidates }
+    // 候选**重排**：带区含触点的页排在前面，两段各自保持原顺序。
+    // 为什么是重排而不是丢弃：精确命中按定义落在某行内、行必在该页带区内 ⇒ 带区外的页本来就不可能
+    // 精确命中；把它们留在后面 ⇒ 与"全量按原序扫"**同一个赢家**（可证），但常见情况下少扫 8 页。
+    val ordered = candidatesWithBandFirst(candidates, x, y, paddingLeft, paddingTop)
     if (preferChapterPosition == null) {
         // 无偏好（新建选区/普通命中）：候选顺序即优先级，第一个精确命中就是答案。
-        searchSet.forEach { (page, offset) ->
+        ordered.forEach { (page, offset) ->
             exactHitIn(page, offset, x, y, paddingLeft, paddingTop, horizontal)?.let { return it }
         }
     } else {
@@ -88,7 +85,7 @@ internal fun resolveTextHit(
         // 端点于是来回跳（真机现象："拖动时一直闪上一页"）。⇒ 多个精确命中时取**离当前端点最近**的。
         var best: TextHitPoint? = null
         var bestDistance = Int.MAX_VALUE
-        searchSet.forEach { (page, offset) ->
+        ordered.forEach { (page, offset) ->
             val hit = exactHitIn(page, offset, x, y, paddingLeft, paddingTop, horizontal)
                 ?: return@forEach
             val column = page.lines.getOrNull(hit.lineIndex)?.columns?.getOrNull(hit.columnIndex) as? TextColumn
@@ -102,7 +99,8 @@ internal fun resolveTextHit(
         }
         if (best != null) return best
     }
-    val (center, centerOffset) = searchSet.firstOrNull() ?: return null
+    // 最近字兜底：**只认原来的第一页（中心页）**，不跟着上面的重排走 —— 这条是防抖规则，不能变。
+    val (center, centerOffset) = candidates.firstOrNull() ?: return null
     val localX = x - paddingLeft - (if (horizontal) centerOffset else 0f)
     val localY = y - paddingTop - (if (horizontal) 0f else centerOffset)
     var nearest: TextHitPoint? = null
@@ -165,7 +163,7 @@ internal fun distanceToRange(value: Float, start: Float, end: Float): Float = wh
 }
 
 /**
- * 触点是否落在该页的**内容带区**内（收窄候选用，容差一条行高）。
+ * 触点是否落在该页的**内容带区**内（含一条行高的容差）。
  *
  * 带区 = 该页第一行的 band 起点到最后一行的 band 终点（滚动轴上的范围）；
  * 行带本身就是"这一页在屏幕上的高度范围"，所以这条判定等价于"手指是否在这一页上"。
@@ -187,4 +185,24 @@ internal fun isWithinPageBand(
     // 曾经写成"由 horizontal 参数决定"，轴一反就会把该留的页滤掉、把不该留的留下（单测抓到过）。
     val value = if (first.layoutMode == M9LayoutMode.VERTICAL) localX else localY
     return value >= first.lineTop - lineHeight && value <= last.lineBottom + lineHeight
+}
+
+/**
+ * 候选重排：带区含触点的页在前，**两段各自保持原顺序**。
+ *
+ * 为什么这样是安全的（可证，不是"应该"）：精确命中要求点落在某行的 band 内，而行的 band 必在该页
+ * 带区之内 ⇒ 带区外的页**不可能**精确命中 ⇒ 先扫带区内、再扫带区外，与"全量按原顺序扫"得到**同一个**
+ * 赢家；任一段为空时直接返回原列表（零风险路径）。
+ */
+internal fun candidatesWithBandFirst(
+    candidates: List<Pair<TextPage, Float>>,
+    x: Float,
+    y: Float,
+    paddingLeft: Float,
+    paddingTop: Float
+): List<Pair<TextPage, Float>> {
+    val (inBand, outOfBand) = candidates.partition { (page, offset) ->
+        isWithinPageBand(page, offset, x, y, paddingLeft, paddingTop)
+    }
+    return if (inBand.isEmpty() || outOfBand.isEmpty()) candidates else inBand + outOfBand
 }

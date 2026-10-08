@@ -452,7 +452,11 @@ internal class ContentTextView @JvmOverloads constructor(
     private fun viewY(y: Float): Float = y + paddingTop + (if (scrollHorizontal) 0f else offsetForPage(page))
 
     fun findImageAt(x: Float, y: Float): EbookImageRef? {
-        for ((candidate, offset) in hitCandidates()) {
+        // 候选按"带区含触点"重排（结果不变，常见情况下少扫 8 页）：见 candidatesWithBandFirst 的证明。
+        val candidates = candidatesWithBandFirst(
+            hitCandidates(), x, y, paddingLeft.toFloat(), paddingTop.toFloat()
+        )
+        for ((candidate, offset) in candidates) {
             val localX = x - paddingLeft - (if (scrollHorizontal) offset else 0f)
             val localY = y - paddingTop - (if (scrollHorizontal) 0f else offset)
             candidate.lines.forEach { line ->
@@ -479,7 +483,11 @@ internal class ContentTextView @JvmOverloads constructor(
     }
 
     fun findAssistTokenAt(x: Float, y: Float): AssistToken? {
-        for ((candidate, offset) in hitCandidates()) {
+        // 同上：重排而非丢弃 ⇒ 同一个赢家，常见情况下少扫 8 页。
+        val candidates = candidatesWithBandFirst(
+            hitCandidates(), x, y, paddingLeft.toFloat(), paddingTop.toFloat()
+        )
+        for ((candidate, offset) in candidates) {
             val localX = x - paddingLeft - (if (scrollHorizontal) offset else 0f)
             val localY = y - paddingTop - (if (scrollHorizontal) 0f else offset)
             candidate.lines.forEachIndexed { lineIndex, line ->
@@ -560,9 +568,8 @@ internal class ContentTextView @JvmOverloads constructor(
         val end = positionAt(to) ?: start
         selectStart = start
         selectEnd = end
-        // 状态变了就必须重绘：旧的 syncPageLocalSelection() 末尾有一句 invalidate()，
-        // 删掉它时把重绘也一起删了 —— 症状就是"手柄跟着动、高亮冻在第一次"。
-        invalidate()
+        // 重绘由调用方负责（唯一调用点 beginSelectionAt 紧接着就 invalidate()）——
+        // updateSelection*At 那两路各自重绘，因为它们没有别的刷新点。
         // 诊断（限流 500ms —— 拖动手柄时这里每帧都会跑到，不限流会刷屏）。
         val nowMs = System.currentTimeMillis()
         if (nowMs - lastSelectionLogAtMs >= 500L) {
@@ -639,6 +646,8 @@ internal class ContentTextView @JvmOverloads constructor(
         // 选区不跨章：命中落到别的章就忽略。
         if (hitPage.chapterIndex != end.chapterIndex) return false
         val hitPosition = selectionPositionOf(hitPage, hit.lineIndex, hit.columnIndex, hit.sourceStart)
+        // 命中没换字（手指停在同一列内）⇒ 状态不会变，跳过这次整屏重绘（照 legado 的 compare == 0 早退）。
+        if (hitPosition.sameAs(end)) return true
         // 保序（legado 的 selectStartMove）：只动起点；被拖过终点则两端交换、手柄角色翻转。
         if (hitPosition.compareTo(end) <= 0) {
             selectStart = hitPosition
@@ -659,6 +668,8 @@ internal class ContentTextView @JvmOverloads constructor(
         val start = selectStart ?: return false
         if (hitPage.chapterIndex != start.chapterIndex) return false
         val hitPosition = selectionPositionOf(hitPage, hit.lineIndex, hit.columnIndex, hit.sourceStart)
+        // 命中没换字 ⇒ 跳过这次整屏重绘（同上）。
+        if (hitPosition.sameAs(start)) return true
         // 保序（legado 的 selectEndMove）：只动终点；被拖过起点则两端交换。
         if (hitPosition.compareTo(start) >= 0) {
             selectEnd = hitPosition

@@ -173,6 +173,40 @@ class TextHitResolveTest {
     }
 
     @Test
+    fun candidatesWithBandFirstReordersWithoutDropping() {
+        // 手指在中心页（带区 0..50）之外的 y=220 上：邻页（200..250）应被提到前面，
+        // 但**两页都必须在列表里**（不是丢弃）—— 否则带区判定一旦有误就会丢命中。
+        val centre = page(100, 200, 0f, 50f, 0f, 30f)
+        val neighbour = page(200, 300, 200f, 250f, 0f, 30f)
+        val reordered = candidatesWithBandFirst(
+            listOf(centre to 0f, neighbour to 0f), 10f, 220f, 0f, 0f
+        )
+        assertEquals(2, reordered.size)
+        assertEquals(neighbour, reordered[0].first)
+        assertEquals(centre, reordered[1].first)
+    }
+
+    @Test
+    fun candidatesWithBandFirstKeepsTheOriginalListWhenOneSideIsEmpty() {
+        // 所有候选都在带区内（或都不在）⇒ 原样返回，零风险路径
+        val centre = page(100, 200, 0f, 50f, 0f, 30f)
+        val other = page(200, 300, 0f, 50f, 0f, 30f)
+        val same = listOf(centre to 0f, other to 0f)
+        assertEquals(same, candidatesWithBandFirst(same, 10f, 20f, 0f, 0f))
+        val far = listOf(centre to 0f, other to -100000f)
+        assertEquals(far, candidatesWithBandFirst(far, 10f, 9999f, 0f, 0f))
+    }
+
+    @Test
+    fun reorderingDoesNotChangeTheWinner() {
+        // 带区外的页不可能精确命中 ⇒ 重排前后的赢家相同（用邻页能精确命中、中心页不能的构造验证）
+        val centre = page(100, 200, 0f, 50f, 0f, 30f)
+        val neighbour = page(200, 300, 200f, 250f, 0f, 30f)
+        val result = hit(listOf(centre to 0f, neighbour to 0f), x = 10f, y = 220f)
+        assertEquals(neighbour, result?.page)
+    }
+
+    @Test
     fun pageForChapterPositionPicksTheOwningPage() {
         val first = page(100, 200, 0f, 10f, 0f, 5f)
         val second = page(200, 300, 0f, 10f, 0f, 5f)
