@@ -603,12 +603,16 @@ internal class ContentTextView @JvmOverloads constructor(
         // 选区不跨章：命中落到别的章就忽略（章节区间跨章没有意义）。
         if (current.chapterIndex != selectionChapterIndex) return false
         val hitChapterStart = current.charStart + hit.sourceStart
-        val keepEnd = selectionEndChapter ?: (current.charStart + hit.sourceEnd - 1)
-        // 拖起点只改起点，**不与终点交换**。
-        // 真机录像实测：一次拖动里交换会反复触发（起点/终点互顶）⇒ 选区塌缩成一点、两个柄并在一起、
-        // 高亮忽有忽无。要反向选择，拖另一个柄即可。
-        setChapterSelection(current.chapterIndex, minOf(hitChapterStart, keepEnd), keepEnd)
-        pendingSelectionHandleRole = null
+        val hitChapterEnd = current.charStart + hit.sourceEnd - 1
+        val keepEnd = selectionEndChapter ?: hitChapterEnd
+        // 拖起点：被拖过终点时交换两端（与 legado 手感一致；判柄已按"最近"修正，不会误抓）。
+        if (hitChapterStart <= keepEnd) {
+            setChapterSelection(current.chapterIndex, hitChapterStart, keepEnd)
+            pendingSelectionHandleRole = null
+        } else {
+            setChapterSelection(current.chapterIndex, keepEnd, hitChapterEnd)
+            pendingSelectionHandleRole = SelectionHandleRole.END
+        }
         return true
     }
 
@@ -616,11 +620,17 @@ internal class ContentTextView @JvmOverloads constructor(
         val hit = findTextHitAt(x, y) ?: return false
         val current = page ?: return false
         if (current.chapterIndex != selectionChapterIndex) return false
+        val hitChapterStart = current.charStart + hit.sourceStart
         val hitChapterEnd = current.charStart + hit.sourceEnd - 1
-        val keepStart = selectionStartChapter ?: (current.charStart + hit.sourceStart)
-        // 同上：拖终点只改终点（命中落到起点之前就夹到起点，不对调）。
-        setChapterSelection(current.chapterIndex, keepStart, maxOf(hitChapterEnd, keepStart))
-        pendingSelectionHandleRole = null
+        val keepStart = selectionStartChapter ?: hitChapterStart
+        // 拖终点：被拖过起点时交换两端（同上）。
+        if (hitChapterEnd >= keepStart) {
+            setChapterSelection(current.chapterIndex, keepStart, hitChapterEnd)
+            pendingSelectionHandleRole = null
+        } else {
+            setChapterSelection(current.chapterIndex, hitChapterStart, keepStart)
+            pendingSelectionHandleRole = SelectionHandleRole.START
+        }
         return true
     }
 
@@ -745,8 +755,47 @@ internal class ContentTextView @JvmOverloads constructor(
                     }
                 }
             }
+            // 没有精确命中（手柄拖到行末、段间或页底空白时很常见）⇒ 取**本页内离触摸点最近的字**。
+            // 旧实现直接落到下一页/返回失败：手指还在屏幕底部，解出来的却是页中部的位置
+            // ⇒ 拖下端手柄时把起点顶掉（真机日志抓到过 range 1134..1219 → 1005..1219）。
+            // 关键：只在**这一个**候选页里取最近，绝不跨页找。
+            page = candidate
+            var nearest: TextHit? = null
+            var nearestDistance = Float.MAX_VALUE
+            candidate.lines.forEachIndexed { lineIndex, line ->
+                val crossDistance = when (line.layoutMode) {
+                    M9LayoutMode.HORIZONTAL -> distanceToRange(localY, line.lineTop, line.lineBottom)
+                    M9LayoutMode.VERTICAL -> distanceToRange(localX, line.lineTop, line.lineBottom)
+                }
+                line.columns.forEachIndexed { columnIndex, column ->
+                    if (column !is TextColumn) return@forEachIndexed
+                    val alongDistance = when (line.layoutMode) {
+                        M9LayoutMode.HORIZONTAL -> distanceToRange(localX, column.start, column.end)
+                        M9LayoutMode.VERTICAL -> distanceToRange(localY, column.start, column.end)
+                    }
+                    val distance = crossDistance * crossDistance + alongDistance * alongDistance
+                    if (distance < nearestDistance) {
+                        nearestDistance = distance
+                        nearest = TextHit(
+                            sourceStart = column.sourceStart,
+                            sourceEnd = column.sourceEnd,
+                            lineIndex = lineIndex,
+                            columnIndex = columnIndex,
+                            rect = columnRect(line, column)
+                        )
+                    }
+                }
+            }
+            if (nearest != null) return nearest
         }
         return null
+    }
+
+    /** 点到闭区间的距离（落在区间内为 0）。 */
+    private fun distanceToRange(value: Float, start: Float, end: Float): Float = when {
+        value < start -> start - value
+        value > end -> value - end
+        else -> 0f
     }
 
     private fun wordRangeAround(page: TextPage, lineIndex: Int, columnIndex: Int): IntRange? {
