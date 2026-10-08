@@ -404,6 +404,11 @@ internal class ContentTextView @JvmOverloads constructor(
     private fun hitCandidates(): List<Pair<TextPage, Float>> {
         val center = scrollPages.getOrNull(scrollCenterIndex)
         if (center == null) return page?.let { listOf(it to scrollOffset) } ?: emptyList()
+        // 选区编辑期间**只认中心页**（跨页命中不参与）。
+        // 原因（真机日志）：手指没大幅移动时，命中的页面会在相邻两页之间摆动
+        // （hostPage=19/20 交替），每一次摆动都会触发端点交换 ⇒ 选区两端互相顶、来回翻转。
+        // 这是刻意的行为收敛：跨页选择要重做（位置带页身份 + 命中取点写成可测纯函数），不再零敲碎打。
+        if (selectionRange != null) return listOf(center to scrollOffset)
         val viewport = if (scrollHorizontal) {
             (width - paddingLeft - paddingRight).coerceAtLeast(1).toFloat()
         } else {
