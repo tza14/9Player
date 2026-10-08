@@ -690,7 +690,12 @@ internal class ContentTextView @JvmOverloads constructor(
 
     fun selectionBounds(): SelectionBounds? {
         val chapterRange = selectionChapterRange
-        if (chapterRange != null) {
+        val currentPage = page
+        // 只有**真的跨页**时才走章节坐标端点。单页选区一律沿用页内端点（那条路径长期验证过；
+        // 实测章节坐标在单页情形下会把两个端点分别解析到相邻行 ⇒ 手柄上下各差一行）。
+        val spansPages = chapterRange != null && currentPage != null &&
+            (chapterRange.first < currentPage.charStart || chapterRange.last >= currentPage.charEnd)
+        if (chapterRange != null && spansPages) {
             val start = chapterPositionRect(chapterRange.first)
             val end = chapterPositionRect(chapterRange.last) ?: start
             // 两端都在绘制上下文里 ⇒ 手柄贴真实端点页。
