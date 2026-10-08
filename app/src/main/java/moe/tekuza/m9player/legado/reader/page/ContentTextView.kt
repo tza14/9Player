@@ -727,7 +727,10 @@ internal class ContentTextView @JvmOverloads constructor(
     }
 
     fun findTextHitAt(x: Float, y: Float): TextHit? {
-        for ((candidate, offset) in hitCandidates()) {
+        val candidates = hitCandidates()
+        // 第一遍：在所有候选页里找**精确**命中。
+        // 跨页拖手柄就靠这一遍落到邻页（所以它必须在"最近字兜底"之前跑完，否则中心页总能兜住 ⇒ 永远跨不了页）。
+        candidates.forEach { (candidate, offset) ->
             val localX = x - paddingLeft - (if (scrollHorizontal) offset else 0f)
             val localY = y - paddingTop - (if (scrollHorizontal) 0f else offset)
             candidate.lines.forEachIndexed { lineIndex, line ->
@@ -755,40 +758,41 @@ internal class ContentTextView @JvmOverloads constructor(
                     }
                 }
             }
-            // 没有精确命中（手柄拖到行末、段间或页底空白时很常见）⇒ 取**本页内离触摸点最近的字**。
-            // 旧实现直接落到下一页/返回失败：手指还在屏幕底部，解出来的却是页中部的位置
-            // ⇒ 拖下端手柄时把起点顶掉（真机日志抓到过 range 1134..1219 → 1005..1219）。
-            // 关键：只在**这一个**候选页里取最近，绝不跨页找。
-            page = candidate
-            var nearest: TextHit? = null
-            var nearestDistance = Float.MAX_VALUE
-            candidate.lines.forEachIndexed { lineIndex, line ->
-                val crossDistance = when (line.layoutMode) {
-                    M9LayoutMode.HORIZONTAL -> distanceToRange(localY, line.lineTop, line.lineBottom)
-                    M9LayoutMode.VERTICAL -> distanceToRange(localX, line.lineTop, line.lineBottom)
+        }
+        // 第二遍：谁都没有精确命中（手柄拖到行间、段间或页底空白）⇒ 只在**中心页**里取最近的字。
+        // 绝不跨页找：否则手指还在屏幕底部，解出来的却是别页中部的位置
+        //（真机日志抓到过 range 1134..1219 → 1005..1219，就是这一跳顶掉了起点）。
+        val (center, centerOffset) = candidates.firstOrNull() ?: return null
+        val localX = x - paddingLeft - (if (scrollHorizontal) centerOffset else 0f)
+        val localY = y - paddingTop - (if (scrollHorizontal) 0f else centerOffset)
+        page = center
+        var nearest: TextHit? = null
+        var nearestDistance = Float.MAX_VALUE
+        center.lines.forEachIndexed { lineIndex, line ->
+            val crossDistance = when (line.layoutMode) {
+                M9LayoutMode.HORIZONTAL -> distanceToRange(localY, line.lineTop, line.lineBottom)
+                M9LayoutMode.VERTICAL -> distanceToRange(localX, line.lineTop, line.lineBottom)
+            }
+            line.columns.forEachIndexed { columnIndex, column ->
+                if (column !is TextColumn) return@forEachIndexed
+                val alongDistance = when (line.layoutMode) {
+                    M9LayoutMode.HORIZONTAL -> distanceToRange(localX, column.start, column.end)
+                    M9LayoutMode.VERTICAL -> distanceToRange(localY, column.start, column.end)
                 }
-                line.columns.forEachIndexed { columnIndex, column ->
-                    if (column !is TextColumn) return@forEachIndexed
-                    val alongDistance = when (line.layoutMode) {
-                        M9LayoutMode.HORIZONTAL -> distanceToRange(localX, column.start, column.end)
-                        M9LayoutMode.VERTICAL -> distanceToRange(localY, column.start, column.end)
-                    }
-                    val distance = crossDistance * crossDistance + alongDistance * alongDistance
-                    if (distance < nearestDistance) {
-                        nearestDistance = distance
-                        nearest = TextHit(
-                            sourceStart = column.sourceStart,
-                            sourceEnd = column.sourceEnd,
-                            lineIndex = lineIndex,
-                            columnIndex = columnIndex,
-                            rect = columnRect(line, column)
-                        )
-                    }
+                val distance = crossDistance * crossDistance + alongDistance * alongDistance
+                if (distance < nearestDistance) {
+                    nearestDistance = distance
+                    nearest = TextHit(
+                        sourceStart = column.sourceStart,
+                        sourceEnd = column.sourceEnd,
+                        lineIndex = lineIndex,
+                        columnIndex = columnIndex,
+                        rect = columnRect(line, column)
+                    )
                 }
             }
-            if (nearest != null) return nearest
         }
-        return null
+        return nearest
     }
 
     /** 点到闭区间的距离（落在区间内为 0）。 */
