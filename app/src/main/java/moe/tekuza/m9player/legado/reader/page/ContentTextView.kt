@@ -557,7 +557,15 @@ internal class ContentTextView @JvmOverloads constructor(
     fun selectedChapterRange(): IntRange? = selectionChapterRange
 
     fun beginSelectionAt(x: Float, y: Float): Boolean {
-        val hit = findTextHitAt(x, y) ?: return false
+        val hit = findTextHitAt(x, y)
+        // 入口即打日志：有这行=手势到了；没有=长按没被识别。hit=null 说明命中了空白。
+        logDebug("M9Selection") {
+            "beginSelectionAt x=${x.toInt()} y=${y.toInt()} hit=${hit != null} " +
+                "pageInChapter=${page?.pageInChapter} pageCharStart=${page?.charStart} " +
+                "scrollPages=${scrollPages.size} center=$scrollCenterIndex offset=$scrollOffset " +
+                "horizontal=$scrollHorizontal"
+        }
+        if (hit == null) return false
         val current = page ?: return false
         val wordRange = wordRangeAround(current, hit.lineIndex, hit.columnIndex)
         val range = wordRange ?: orderedRange(hit.sourceStart, hit.sourceEnd)
