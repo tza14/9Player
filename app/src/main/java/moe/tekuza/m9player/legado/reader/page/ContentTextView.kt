@@ -163,6 +163,9 @@ internal class ContentTextView @JvmOverloads constructor(
     private var selectionStartChapter: Int? = null
     private var selectionEndChapter: Int? = null
     private var selectionChapterIndex: Int = -1
+
+    /** M9Selection 诊断日志的限流时间戳（拖动手柄时每帧都会走到 setChapterSelection）。 */
+    private var lastSelectionLogAtMs: Long = 0L
     private var pendingSelectionHandleRole: SelectionHandleRole? = null
     private var highlightRange: IntRange? = null
     private var searchRange: IntRange? = null
@@ -525,8 +528,11 @@ internal class ContentTextView @JvmOverloads constructor(
         selectionEndChapter = to
         selectionChapterRange = from..to
         syncPageLocalSelection()
-        // 诊断（一次选择动作打一行，不按帧）：把两套口径摆在一起，便于一眼看出是谁对不上。
-        logDebug("M9Selection") {
+        // 诊断（限流 500ms —— 拖动手柄时这里每帧都会跑到，不限流会刷屏）。
+        val nowMs = System.currentTimeMillis()
+        if (nowMs - lastSelectionLogAtMs >= 500L) {
+            lastSelectionLogAtMs = nowMs
+            logDebug("M9Selection") {
             val cols = page?.lines
                 ?.flatMap { line -> line.columns.filterIsInstance<TextColumn>() }
                 .orEmpty()
@@ -535,6 +541,7 @@ internal class ContentTextView @JvmOverloads constructor(
                 "pageInChapter=${page?.pageInChapter} lines=${page?.lineSize} " +
                 "colSource=${if (cols.isEmpty()) "-" else "${cols.first().sourceStart}..${cols.last().sourceEnd}"} " +
                 "derived=${selectionRange}"
+            }
         }
     }
 
