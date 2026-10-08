@@ -237,7 +237,9 @@ object BookReaderPlaybackSession {
  * [BookReaderPlaybackSession.currentFullDurationMs] 的**纯决策**部分（只依赖 JVM，可直接单测）：
  * - 没有裁剪：播放器自己的时长就是整轨时长，直接用它；
  * - 有裁剪：player.duration 只是窗口长度（一段/一句），只信已发布的完整时长；
- * - 都拿不到：退回 raw（旧行为：至多显示成一小段，不会把进度断成未知）。
+ * - 有裁剪但没人发布过：返回 **0（未知）**，让调用方"不要夹"。
+ *   旧实现在这里退回 raw —— 那等于拿窗口长度当整轨时长，调用方会把**绝对目标**夹进窗口
+ *   （手表/通知按"前进 10 秒"于是落回窗口起点）。
  */
 internal fun resolveFullDurationMs(
     rawDurationMs: Long,
@@ -246,6 +248,6 @@ internal fun resolveFullDurationMs(
 ): Long {
     val raw = rawDurationMs.takeIf { it > 0L } ?: 0L
     if (raw > 0L && !hasActiveClip) return raw
-    val published = publishedDurationMs.takeIf { it > 0L } ?: 0L
-    return if (published > 0L) published else raw
+    // 裁剪态下 raw 不可信 ⇒ 只认已发布的完整时长；没有就是 0（= 未知，调用方不得据此夹值）。
+    return publishedDurationMs.takeIf { it > 0L } ?: 0L
 }

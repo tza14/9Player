@@ -19,9 +19,15 @@ class BookReaderFullDurationTest {
 
     @Test
     fun clippedPlaybackUsesPublishedFullDurationInsteadOfClipLength() {
-        assertEquals(pageClipMs, resolveFullDurationMs(pageClipMs, hasActiveClip = true, publishedDurationMs = 0L))
         assertEquals(fullTrackMs, resolveFullDurationMs(pageClipMs, hasActiveClip = true, publishedDurationMs = fullTrackMs))
         assertEquals(fullTrackMs, resolveFullDurationMs(cueClipMs, hasActiveClip = true, publishedDurationMs = fullTrackMs))
+    }
+
+    @Test
+    fun clippedWithoutPublishedDurationStaysUnknownRatherThanTheClipLength() {
+        // 关键：绝不能用窗口长度冒充整轨时长 —— 调用方会拿它去夹"绝对目标"。
+        assertEquals(0L, resolveFullDurationMs(pageClipMs, hasActiveClip = true, publishedDurationMs = 0L))
+        assertEquals(0L, resolveFullDurationMs(cueClipMs, hasActiveClip = true, publishedDurationMs = -5L))
     }
 
     @Test
@@ -39,6 +45,7 @@ class BookReaderFullDurationTest {
     @Test
     fun nonPositiveValuesAreIgnored() {
         assertEquals(0L, resolveFullDurationMs(-1L, hasActiveClip = false, publishedDurationMs = -5L))
-        assertEquals(fullTrackMs, resolveFullDurationMs(fullTrackMs, hasActiveClip = true, publishedDurationMs = -5L))
+        // 裁剪态 + 未发布 ⇒ 0（未知），不是 raw
+        assertEquals(0L, resolveFullDurationMs(fullTrackMs, hasActiveClip = true, publishedDurationMs = -5L))
     }
 }
