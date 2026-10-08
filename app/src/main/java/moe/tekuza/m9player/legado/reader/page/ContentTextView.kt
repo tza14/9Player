@@ -196,6 +196,35 @@ internal class ContentTextView @JvmOverloads constructor(
         lastHandleDragY = null
     }
 
+    /** 手柄拖动时的几何诊断时间戳（自己一份 ⇒ 不会与别的日志互相顶掉）。 */
+    private var lastGeometryLogAtMs: Long = 0L
+
+    /**
+     * 手柄拖动时的几何诊断（限流 500ms）：逐页列出"跨度 span / 布局高度 h / 内容真实底 maxBottom"。
+     *
+     * 目的只有一个：证明或否证"相邻页的行带在屏幕上重叠"（那时两页都能精确命中 ⇒ 命中在页间摆动、
+     * 选区停在手指前面）。`exceeds=true` 就是越界（span < 内容底）⇒ 页带区必然与下一页交叠。
+     */
+    private fun logHandleDragGeometry(x: Float, y: Float) {
+        val nowMs = System.currentTimeMillis()
+        if (nowMs - lastGeometryLogAtMs < 500L) return
+        lastGeometryLogAtMs = nowMs
+        val pages = if (scrollPages.isNotEmpty()) scrollPages else listOfNotNull(page)
+        logDebug("M9Selection") {
+            val summary = pages.mapIndexedNotNull { index, target ->
+                target?.let {
+                    val span = pageScrollExtent(it, scrollHorizontal)
+                    val maxBottom = it.lines.maxOfOrNull { line -> line.lineBottom } ?: 0f
+                    val maxCross = it.lines.maxOfOrNull { line -> line.crossEnd } ?: 0f
+                    "p${it.pageInChapter} ${it.charStart}..${it.charEnd} off=${scrollOffsetForIndex(index)} " +
+                        "span=$span h=${it.height} maxBottom=$maxBottom maxCross=$maxCross " +
+                        "exceeds=${maxBottom > span + 0.5f || maxCross > span + 0.5f}"
+                }
+            }.joinToString(" | ")
+            "geomDrag touch=(${x.toInt()},${y.toInt()}) center=$scrollCenterIndex $summary"
+        }
+    }
+
     /**
      * 手指是否在**向下**移动（滑动轴为纵轴时看 y；横排竖读模式下也走同一轴）。
      * 首次移动（没有上一次位置）返回 null ⇒ 不做方向裁决，按候选顺序取第一个。
@@ -662,6 +691,7 @@ internal class ContentTextView @JvmOverloads constructor(
     fun updateSelectionStartAt(x: Float, y: Float): Boolean {
         // 平局（两页行带重叠）时按**手指移动方向**裁决：向下取更靠后的字，向上取更靠前的字。
         val hit = findTextHitAt(x, y, preferForward = dragDirectionDown(y)) ?: return false
+        logHandleDragGeometry(x, y)
         val hitPage = hit.page ?: return false
         val end = selectEnd ?: return false
         // 选区不跨章：命中落到别的章就忽略。
@@ -685,6 +715,7 @@ internal class ContentTextView @JvmOverloads constructor(
     fun updateSelectionEndAt(x: Float, y: Float): Boolean {
         // 同上：按手指移动方向裁决，不参照端点（那会构成反馈环 ⇒ 终点黏在上一页）。
         val hit = findTextHitAt(x, y, preferForward = dragDirectionDown(y)) ?: return false
+        logHandleDragGeometry(x, y)
         val hitPage = hit.page ?: return false
         val start = selectStart ?: return false
         if (hitPage.chapterIndex != start.chapterIndex) return false
