@@ -171,6 +171,7 @@
     <string name="dictionary_import_stage_import">Importing dictionary, this may take a few minutes</string>
     <string name="dictionary_import_stage_finalize">Finalizing dictionary</string>
     <string name="reader_no_next_page">This is the last page</string>
+    <string name="reader_page_loading">Laying out…</string>
     <string name="reader_no_prev_page">This is the first page</string>
     <string name="dictionary_import_stage_done">Done</string>
     <string name="dictionary_display_settings">Display settings</string>
