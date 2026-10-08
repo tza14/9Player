@@ -860,8 +860,14 @@ private fun BookReaderScreen(
                         currentAudioUriText != null &&
                         currentAudioUriText == sharedAudioUri
                     ) {
-                        positionMs = player.currentPosition.coerceAtLeast(0L)
-                        durationMs = if (player.duration > 0L) player.duration else durationMs.coerceAtLeast(0L)
+                        // 不能直接读播放器的原始值：裁剪态（读完此页暂停 / 逐句重复）下
+                        // currentPosition 是窗口内偏移、duration 是窗口长度 ⇒ 经 intent 传回阅读器后
+                        // 会被当成"绝对位置 / 整轨时长"发布出去（手表/锁屏进度于是变回一小段）。
+                        // 0 = 未知，交给接收端保留自己已有的值。
+                        positionMs = BookReaderPlaybackSession.currentPositionMs()
+                        durationMs = BookReaderPlaybackSession.currentFullDurationMs()
+                            .takeIf { it > 0L }
+                            ?: durationMs.coerceAtLeast(0L)
                         isPlaying = isReaderPlaybackRequested()
                         return
                     }
