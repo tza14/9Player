@@ -484,6 +484,17 @@ private fun loadEpubDocumentFromCache(
     preferredCharsetName: String?
 ): EbookDocument {
     val startMs = SystemClock.elapsedRealtime()
+    // 解析结果落盘缓存：命中就直接返回（实测这一步原本每次启动都要 ~571ms 重新把 HTML 转成正文）。
+    val docCacheStamp = epubDocumentCacheStamp(root, preferredCharsetName)
+    if (docCacheStamp != null) {
+        loadCachedEbookDocument(root, docCacheStamp)?.let { cached ->
+            logDebug(EBOOK_READER_CORE_LOG_TAG) {
+                "loadEpubDocument docCache total=${SystemClock.elapsedRealtime() - startMs}ms " +
+                    "chapters=${cached.chapters.size} root=${root.name}"
+            }
+            return cached
+        }
+    }
     val container = root.resolveSafeEpubPath("META-INF/container.xml")
         ?.takeIf { it.isFile }
         ?.readText(StandardCharsets.UTF_8)
@@ -539,11 +550,14 @@ private fun loadEpubDocumentFromCache(
         "loadEpubDocument cacheParsed total=${SystemClock.elapsedRealtime() - startMs}ms " +
         "chapters=${chapters.size} images=${epubImages.size} root=${root.name}"
     }
-    return EbookDocument(
+    val document = EbookDocument(
         title = title,
         format = "EPUB",
         chapters = chapters.ifEmpty { listOf(EbookChapter(title, "")) }
     )
+    // 落盘备用：下次打开直接读回（写入/校验失败只记日志，不影响本次阅读）。
+    docCacheStamp?.let { stamp -> saveCachedEbookDocument(root, document, stamp) }
+    return document
 }
 
 private fun fallbackHtmlEpub(
