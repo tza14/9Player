@@ -30,6 +30,11 @@ internal data class TextPage(
      * 布局在绘制之前就完成，页对象在重新分页时整体重建 ⇒ 首次绘制算一次即可，无需失效逻辑。
      */
     var scrollSpanCache: Float = 0f,
+    /**
+     * [scrollSpanCache] 是按哪个视口算出来的。跨度里含"视口/4"的下限 ⇒ 视口变了（切排版模式、
+     * 章首页有无标题预留）就必须重算，否则会沿用旧跨度，点击/滚动步长偏几个百分点。
+     */
+    var scrollSpanViewport: Float = 0f,
     private val textLines: ArrayList<TextLine> = arrayListOf()
 ) {
     val lines: List<TextLine> get() = textLines

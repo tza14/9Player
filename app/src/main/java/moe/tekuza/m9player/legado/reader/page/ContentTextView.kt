@@ -313,9 +313,16 @@ internal class ContentTextView @JvmOverloads constructor(
     }
 
     fun pageScrollExtent(page: TextPage?, horizontal: Boolean): Float {
-        // 跨度只算一次就缓存在页上：绘制一帧要对上下文里每页反复取它（scrollOffsetForIndex 还要累加），
-        // 而布局早于绘制完成、页对象在重新分页时整体重建 ⇒ 缓存不需要失效逻辑。
-        if (page != null && page.scrollSpanCache > 0f) return page.scrollSpanCache
+        // 跨度只算一次就缓存在页上：绘制一帧要对上下文里每页反复取它（scrollOffsetForIndex 还要累加）。
+        // 有效性除了"页对象"还包含**视口**：跨度里含"视口/4"的下限，视口变了必须重算。
+        val viewport = if (horizontal) {
+            (width - paddingLeft - paddingRight).coerceAtLeast(1).toFloat()
+        } else {
+            (height - paddingTop - paddingBottom).coerceAtLeast(1).toFloat()
+        }
+        if (page != null && page.scrollSpanCache > 0f && page.scrollSpanViewport == viewport) {
+            return page.scrollSpanCache
+        }
         return computePageScrollExtent(page, horizontal)
     }
 
@@ -366,7 +373,10 @@ internal class ContentTextView @JvmOverloads constructor(
         // 只保一个很小的下限：滚动上下文固定 ±4 页（ReadView.SCROLL_CONTEXT_RADIUS），
         // 9 × 下限必须 ≥ 视口，否则屏幕边缘会露出没画到的空白 ⇒ 下限取 视口 / 4。
         val minSpan = (if (horizontal) viewportWidth else viewportHeight) / 4f
-        return contentExtent.coerceAtLeast(minSpan).also { page.scrollSpanCache = it }
+        return contentExtent.coerceAtLeast(minSpan).also {
+            page.scrollSpanCache = it
+            page.scrollSpanViewport = if (horizontal) viewportWidth else viewportHeight
+        }
     }
 
     private fun TextPage.hasImageColumn(): Boolean {
@@ -873,6 +883,8 @@ internal class ContentTextView @JvmOverloads constructor(
             (height - paddingTop - paddingBottom).coerceAtLeast(0).toFloat()
         )
         if (current.lines.isEmpty()) {
+            // 占位页正是"没有 lines"这一支：提示必须在这里画，否则它永远不会出现。
+            drawPlaceholderMessage(canvas, current)
             drawFallbackText(canvas, current.text)
             canvas.restore()
             return
@@ -929,20 +941,7 @@ internal class ContentTextView @JvmOverloads constructor(
         canvas.save()
         canvas.translate(offsetX, offsetY)
         // 占位页（邻章还没排好）：画一行居中提示，别让用户看到白屏（照 legado 的加载消息页）。
-        if (current.isPlaceholder) {
-            placeholderMessage?.let { message ->
-                placeholderPaint.textSize = textSizePxValue
-                // 本视图继承 View（没有 currentTextColor），正文颜色由各行自带画笔决定 ⇒ 提示用中性灰。
-                // 待办：让宿主把阅读正文色传进来，跟随主题/夜间模式。
-                placeholderPaint.color = 0xFF808080.toInt()
-                canvas.drawText(
-                    message,
-                    (width - paddingLeft - paddingRight) / 2f,
-                    (height - paddingTop - paddingBottom) / 2f,
-                    placeholderPaint
-                )
-            }
-        }
+        drawPlaceholderMessage(canvas, current)
         // 跨页选区：这一页只画"本页 ∩ 章节区间"那一段；交集为空 ⇒ 不画。
         // （绝不能回退到宿主页的 selectionRange —— 那会让章区间之外的邻页按同下标画出游离高亮。）
         val pageSelection = pageLocalSelectionSlice(
@@ -980,6 +979,25 @@ internal class ContentTextView @JvmOverloads constructor(
             line.lineEnd,
             y,
             underlinePaint
+        )
+    }
+
+    /**
+     * 占位页中央的一行提示（邻章还没排好时用，见 [placeholderMessage]）。
+     * 两条绘制路径都要调用：有 lines 的走 [drawPageLines]，占位页（无 lines）走 [onDraw] 的兜底分支。
+     */
+    private fun drawPlaceholderMessage(canvas: Canvas, target: TextPage) {
+        if (!target.isPlaceholder) return
+        val message = placeholderMessage ?: return
+        placeholderPaint.textSize = textSizePxValue
+        // 本视图继承 View（没有 currentTextColor），正文颜色由各行自带画笔决定 ⇒ 提示用中性灰。
+        // 待办：让宿主把阅读正文色传进来，跟随主题/夜间模式。
+        placeholderPaint.color = 0xFF808080.toInt()
+        canvas.drawText(
+            message,
+            (width - paddingLeft - paddingRight) / 2f,
+            (height - paddingTop - paddingBottom) / 2f,
+            placeholderPaint
         )
     }
 
