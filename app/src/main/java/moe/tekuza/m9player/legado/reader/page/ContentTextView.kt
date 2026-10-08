@@ -103,7 +103,17 @@ internal class ContentTextView @JvmOverloads constructor(
         val sourceEnd: Int,
         val lineIndex: Int,
         val columnIndex: Int,
-        val rect: RectF
+        val rect: RectF,
+        /**
+         * 命中页在章节原文里的起始下标（= 该页的 charStart）。
+         * 有它，调用方就不必依赖"命中顺手改写当前页"这种副作用来换算章节坐标
+         *（那个副作用会让命中结果依赖上一次命中 ⇒ 页边界处来回摆动）。
+         */
+        val chapterStartOffset: Int = 0,
+        /** 命中页所属章号：选区不跨章，调用方要据此拒绝跨章命中。 */
+        val chapterIndex: Int = 0,
+        /** 命中所在页对象（算词范围要用它，不能拿"当前页"顶替）。 */
+        val page: TextPage? = null
     )
 
     internal data class SelectionBounds(
@@ -404,11 +414,6 @@ internal class ContentTextView @JvmOverloads constructor(
     private fun hitCandidates(): List<Pair<TextPage, Float>> {
         val center = scrollPages.getOrNull(scrollCenterIndex)
         if (center == null) return page?.let { listOf(it to scrollOffset) } ?: emptyList()
-        // 选区编辑期间**只认中心页**（跨页命中不参与）。
-        // 原因（真机日志）：手指没大幅移动时，命中的页面会在相邻两页之间摆动
-        // （hostPage=19/20 交替），每一次摆动都会触发端点交换 ⇒ 选区两端互相顶、来回翻转。
-        // 这是刻意的行为收敛：跨页选择要重做（位置带页身份 + 命中取点写成可测纯函数），不再零敲碎打。
-        if (selectionRange != null) return listOf(center to scrollOffset)
         val viewport = if (scrollHorizontal) {
             (width - paddingLeft - paddingRight).coerceAtLeast(1).toFloat()
         } else {
@@ -587,15 +592,15 @@ internal class ContentTextView @JvmOverloads constructor(
                 "horizontal=$scrollHorizontal"
         }
         if (hit == null) return false
-        val current = page ?: return false
-        val wordRange = wordRangeAround(current, hit.lineIndex, hit.columnIndex)
+        val hitPage = hit.page ?: return false
+        val wordRange = wordRangeAround(hitPage, hit.lineIndex, hit.columnIndex)
         val range = wordRange ?: orderedRange(hit.sourceStart, hit.sourceEnd)
-        // 实测（M9Selection 日志）：本页列的 source 是 **页内下标**（colSource=0..213，而 pageCharStart=13831）
-        // ⇒ 章节坐标 = page.charStart + 页内下标；绘制侧再减回去。这是唯一自洽的口径。
+        // 章节坐标 = 命中页的 charStart + 页内下标（列的下标是页内下标 ✓）。
+        // 换算基准一律取**命中结果自带**的页，不再依赖"命中顺手改写当前页"的副作用。
         setChapterSelection(
-            chapterIndex = current.chapterIndex,
-            startChapter = current.charStart + range.first,
-            endChapter = current.charStart + range.last
+            chapterIndex = hitPage.chapterIndex,
+            startChapter = hit.chapterStartOffset + range.first,
+            endChapter = hit.chapterStartOffset + range.last
         )
         pendingSelectionHandleRole = null
         invalidate()
@@ -604,18 +609,17 @@ internal class ContentTextView @JvmOverloads constructor(
 
     fun updateSelectionStartAt(x: Float, y: Float): Boolean {
         val hit = findTextHitAt(x, y) ?: return false
-        val current = page ?: return false
         // 选区不跨章：命中落到别的章就忽略（章节区间跨章没有意义）。
-        if (current.chapterIndex != selectionChapterIndex) return false
-        val hitChapterStart = current.charStart + hit.sourceStart
-        val hitChapterEnd = current.charStart + hit.sourceEnd - 1
+        if (hit.chapterIndex != selectionChapterIndex) return false
+        val hitChapterStart = hit.chapterStartOffset + hit.sourceStart
+        val hitChapterEnd = hit.chapterStartOffset + hit.sourceEnd - 1
         val keepEnd = selectionEndChapter ?: hitChapterEnd
         // 拖起点：被拖过终点时交换两端（与 legado 手感一致；判柄已按"最近"修正，不会误抓）。
         if (hitChapterStart <= keepEnd) {
-            setChapterSelection(current.chapterIndex, hitChapterStart, keepEnd)
+            setChapterSelection(hit.chapterIndex, hitChapterStart, keepEnd)
             pendingSelectionHandleRole = null
         } else {
-            setChapterSelection(current.chapterIndex, keepEnd, hitChapterEnd)
+            setChapterSelection(hit.chapterIndex, keepEnd, hitChapterEnd)
             pendingSelectionHandleRole = SelectionHandleRole.END
         }
         return true
@@ -623,17 +627,16 @@ internal class ContentTextView @JvmOverloads constructor(
 
     fun updateSelectionEndAt(x: Float, y: Float): Boolean {
         val hit = findTextHitAt(x, y) ?: return false
-        val current = page ?: return false
-        if (current.chapterIndex != selectionChapterIndex) return false
-        val hitChapterStart = current.charStart + hit.sourceStart
-        val hitChapterEnd = current.charStart + hit.sourceEnd - 1
+        if (hit.chapterIndex != selectionChapterIndex) return false
+        val hitChapterStart = hit.chapterStartOffset + hit.sourceStart
+        val hitChapterEnd = hit.chapterStartOffset + hit.sourceEnd - 1
         val keepStart = selectionStartChapter ?: hitChapterStart
         // 拖终点：被拖过起点时交换两端（同上）。
         if (hitChapterEnd >= keepStart) {
-            setChapterSelection(current.chapterIndex, keepStart, hitChapterEnd)
+            setChapterSelection(hit.chapterIndex, keepStart, hitChapterEnd)
             pendingSelectionHandleRole = null
         } else {
-            setChapterSelection(current.chapterIndex, hitChapterStart, keepStart)
+            setChapterSelection(hit.chapterIndex, hitChapterStart, keepStart)
             pendingSelectionHandleRole = SelectionHandleRole.START
         }
         return true
@@ -751,14 +754,16 @@ internal class ContentTextView @JvmOverloads constructor(
                         M9LayoutMode.VERTICAL -> localY >= column.start && localY <= column.end
                     }
                     if (hit) {
-                        // 命中邻页：先对齐"当前页"，再算 rect —— 否则手柄/菜单会用上一页的偏移。
-                        page = candidate
+                        // 不写 page（那是副作用：会让下一次命中依赖这一次 ⇒ 页边界处左右横跳）。
                         return TextHit(
                             sourceStart = column.sourceStart,
                             sourceEnd = column.sourceEnd,
                             lineIndex = lineIndex,
                             columnIndex = columnIndex,
-                            rect = columnRect(line, column)
+                            rect = columnRectWithOffset(line, column, offset),
+                            chapterStartOffset = candidate.charStart,
+                            chapterIndex = candidate.chapterIndex,
+                            page = candidate
                         )
                     }
                 }
@@ -770,7 +775,6 @@ internal class ContentTextView @JvmOverloads constructor(
         val (center, centerOffset) = candidates.firstOrNull() ?: return null
         val localX = x - paddingLeft - (if (scrollHorizontal) centerOffset else 0f)
         val localY = y - paddingTop - (if (scrollHorizontal) 0f else centerOffset)
-        page = center
         var nearest: TextHit? = null
         var nearestDistance = Float.MAX_VALUE
         center.lines.forEachIndexed { lineIndex, line ->
@@ -792,7 +796,10 @@ internal class ContentTextView @JvmOverloads constructor(
                         sourceEnd = column.sourceEnd,
                         lineIndex = lineIndex,
                         columnIndex = columnIndex,
-                        rect = columnRect(line, column)
+                        rect = columnRectWithOffset(line, column, centerOffset),
+                        chapterStartOffset = center.charStart,
+                        chapterIndex = center.chapterIndex,
+                        page = center
                     )
                 }
             }
