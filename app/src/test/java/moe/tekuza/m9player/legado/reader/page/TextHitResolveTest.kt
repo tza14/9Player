@@ -1,0 +1,117 @@
+package moe.tekuza.m9player.legado.reader.page
+
+import moe.tekuza.m9player.legado.reader.M9LayoutMode
+import moe.tekuza.m9player.legado.reader.entities.TextColumn
+import moe.tekuza.m9player.legado.reader.entities.TextLine
+import moe.tekuza.m9player.legado.reader.entities.TextPage
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
+import org.junit.Test
+
+/**
+ * 命中取点的规则守卫（纯 JVM，不需要 android.*）。
+ *
+ * 这些规则是拿真机日志换来的：以前命中会改写"当前页"，于是下一次命中依赖上一次 ⇒
+ * 页边界处 `hostPage` 在 19/20 之间交替，配合端点交换把选区来回翻转。现在取点是纯函数，
+ * 顺序（= 候选页优先级）与兜底范围都被这里钉住。
+ */
+class TextHitResolveTest {
+
+    /** 造一页：一行一字，行带 [lineTop, lineBottom]，字跨 [colStart, colEnd]。 */
+    private fun page(
+        charStart: Int,
+        charEnd: Int,
+        lineTop: Float,
+        lineBottom: Float,
+        colStart: Float,
+        colEnd: Float,
+        sourceStart: Int = 0,
+        sourceEnd: Int = 1
+    ): TextPage {
+        val line = TextLine(
+            text = "x",
+            lineTop = lineTop,
+            lineBase = lineBottom,
+            lineBottom = lineBottom,
+            layoutMode = M9LayoutMode.HORIZONTAL
+        )
+        line.addColumn(
+            TextColumn(
+                start = colStart,
+                end = colEnd,
+                charData = "x",
+                sourceStart = sourceStart,
+                sourceEnd = sourceEnd
+            )
+        )
+        return TextPage(charStart = charStart, charEnd = charEnd).apply { addLine(line) }
+    }
+
+    private fun hit(candidates: List<Pair<TextPage, Float>>, x: Float, y: Float) =
+        resolveTextHit(candidates, x, y, paddingLeft = 0f, paddingTop = 0f, horizontal = false)
+
+    @Test
+    fun exactHitOnTheCentrePageWins() {
+        // charStart 只是标记，用来确认命中的是哪一页
+        val centre = page(100, 200, 0f, 50f, 0f, 30f)
+        val result = hit(listOf(centre to 0f), x = 10f, y = 20f)
+        assertEquals(centre, result?.page)
+        assertEquals(0, result?.columnIndex)
+    }
+
+    @Test
+    fun exactHitOnANeighbourPageIsFound() {
+        // 中心页这一行在 y=0..50，邻页在 y=200..250 ⇒ y=220 必须落到邻页（跨页拖手柄靠它）
+        val centre = page(100, 200, 0f, 50f, 0f, 30f)
+        val neighbour = page(200, 300, 200f, 250f, 0f, 30f)
+        val result = hit(listOf(centre to 0f, neighbour to 0f), x = 10f, y = 220f)
+        assertEquals(neighbour, result?.page)
+    }
+
+    @Test
+    fun overlappingBandsBelongToTheFirstCandidate() {
+        // 页带区重叠（同一 y 两页都能精确命中）⇒ 归候选顺序里最靠前的那页 —— 顺序即优先级，可预测
+        val first = page(100, 200, 0f, 100f, 0f, 30f)
+        val second = page(200, 300, 0f, 100f, 0f, 30f)
+        val result = hit(listOf(first to 0f, second to 0f), x = 10f, y = 50f)
+        assertEquals(first, result?.page)
+    }
+
+    @Test
+    fun belowTheLastLineFallsBackToTheNearestColumnOfTheCentrePage() {
+        // 手指在页底空白：不许跳到别页，只在中心页里取最近
+        val centre = page(100, 200, 0f, 100f, 0f, 30f)
+        val other = page(200, 300, 200f, 300f, 0f, 30f)
+        val result = hit(listOf(centre to 0f, other to 0f), x = 10f, y = 1000f)
+        assertEquals(centre, result?.page)
+    }
+
+    @Test
+    fun betweenLinesAlsoStaysOnTheCentrePage() {
+        val centre = page(100, 200, 0f, 50f, 0f, 30f)
+        val result = hit(listOf(centre to 0f), x = 10f, y = 70f)
+        assertEquals(centre, result?.page)
+    }
+
+    @Test
+    fun candidateOffsetShiftsTheBand() {
+        // 候选页带自己的滚动偏移：同一屏幕位置在不同偏移下命中不同行
+        val shifted = page(100, 200, 300f, 350f, 0f, 30f)
+        // 偏移 -300 ⇒ 屏幕 y=20 对应内容 y=320 ⇒ 落在 300..350 内
+        val result = hit(listOf(shifted to -300f), x = 10f, y = 20f)
+        assertEquals(shifted, result?.page)
+    }
+
+    @Test
+    fun emptyCandidatesGiveNull() {
+        assertNull(hit(emptyList(), x = 10f, y = 10f))
+    }
+
+    @Test
+    fun pageForChapterPositionPicksTheOwningPage() {
+        val first = page(100, 200, 0f, 10f, 0f, 5f)
+        val second = page(200, 300, 0f, 10f, 0f, 5f)
+        assertEquals(second, pageForChapterPosition(listOf(first, second), 250))
+        assertNull(pageForChapterPosition(listOf(first, second), 99))
+    }
+}

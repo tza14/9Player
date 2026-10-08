@@ -1,5 +1,7 @@
 package moe.tekuza.m9player.legado.reader.page
 
+import moe.tekuza.m9player.legado.reader.M9LayoutMode
+import moe.tekuza.m9player.legado.reader.entities.TextColumn
 import moe.tekuza.m9player.legado.reader.entities.TextPage
 
 /**
@@ -39,3 +41,83 @@ internal fun pageForChapterPosition(pages: List<TextPage?>, chapterPosition: Int
     pages.firstOrNull { page ->
         page != null && chapterPosition >= page.charStart && chapterPosition < page.charEnd
     }
+
+/** 命中结果：页 + 行号 + 列号（纯数据）。 */
+internal data class TextHitPoint(
+    val page: TextPage,
+    val lineIndex: Int,
+    val columnIndex: Int
+)
+
+/**
+ * 触摸点 → (页, 行, 列)。**纯函数**：不改任何状态，输入输出都能单测。
+ *
+ * 为什么必须纯：以前命中会顺手改写"当前页"，于是下一次命中依赖上一次的结果 —— 真机上表现为
+ * 页边界附近 `hostPage` 在 19/20 之间交替，配合端点交换就把选区来回翻转（用户看到的"越来越乱"）。
+ *
+ * 规则（与 legado 的 `touch`/`touchRough` 同形）：
+ * 1. 先在**所有**候选页里找精确命中（点落在某列的跨度内）—— 跨页拖手柄靠这一遍；
+ * 2. 都没有（行间、段间、页底空白）⇒ 只在**第一个候选页**里取最近的字，绝不跨页找；
+ * 3. `candidates` 的顺序就是优先级 ⇒ "页带区重叠时归谁"由调用方给定、可预测、可单测。
+ *
+ * @param horizontal 滚动轴是否为横轴（竖排时为 true）
+ */
+internal fun resolveTextHit(
+    candidates: List<Pair<TextPage, Float>>,
+    x: Float,
+    y: Float,
+    paddingLeft: Float,
+    paddingTop: Float,
+    horizontal: Boolean
+): TextHitPoint? {
+    candidates.forEach { (page, offset) ->
+        val localX = x - paddingLeft - (if (horizontal) offset else 0f)
+        val localY = y - paddingTop - (if (horizontal) 0f else offset)
+        page.lines.forEachIndexed { lineIndex, line ->
+            val inLineBounds = when (line.layoutMode) {
+                M9LayoutMode.HORIZONTAL -> localY >= line.lineTop && localY <= line.lineBottom
+                M9LayoutMode.VERTICAL -> localX >= line.lineTop && localX <= line.lineBottom
+            }
+            if (!inLineBounds) return@forEachIndexed
+            line.columns.forEachIndexed { columnIndex, column ->
+                if (column !is TextColumn) return@forEachIndexed
+                val hit = when (line.layoutMode) {
+                    M9LayoutMode.HORIZONTAL -> localX >= column.start && localX <= column.end
+                    M9LayoutMode.VERTICAL -> localY >= column.start && localY <= column.end
+                }
+                if (hit) return TextHitPoint(page, lineIndex, columnIndex)
+            }
+        }
+    }
+    val (center, centerOffset) = candidates.firstOrNull() ?: return null
+    val localX = x - paddingLeft - (if (horizontal) centerOffset else 0f)
+    val localY = y - paddingTop - (if (horizontal) 0f else centerOffset)
+    var nearest: TextHitPoint? = null
+    var nearestDistance = Float.MAX_VALUE
+    center.lines.forEachIndexed { lineIndex, line ->
+        val crossDistance = when (line.layoutMode) {
+            M9LayoutMode.HORIZONTAL -> distanceToRange(localY, line.lineTop, line.lineBottom)
+            M9LayoutMode.VERTICAL -> distanceToRange(localX, line.lineTop, line.lineBottom)
+        }
+        line.columns.forEachIndexed { columnIndex, column ->
+            if (column !is TextColumn) return@forEachIndexed
+            val alongDistance = when (line.layoutMode) {
+                M9LayoutMode.HORIZONTAL -> distanceToRange(localX, column.start, column.end)
+                M9LayoutMode.VERTICAL -> distanceToRange(localY, column.start, column.end)
+            }
+            val distance = crossDistance * crossDistance + alongDistance * alongDistance
+            if (distance < nearestDistance) {
+                nearestDistance = distance
+                nearest = TextHitPoint(center, lineIndex, columnIndex)
+            }
+        }
+    }
+    return nearest
+}
+
+/** 点到闭区间的距离（落在区间内为 0）。 */
+internal fun distanceToRange(value: Float, start: Float, end: Float): Float = when {
+    value < start -> start - value
+    value > end -> value - end
+    else -> 0f
+}

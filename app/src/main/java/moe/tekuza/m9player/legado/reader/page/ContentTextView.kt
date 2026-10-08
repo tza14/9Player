@@ -778,83 +778,27 @@ internal class ContentTextView @JvmOverloads constructor(
     }
 
     fun findTextHitAt(x: Float, y: Float): TextHit? {
-        val candidates = hitCandidates()
-        // 第一遍：在所有候选页里找**精确**命中。
-        // 跨页拖手柄就靠这一遍落到邻页（所以它必须在"最近字兜底"之前跑完，否则中心页总能兜住 ⇒ 永远跨不了页）。
-        candidates.forEach { (candidate, offset) ->
-            val localX = x - paddingLeft - (if (scrollHorizontal) offset else 0f)
-            val localY = y - paddingTop - (if (scrollHorizontal) 0f else offset)
-            candidate.lines.forEachIndexed { lineIndex, line ->
-                val inLineBounds = when (line.layoutMode) {
-                    M9LayoutMode.HORIZONTAL -> localY >= line.lineTop && localY <= line.lineBottom
-                    M9LayoutMode.VERTICAL -> localX >= line.lineTop && localX <= line.lineBottom
-                }
-                if (!inLineBounds) return@forEachIndexed
-                line.columns.forEachIndexed { columnIndex, column ->
-                    if (column !is TextColumn) return@forEachIndexed
-                    val hit = when (line.layoutMode) {
-                        M9LayoutMode.HORIZONTAL -> localX >= column.start && localX <= column.end
-                        M9LayoutMode.VERTICAL -> localY >= column.start && localY <= column.end
-                    }
-                    if (hit) {
-                        // 不写 page（那是副作用：会让下一次命中依赖这一次 ⇒ 页边界处左右横跳）。
-                        return TextHit(
-                            sourceStart = column.sourceStart,
-                            sourceEnd = column.sourceEnd,
-                            lineIndex = lineIndex,
-                            columnIndex = columnIndex,
-                            rect = columnRectWithOffset(line, column, offset),
-                            chapterStartOffset = candidate.charStart,
-                            chapterIndex = candidate.chapterIndex,
-                            page = candidate
-                        )
-                    }
-                }
-            }
-        }
-        // 第二遍：谁都没有精确命中（手柄拖到行间、段间或页底空白）⇒ 只在**中心页**里取最近的字。
-        // 绝不跨页找：否则手指还在屏幕底部，解出来的却是别页中部的位置
-        //（真机日志抓到过 range 1134..1219 → 1005..1219，就是这一跳顶掉了起点）。
-        val (center, centerOffset) = candidates.firstOrNull() ?: return null
-        val localX = x - paddingLeft - (if (scrollHorizontal) centerOffset else 0f)
-        val localY = y - paddingTop - (if (scrollHorizontal) 0f else centerOffset)
-        var nearest: TextHit? = null
-        var nearestDistance = Float.MAX_VALUE
-        center.lines.forEachIndexed { lineIndex, line ->
-            val crossDistance = when (line.layoutMode) {
-                M9LayoutMode.HORIZONTAL -> distanceToRange(localY, line.lineTop, line.lineBottom)
-                M9LayoutMode.VERTICAL -> distanceToRange(localX, line.lineTop, line.lineBottom)
-            }
-            line.columns.forEachIndexed { columnIndex, column ->
-                if (column !is TextColumn) return@forEachIndexed
-                val alongDistance = when (line.layoutMode) {
-                    M9LayoutMode.HORIZONTAL -> distanceToRange(localX, column.start, column.end)
-                    M9LayoutMode.VERTICAL -> distanceToRange(localY, column.start, column.end)
-                }
-                val distance = crossDistance * crossDistance + alongDistance * alongDistance
-                if (distance < nearestDistance) {
-                    nearestDistance = distance
-                    nearest = TextHit(
-                        sourceStart = column.sourceStart,
-                        sourceEnd = column.sourceEnd,
-                        lineIndex = lineIndex,
-                        columnIndex = columnIndex,
-                        rect = columnRectWithOffset(line, column, centerOffset),
-                        chapterStartOffset = center.charStart,
-                        chapterIndex = center.chapterIndex,
-                        page = center
-                    )
-                }
-            }
-        }
-        return nearest
-    }
-
-    /** 点到闭区间的距离（落在区间内为 0）。 */
-    private fun distanceToRange(value: Float, start: Float, end: Float): Float = when {
-        value < start -> start - value
-        value > end -> value - end
-        else -> 0f
+        // 取点逻辑全在 resolveTextHit（纯函数、有单测）；这里只负责把结果包成带 rect 的 TextHit。
+        val point = resolveTextHit(
+            candidates = hitCandidates(),
+            x = x,
+            y = y,
+            paddingLeft = paddingLeft.toFloat(),
+            paddingTop = paddingTop.toFloat(),
+            horizontal = scrollHorizontal
+        ) ?: return null
+        val line = point.page.lines.getOrNull(point.lineIndex) ?: return null
+        val column = line.columns.getOrNull(point.columnIndex) as? TextColumn ?: return null
+        return TextHit(
+            sourceStart = column.sourceStart,
+            sourceEnd = column.sourceEnd,
+            lineIndex = point.lineIndex,
+            columnIndex = point.columnIndex,
+            rect = columnRectWithOffset(line, column, offsetForPage(point.page)),
+            chapterStartOffset = point.page.charStart,
+            chapterIndex = point.page.chapterIndex,
+            page = point.page
+        )
     }
 
     private fun wordRangeAround(page: TextPage, lineIndex: Int, columnIndex: Int): IntRange? {
