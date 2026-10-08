@@ -47,20 +47,45 @@ internal class PlaybackNotificationController(
                 .build()
         }
 
+        // 读方向：通知 / 锁屏 / 系统媒体控件看到的是**正文绝对位置 + 整轨时长**。
+        // 裁剪态下播放器自己的 position/duration 都只是窗口内的值，进度条会显示成"一小段"。
+        override fun getCurrentPosition(): Long = currentPositionMsProvider().coerceAtLeast(0L)
+
+        override fun getDuration(): Long = durationMsProvider().coerceAtLeast(0L)
+
+        // 写方向：外部（锁屏拖拽 / 通知按钮 / 车机）给的也是绝对位置 ⇒ **只在这一处**换算回
+        // 窗口内位置，绝不在别处再算一遍（两处各算一次就会双倍偏移）。
+        override fun seekTo(positionMs: Long) {
+            super.seekTo(BookReaderPlaybackSession.toPlayerPositionMs(player, positionMs.coerceAtLeast(0L)))
+        }
+
+        // seekBy 在 media3 里是扩展函数（不能 override）⇒ 用自己的私有实现走同一条绝对口径。
+        private fun seekByAbsolute(offsetMs: Long) {
+            seekTo(currentPositionMsProvider() + offsetMs)
+        }
+
+        override fun seekBack() {
+            seekByAbsolute(-DEFAULT_NOTIFICATION_SEEK_MS)
+        }
+
+        override fun seekForward() {
+            seekByAbsolute(DEFAULT_NOTIFICATION_SEEK_MS)
+        }
+
         override fun seekToNextMediaItem() {
-            seekBy(DEFAULT_NOTIFICATION_SEEK_MS)
+            seekByAbsolute(DEFAULT_NOTIFICATION_SEEK_MS)
         }
 
         override fun seekToPreviousMediaItem() {
-            seekBy(-DEFAULT_NOTIFICATION_SEEK_MS)
+            seekByAbsolute(-DEFAULT_NOTIFICATION_SEEK_MS)
         }
 
         override fun seekToNext() {
-            seekBy(DEFAULT_NOTIFICATION_SEEK_MS)
+            seekByAbsolute(DEFAULT_NOTIFICATION_SEEK_MS)
         }
 
         override fun seekToPrevious() {
-            seekBy(-DEFAULT_NOTIFICATION_SEEK_MS)
+            seekByAbsolute(-DEFAULT_NOTIFICATION_SEEK_MS)
         }
     }
     private val mediaSession = MediaSession.Builder(appContext, routedPlayer)
