@@ -525,6 +525,17 @@ internal class ContentTextView @JvmOverloads constructor(
         selectionEndChapter = to
         selectionChapterRange = from..to
         syncPageLocalSelection()
+        // 诊断（一次选择动作打一行，不按帧）：把两套口径摆在一起，便于一眼看出是谁对不上。
+        logDebug("M9Selection") {
+            val cols = page?.lines
+                ?.flatMap { line -> line.columns.filterIsInstance<TextColumn>() }
+                .orEmpty()
+            "setChapterSelection chapter=$chapterIndex range=$from..$to " +
+                "pageCharStart=${page?.charStart} pageCharEnd=${page?.charEnd} " +
+                "pageInChapter=${page?.pageInChapter} lines=${page?.lineSize} " +
+                "colSource=${if (cols.isEmpty()) "-" else "${cols.first().sourceStart}..${cols.last().sourceEnd}"} " +
+                "derived=${selectionRange}"
+        }
     }
 
     /**
