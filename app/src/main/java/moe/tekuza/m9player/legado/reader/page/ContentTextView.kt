@@ -562,7 +562,7 @@ internal class ContentTextView @JvmOverloads constructor(
         val chapterRange = selectionChapterRange ?: return
         val current = page ?: return
         // 口径统一在 pageLocalSelectionSlice：有章区间就只取交集（为空 ⇒ 本页什么都不画）。
-        val slice = pageLocalSelectionSlice(chapterRange, current, null)
+        val slice = pageLocalSelectionSlice(chapterRange, current)
         selectionRange = slice
         selectionStartSource = slice?.first
         selectionEndSource = slice?.last
@@ -603,12 +603,16 @@ internal class ContentTextView @JvmOverloads constructor(
         // 选区不跨章：命中落到别的章就忽略（章节区间跨章没有意义）。
         if (current.chapterIndex != selectionChapterIndex) return false
         val hitChapterStart = current.charStart + hit.sourceStart
-        val keepEnd = selectionEndChapter ?: (current.charStart + hit.sourceEnd - 1)
-        // 手柄身份固定：拖起点**只改起点**，绝不与终点对调。
-        // 对调会让"拖下端手柄"时选区突然倒过来（实测：range 1134..1219 一步变成 1005..1219），
-        // 视觉上就是"下面那个柄缩回去了"。要反向选择，拖另一个柄即可。
-        setChapterSelection(current.chapterIndex, minOf(hitChapterStart, keepEnd), keepEnd)
-        pendingSelectionHandleRole = null
+        val hitChapterEnd = current.charStart + hit.sourceEnd - 1
+        val keepEnd = selectionEndChapter ?: hitChapterEnd
+        // 手柄身份固定：拖起点只改起点；被拖过终点时按"交换两端"处理（与 iOS/legado 的观感一致）。
+        if (hitChapterStart <= keepEnd) {
+            setChapterSelection(current.chapterIndex, hitChapterStart, keepEnd)
+            pendingSelectionHandleRole = null
+        } else {
+            setChapterSelection(current.chapterIndex, keepEnd, hitChapterEnd)
+            pendingSelectionHandleRole = SelectionHandleRole.END
+        }
         return true
     }
 
@@ -616,11 +620,17 @@ internal class ContentTextView @JvmOverloads constructor(
         val hit = findTextHitAt(x, y) ?: return false
         val current = page ?: return false
         if (current.chapterIndex != selectionChapterIndex) return false
+        val hitChapterStart = current.charStart + hit.sourceStart
         val hitChapterEnd = current.charStart + hit.sourceEnd - 1
-        val keepStart = selectionStartChapter ?: (current.charStart + hit.sourceStart)
-        // 同上：拖终点只改终点（命中落到起点之前就夹到起点，不对调）。
-        setChapterSelection(current.chapterIndex, keepStart, maxOf(hitChapterEnd, keepStart))
-        pendingSelectionHandleRole = null
+        val keepStart = selectionStartChapter ?: hitChapterStart
+        // 同上：拖终点只改终点；被拖过起点时交换两端（并翻转手柄角色）。
+        if (hitChapterEnd >= keepStart) {
+            setChapterSelection(current.chapterIndex, keepStart, hitChapterEnd)
+            pendingSelectionHandleRole = null
+        } else {
+            setChapterSelection(current.chapterIndex, hitChapterStart, keepStart)
+            pendingSelectionHandleRole = SelectionHandleRole.START
+        }
         return true
     }
 
@@ -934,12 +944,15 @@ internal class ContentTextView @JvmOverloads constructor(
         // 占位页（邻章还没排好）：画一行居中提示，别让用户看到白屏（照 legado 的加载消息页）。
         drawPlaceholderMessage(canvas, current)
         // 跨页选区：这一页只画"本页 ∩ 章节区间"那一段；交集为空 ⇒ 不画。
-        // （绝不能回退到宿主页的 selectionRange —— 那会让章区间之外的邻页按同下标画出游离高亮。）
-        val pageSelection = pageLocalSelectionSlice(
-            chapterRange = selectionChapterRange,
-            page = current,
-            legacyPageRange = selectionRange
-        )
+        // 没有章区间时**只有宿主页**能用页内区间兜底 —— 否则区间之外的邻页会按同下标画出游离高亮
+        // （真机日志抓到过 `drawPage pageInChapter=6 slice=159..208 hostSel=0..29`）。
+        val pageSelection = if (selectionChapterRange != null) {
+            pageLocalSelectionSlice(selectionChapterRange, current)
+        } else if (current === page) {
+            selectionRange
+        } else {
+            null
+        }
         // 诊断：只打**真的有内容**的页（有切片、或带 cue 高亮）。
         // 不能按"每 500ms 打第一页"——drawPageLines 是按上下文顺序逐页调用的，那样永远只打最上面那页。
         if (pageSelection != null || highlight != null) {
