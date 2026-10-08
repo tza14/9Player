@@ -184,6 +184,9 @@ internal class ContentTextView @JvmOverloads constructor(
 
     /** M9Selection 诊断日志的限流时间戳（拖动手柄时每帧都会走到 setChapterSelection）。 */
     private var lastSelectionLogAtMs: Long = 0L
+
+    /** "一次取点耗时"日志的时间戳（自己的，不与上面那条共用 ⇒ 免得互相顶掉）。 */
+    private var lastHitCostLogAtMs: Long = 0L
     private var pendingSelectionHandleRole: SelectionHandleRole? = null
     private var highlightRange: IntRange? = null
     private var searchRange: IntRange? = null
@@ -799,8 +802,10 @@ internal class ContentTextView @JvmOverloads constructor(
 
     fun findTextHitAt(x: Float, y: Float, preferChapterPosition: Int? = null): TextHit? {
         // 取点逻辑全在 resolveTextHit（纯函数、有单测）；这里只负责把结果包成带 rect 的 TextHit。
+        val candidates = hitCandidates()
+        val startedAtNs = System.nanoTime()
         val point = resolveTextHit(
-            candidates = hitCandidates(),
+            candidates = candidates,
             x = x,
             y = y,
             paddingLeft = paddingLeft.toFloat(),
@@ -808,6 +813,15 @@ internal class ContentTextView @JvmOverloads constructor(
             horizontal = scrollHorizontal,
             preferChapterPosition = preferChapterPosition
         ) ?: return null
+        // 诊断（限流 500ms）：一次取点扫了几页、耗时多少微秒 —— 用来判断"收窄候选"这类优化值不值得。
+        val nowMs = System.currentTimeMillis()
+        if (nowMs - lastHitCostLogAtMs >= 500L) {
+            lastHitCostLogAtMs = nowMs
+            logDebug("M9Selection") {
+                "hitCost candidates=${candidates.size} us=${(System.nanoTime() - startedAtNs) / 1000} " +
+                    "page=${point.page.pageInChapter} line=${point.lineIndex} col=${point.columnIndex}"
+            }
+        }
         val line = point.page.lines.getOrNull(point.lineIndex) ?: return null
         val column = line.columns.getOrNull(point.columnIndex) as? TextColumn ?: return null
         return TextHit(

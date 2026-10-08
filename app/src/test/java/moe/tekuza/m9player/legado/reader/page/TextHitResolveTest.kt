@@ -5,7 +5,9 @@ import moe.tekuza.m9player.legado.reader.entities.TextColumn
 import moe.tekuza.m9player.legado.reader.entities.TextLine
 import moe.tekuza.m9player.legado.reader.entities.TextPage
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -134,6 +136,40 @@ class TextHitResolveTest {
     @Test
     fun emptyCandidatesGiveNull() {
         assertNull(hit(emptyList(), x = 10f, y = 10f))
+    }
+
+    @Test
+    fun bandFilterNeverChangesAnExactHit() {
+        // 收窄候选只省扫描量：精确命中按定义落在某一行内，而行必然在该页带区内。
+        // 触点落在**行间空隙**（带区内、行外）时，仍然由"中心页取最近"兜住。
+        val centre = page(100, 200, 0f, 100f, 0f, 30f)
+        val result = hit(listOf(centre to 0f), x = 10f, y = 150f) // 行外、带区外 ⇒ 回退全量
+        assertEquals(centre, result?.page)
+    }
+
+    @Test
+    fun bandFilterFallsBackToTheWholeListWhenNothingContainsThePoint() {
+        // 邻页被自己的偏移推到很远（触点在它带区外）⇒ 它不该参与，但中心页必须仍能给出结果
+        val centre = page(100, 200, 0f, 100f, 0f, 30f)
+        val far = page(200, 300, 0f, 100f, 0f, 30f)
+        val result = hit(listOf(centre to 0f, far to -100000f), x = 10f, y = 900f)
+        assertEquals(centre, result?.page)
+    }
+
+    @Test
+    fun isWithinPageBandChecksTheScrollAxisWithOneLineTolerance() {
+        val target = page(100, 200, 0f, 100f, 0f, 30f)
+        // 带区内
+        assertTrue(isWithinPageBand(target, 0f, 10f, 50f, 0f, 0f))
+        // 超出一行高的容差 ⇒ 不算这一页（曾经轴判写反，y=1000 也判"在内"）
+        assertFalse(isWithinPageBand(target, 0f, 10f, 1000f, 0f, 0f))
+        // 邻页在 y=200..250：触点 220 只属于邻页，中心页（0..50）必须被滤掉
+        val centre = page(100, 200, 0f, 50f, 0f, 30f)
+        val neighbour = page(200, 300, 200f, 250f, 0f, 30f)
+        assertFalse(isWithinPageBand(centre, 0f, 10f, 220f, 0f, 0f))
+        assertTrue(isWithinPageBand(neighbour, 0f, 10f, 220f, 0f, 0f))
+        // 超出带区但在一行高的容差内 ⇒ 仍算这一页（手指略微越过页底不应丢命中）
+        assertTrue(isWithinPageBand(target, 0f, 10f, 180f, 0f, 0f))
     }
 
     @Test
