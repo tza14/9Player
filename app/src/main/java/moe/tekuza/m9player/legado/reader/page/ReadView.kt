@@ -1573,16 +1573,25 @@ internal class ReadView @JvmOverloads constructor(
     private fun selectionHandleAt(x: Float, y: Float): SelectionHandle {
         if (!isTextSelected) return SelectionHandle.NONE
         val touch = dp(28).toFloat()
-        fun hit(view: View): Boolean {
-            if (view.visibility != VISIBLE) return false
+        fun distanceSquared(view: View): Float? {
+            if (view.visibility != VISIBLE) return null
             val cx = view.left + view.width / 2f
             val cy = view.top + view.height / 2f
-            return abs(x - cx) <= touch && abs(y - cy) <= touch
+            val dx = abs(x - cx)
+            val dy = abs(y - cy)
+            if (dx > touch || dy > touch) return null
+            return dx * dx + dy * dy
         }
+        val startDistance = distanceSquared(selectionStartHandle)
+        val endDistance = distanceSquared(selectionEndHandle)
+        // 两个柄中心只隔一行，命中区（每轴 dp(28)）必然重叠 ⇒ 必须按"谁更近"决定。
+        // 旧实现无条件先判 START，于是抓**下柄**会被判成起点：手指在拖下端，动的却是上端起点。
         return when {
-            hit(selectionStartHandle) -> SelectionHandle.START
-            hit(selectionEndHandle) -> SelectionHandle.END
-            else -> SelectionHandle.NONE
+            startDistance == null && endDistance == null -> SelectionHandle.NONE
+            startDistance == null -> SelectionHandle.END
+            endDistance == null -> SelectionHandle.START
+            startDistance <= endDistance -> SelectionHandle.START
+            else -> SelectionHandle.END
         }
     }
 

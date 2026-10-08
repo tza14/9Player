@@ -603,16 +603,12 @@ internal class ContentTextView @JvmOverloads constructor(
         // 选区不跨章：命中落到别的章就忽略（章节区间跨章没有意义）。
         if (current.chapterIndex != selectionChapterIndex) return false
         val hitChapterStart = current.charStart + hit.sourceStart
-        val hitChapterEnd = current.charStart + hit.sourceEnd - 1
-        val keepEnd = selectionEndChapter ?: hitChapterEnd
-        // 手柄身份固定：拖起点只改起点；被拖过终点时按"交换两端"处理（与 iOS/legado 的观感一致）。
-        if (hitChapterStart <= keepEnd) {
-            setChapterSelection(current.chapterIndex, hitChapterStart, keepEnd)
-            pendingSelectionHandleRole = null
-        } else {
-            setChapterSelection(current.chapterIndex, keepEnd, hitChapterEnd)
-            pendingSelectionHandleRole = SelectionHandleRole.END
-        }
+        val keepEnd = selectionEndChapter ?: (current.charStart + hit.sourceEnd - 1)
+        // 拖起点只改起点，**不与终点交换**。
+        // 真机录像实测：一次拖动里交换会反复触发（起点/终点互顶）⇒ 选区塌缩成一点、两个柄并在一起、
+        // 高亮忽有忽无。要反向选择，拖另一个柄即可。
+        setChapterSelection(current.chapterIndex, minOf(hitChapterStart, keepEnd), keepEnd)
+        pendingSelectionHandleRole = null
         return true
     }
 
@@ -620,17 +616,11 @@ internal class ContentTextView @JvmOverloads constructor(
         val hit = findTextHitAt(x, y) ?: return false
         val current = page ?: return false
         if (current.chapterIndex != selectionChapterIndex) return false
-        val hitChapterStart = current.charStart + hit.sourceStart
         val hitChapterEnd = current.charStart + hit.sourceEnd - 1
-        val keepStart = selectionStartChapter ?: hitChapterStart
-        // 同上：拖终点只改终点；被拖过起点时交换两端（并翻转手柄角色）。
-        if (hitChapterEnd >= keepStart) {
-            setChapterSelection(current.chapterIndex, keepStart, hitChapterEnd)
-            pendingSelectionHandleRole = null
-        } else {
-            setChapterSelection(current.chapterIndex, hitChapterStart, keepStart)
-            pendingSelectionHandleRole = SelectionHandleRole.START
-        }
+        val keepStart = selectionStartChapter ?: (current.charStart + hit.sourceStart)
+        // 同上：拖终点只改终点（命中落到起点之前就夹到起点，不对调）。
+        setChapterSelection(current.chapterIndex, keepStart, maxOf(hitChapterEnd, keepStart))
+        pendingSelectionHandleRole = null
         return true
     }
 
