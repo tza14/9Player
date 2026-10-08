@@ -103,12 +103,7 @@ internal class ContentTextView @JvmOverloads constructor(
         val sourceEnd: Int,
         val lineIndex: Int,
         val columnIndex: Int,
-        val rect: RectF,
-        /**
-         * 命中页在章节原文里的起始下标（= page.charStart）。加上它就能把"页内下标"换算成
-         * **章节坐标**，跨页选区的端点才可比、才能取到整句。
-         */
-        val chapterStartOffset: Int = 0
+        val rect: RectF
     )
 
     internal data class SelectionBounds(
@@ -248,6 +243,12 @@ internal class ContentTextView @JvmOverloads constructor(
         selectionRange = null
         selectionStartSource = null
         selectionEndSource = null
+        // 程序化换页一并撤销选区：否则 selectedText()/isTextSelected 报的还是旧章区间（菜单/手柄不撤），
+        // 与"页内区间由章区间派生"这条口径自相矛盾。
+        selectionChapterRange = null
+        selectionStartChapter = null
+        selectionEndChapter = null
+        selectionChapterIndex = -1
         pendingSelectionHandleRole = null
         highlightRange = highlight
         searchRange = search
@@ -550,18 +551,11 @@ internal class ContentTextView @JvmOverloads constructor(
     private fun syncPageLocalSelection() {
         val chapterRange = selectionChapterRange ?: return
         val current = page ?: return
-        // 章节区间 → **本页页内区间**（列的下标是页内下标）⇒ 减去 page.charStart 并裁剪到本页。
-        val start = maxOf(chapterRange.first, current.charStart) - current.charStart
-        val end = minOf(chapterRange.last, current.charEnd - 1) - current.charStart
-        if (start <= end) {
-            selectionRange = start..end
-            selectionStartSource = start
-            selectionEndSource = end
-        } else {
-            selectionRange = null
-            selectionStartSource = null
-            selectionEndSource = null
-        }
+        // 口径统一在 pageLocalSelectionSlice：有章区间就只取交集（为空 ⇒ 本页什么都不画）。
+        val slice = pageLocalSelectionSlice(chapterRange, current, null)
+        selectionRange = slice
+        selectionStartSource = slice?.first
+        selectionEndSource = slice?.last
         invalidate()
     }
 
@@ -745,8 +739,7 @@ internal class ContentTextView @JvmOverloads constructor(
                             sourceEnd = column.sourceEnd,
                             lineIndex = lineIndex,
                             columnIndex = columnIndex,
-                            rect = columnRect(line, column),
-                            chapterStartOffset = candidate.charStart
+                            rect = columnRect(line, column)
                         )
                     }
                 }
@@ -950,12 +943,13 @@ internal class ContentTextView @JvmOverloads constructor(
                 )
             }
         }
-        // 跨页选区：这一页只画"本页 ∩ 章节区间"那一段 —— 列是**页内下标**，所以要减 page.charStart。
-        val pageSelection = selectionChapterRange?.let { chapterRange ->
-            val start = maxOf(chapterRange.first, current.charStart) - current.charStart
-            val end = minOf(chapterRange.last, current.charEnd - 1) - current.charStart
-            if (start <= end) start..end else null
-        } ?: selectionRange
+        // 跨页选区：这一页只画"本页 ∩ 章节区间"那一段；交集为空 ⇒ 不画。
+        // （绝不能回退到宿主页的 selectionRange —— 那会让章区间之外的邻页按同下标画出游离高亮。）
+        val pageSelection = pageLocalSelectionSlice(
+            chapterRange = selectionChapterRange,
+            page = current,
+            legacyPageRange = selectionRange
+        )
         current.lines.forEach { line ->
             when (line.layoutMode) {
                 M9LayoutMode.HORIZONTAL -> {
