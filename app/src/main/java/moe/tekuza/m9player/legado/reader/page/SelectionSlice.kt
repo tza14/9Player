@@ -68,26 +68,32 @@ internal fun resolveTextHit(
     y: Float,
     paddingLeft: Float,
     paddingTop: Float,
-    horizontal: Boolean
+    horizontal: Boolean,
+    preferChapterPosition: Int? = null
 ): TextHitPoint? {
-    candidates.forEach { (page, offset) ->
-        val localX = x - paddingLeft - (if (horizontal) offset else 0f)
-        val localY = y - paddingTop - (if (horizontal) 0f else offset)
-        page.lines.forEachIndexed { lineIndex, line ->
-            val inLineBounds = when (line.layoutMode) {
-                M9LayoutMode.HORIZONTAL -> localY >= line.lineTop && localY <= line.lineBottom
-                M9LayoutMode.VERTICAL -> localX >= line.lineTop && localX <= line.lineBottom
-            }
-            if (!inLineBounds) return@forEachIndexed
-            line.columns.forEachIndexed { columnIndex, column ->
-                if (column !is TextColumn) return@forEachIndexed
-                val hit = when (line.layoutMode) {
-                    M9LayoutMode.HORIZONTAL -> localX >= column.start && localX <= column.end
-                    M9LayoutMode.VERTICAL -> localY >= column.start && localY <= column.end
-                }
-                if (hit) return TextHitPoint(page, lineIndex, columnIndex)
+    if (preferChapterPosition == null) {
+        // 无偏好（新建选区/普通命中）：候选顺序即优先级，第一个精确命中就是答案。
+        candidates.forEach { (page, offset) ->
+            exactHitIn(page, offset, x, y, paddingLeft, paddingTop, horizontal)?.let { return it }
+        }
+    } else {
+        // 拖手柄：手指压在**页边界**上时，本页尾字与下页首字会随微抖交替命中，
+        // 端点于是来回跳（真机现象："拖动时一直闪上一页"）。⇒ 多个精确命中时取**离当前端点最近**的。
+        var best: TextHitPoint? = null
+        var bestDistance = Int.MAX_VALUE
+        candidates.forEach { (page, offset) ->
+            val hit = exactHitIn(page, offset, x, y, paddingLeft, paddingTop, horizontal)
+                ?: return@forEach
+            val column = page.lines.getOrNull(hit.lineIndex)?.columns?.getOrNull(hit.columnIndex) as? TextColumn
+                ?: return@forEach
+            val position = page.charStart + column.sourceStart
+            val distance = kotlin.math.abs(position - preferChapterPosition)
+            if (distance < bestDistance) {
+                bestDistance = distance
+                best = hit
             }
         }
+        if (best != null) return best
     }
     val (center, centerOffset) = candidates.firstOrNull() ?: return null
     val localX = x - paddingLeft - (if (horizontal) centerOffset else 0f)
@@ -113,6 +119,36 @@ internal fun resolveTextHit(
         }
     }
     return nearest
+}
+
+/** 某一页里的**精确**命中（点在列的跨度、行带之内）；没有则 null。 */
+private fun exactHitIn(
+    page: TextPage,
+    offset: Float,
+    x: Float,
+    y: Float,
+    paddingLeft: Float,
+    paddingTop: Float,
+    horizontal: Boolean
+): TextHitPoint? {
+    val localX = x - paddingLeft - (if (horizontal) offset else 0f)
+    val localY = y - paddingTop - (if (horizontal) 0f else offset)
+    page.lines.forEachIndexed { lineIndex, line ->
+        val inLineBounds = when (line.layoutMode) {
+            M9LayoutMode.HORIZONTAL -> localY >= line.lineTop && localY <= line.lineBottom
+            M9LayoutMode.VERTICAL -> localX >= line.lineTop && localX <= line.lineBottom
+        }
+        if (!inLineBounds) return@forEachIndexed
+        line.columns.forEachIndexed { columnIndex, column ->
+            if (column !is TextColumn) return@forEachIndexed
+            val hit = when (line.layoutMode) {
+                M9LayoutMode.HORIZONTAL -> localX >= column.start && localX <= column.end
+                M9LayoutMode.VERTICAL -> localY >= column.start && localY <= column.end
+            }
+            if (hit) return TextHitPoint(page, lineIndex, columnIndex)
+        }
+    }
+    return null
 }
 
 /** 点到闭区间的距离（落在区间内为 0）。 */

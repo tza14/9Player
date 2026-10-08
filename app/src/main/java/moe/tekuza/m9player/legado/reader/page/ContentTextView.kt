@@ -612,7 +612,8 @@ internal class ContentTextView @JvmOverloads constructor(
     }
 
     fun updateSelectionStartAt(x: Float, y: Float): Boolean {
-        val hit = findTextHitAt(x, y) ?: return false
+        // 吸附到当前起点：手指压在页边界时不会在本页/上一页之间来回跳。
+        val hit = findTextHitAt(x, y, preferChapterPosition = selectionStartChapter) ?: return false
         // 选区不跨章：命中落到别的章就忽略（章节区间跨章没有意义）。
         if (hit.chapterIndex != selectionChapterIndex) return false
         val hitChapterStart = hit.chapterStartOffset + hit.sourceStart
@@ -630,7 +631,8 @@ internal class ContentTextView @JvmOverloads constructor(
     }
 
     fun updateSelectionEndAt(x: Float, y: Float): Boolean {
-        val hit = findTextHitAt(x, y) ?: return false
+        // 吸附到当前终点：手指压在页边界时不会在本页/下一页之间来回跳（"一直闪上一页"的根因）。
+        val hit = findTextHitAt(x, y, preferChapterPosition = selectionEndChapter) ?: return false
         if (hit.chapterIndex != selectionChapterIndex) return false
         val hitChapterStart = hit.chapterStartOffset + hit.sourceStart
         val hitChapterEnd = hit.chapterStartOffset + hit.sourceEnd - 1
@@ -781,7 +783,7 @@ internal class ContentTextView @JvmOverloads constructor(
         return bounds
     }
 
-    fun findTextHitAt(x: Float, y: Float): TextHit? {
+    fun findTextHitAt(x: Float, y: Float, preferChapterPosition: Int? = null): TextHit? {
         // 取点逻辑全在 resolveTextHit（纯函数、有单测）；这里只负责把结果包成带 rect 的 TextHit。
         val point = resolveTextHit(
             candidates = hitCandidates(),
@@ -789,7 +791,8 @@ internal class ContentTextView @JvmOverloads constructor(
             y = y,
             paddingLeft = paddingLeft.toFloat(),
             paddingTop = paddingTop.toFloat(),
-            horizontal = scrollHorizontal
+            horizontal = scrollHorizontal,
+            preferChapterPosition = preferChapterPosition
         ) ?: return null
         val line = point.page.lines.getOrNull(point.lineIndex) ?: return null
         val column = line.columns.getOrNull(point.columnIndex) as? TextColumn ?: return null

@@ -78,6 +78,35 @@ class TextHitResolveTest {
     }
 
     @Test
+    fun preferPositionSnapsToTheNearerPage() {
+        // 拖手柄时的吸附：两页都能精确命中（手指压在页边界），取离当前端点更近的那个。
+        // 没有它，端点会在本页尾字与下页首字之间随微抖来回跳（真机现象："拖动时一直闪上一页"）。
+        val first = page(100, 200, 0f, 100f, 0f, 30f, sourceStart = 90, sourceEnd = 91) // 位置 190
+        val second = page(200, 300, 0f, 100f, 0f, 30f, sourceStart = 0, sourceEnd = 1)  // 位置 200
+        val candidates = listOf(first to 0f, second to 0f)
+
+        // 当前端点在 200 附近 ⇒ 吸附到 second（尽管 first 在候选顺序里更靠前）
+        assertEquals(
+            second,
+            resolveTextHit(candidates, 10f, 50f, 0f, 0f, horizontal = false, preferChapterPosition = 200)?.page
+        )
+        // 当前端点在 190 附近 ⇒ 吸附回 first
+        assertEquals(
+            first,
+            resolveTextHit(candidates, 10f, 50f, 0f, 0f, horizontal = false, preferChapterPosition = 190)?.page
+        )
+    }
+
+    @Test
+    fun preferPositionDoesNotOverrideAnExactHitOnASinglePage() {
+        val only = page(100, 200, 0f, 100f, 0f, 30f, sourceStart = 10, sourceEnd = 11)
+        val result = resolveTextHit(
+            listOf(only to 0f), 10f, 50f, 0f, 0f, horizontal = false, preferChapterPosition = 99999
+        )
+        assertEquals(only, result?.page)
+    }
+
+    @Test
     fun belowTheLastLineFallsBackToTheNearestColumnOfTheCentrePage() {
         // 手指在页底空白：不许跳到别页，只在中心页里取最近
         val centre = page(100, 200, 0f, 100f, 0f, 30f)
