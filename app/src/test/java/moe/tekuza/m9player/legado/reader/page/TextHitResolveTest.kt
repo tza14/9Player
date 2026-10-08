@@ -80,30 +80,30 @@ class TextHitResolveTest {
     }
 
     @Test
-    fun preferPositionSnapsToTheNearerPage() {
-        // 拖手柄时的吸附：两页都能精确命中（手指压在页边界），取离当前端点更近的那个。
-        // 没有它，端点会在本页尾字与下页首字之间随微抖来回跳（真机现象："拖动时一直闪上一页"）。
+    fun preferForwardPicksTheLaterCandidateAndPreferBackwardTheEarlier() {
+        // 两页行带重叠（手指压在页边界）时的裁决：按**手指移动方向**取更靠后 / 更靠前的那个。
+        // 曾经用"离当前端点最近" —— 那是反馈环：已经停在前一页的终点会把新命中拽回去（终点黏住不动）。
         val first = page(100, 200, 0f, 100f, 0f, 30f, sourceStart = 90, sourceEnd = 91) // 位置 190
         val second = page(200, 300, 0f, 100f, 0f, 30f, sourceStart = 0, sourceEnd = 1)  // 位置 200
         val candidates = listOf(first to 0f, second to 0f)
 
-        // 当前端点在 200 附近 ⇒ 吸附到 second（尽管 first 在候选顺序里更靠前）
+        // 向下拖（preferForward = true）⇒ 取更靠后的 second（尽管 first 在候选顺序里更靠前）
         assertEquals(
             second,
-            resolveTextHit(candidates, 10f, 50f, 0f, 0f, horizontal = false, preferChapterPosition = 200)?.page
+            resolveTextHit(candidates, 10f, 50f, 0f, 0f, horizontal = false, preferForward = true)?.page
         )
-        // 当前端点在 190 附近 ⇒ 吸附回 first
+        // 向上拖（preferForward = false）⇒ 取更靠前的 first
         assertEquals(
             first,
-            resolveTextHit(candidates, 10f, 50f, 0f, 0f, horizontal = false, preferChapterPosition = 190)?.page
+            resolveTextHit(candidates, 10f, 50f, 0f, 0f, horizontal = false, preferForward = false)?.page
         )
     }
 
     @Test
-    fun preferPositionDoesNotOverrideAnExactHitOnASinglePage() {
+    fun preferForwardDoesNotOverrideASingleExactHit() {
         val only = page(100, 200, 0f, 100f, 0f, 30f, sourceStart = 10, sourceEnd = 11)
         val result = resolveTextHit(
-            listOf(only to 0f), 10f, 50f, 0f, 0f, horizontal = false, preferChapterPosition = 99999
+            listOf(only to 0f), 10f, 50f, 0f, 0f, horizontal = false, preferForward = true
         )
         assertEquals(only, result?.page)
     }

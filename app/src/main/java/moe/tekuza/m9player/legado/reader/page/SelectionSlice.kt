@@ -69,32 +69,35 @@ internal fun resolveTextHit(
     paddingLeft: Float,
     paddingTop: Float,
     horizontal: Boolean,
-    preferChapterPosition: Int? = null
+    preferForward: Boolean? = null
 ): TextHitPoint? {
     // 候选**重排**：带区含触点的页排在前面，两段各自保持原顺序。
     // 为什么是重排而不是丢弃：精确命中按定义落在某行内、行必在该页带区内 ⇒ 带区外的页本来就不可能
     // 精确命中；把它们留在后面 ⇒ 与"全量按原序扫"**同一个赢家**（可证），但常见情况下少扫 8 页。
     val ordered = candidatesWithBandFirst(candidates, x, y, paddingLeft, paddingTop)
-    if (preferChapterPosition == null) {
+    if (preferForward == null) {
         // 无偏好（新建选区/普通命中）：候选顺序即优先级，第一个精确命中就是答案。
         ordered.forEach { (page, offset) ->
             exactHitIn(page, offset, x, y, paddingLeft, paddingTop, horizontal)?.let { return it }
         }
     } else {
-        // 拖手柄：手指压在**页边界**上时，本页尾字与下页首字会随微抖交替命中，
-        // 端点于是来回跳（真机现象："拖动时一直闪上一页"）。⇒ 多个精确命中时取**离当前端点最近**的。
+        // 拖手柄且两页同时"精确命中"（行带重叠）时的裁决：**按手指移动方向**取更靠后/更靠前的那个。
+        //
+        // 曾经这里用"离当前端点最近"做裁决 —— 那是反馈环：裁决依据正是它要改的那个值，
+        // 于是已经停在前一页的终点会把每一次新命中都拽回去（真机：向下拖，终点黏在上一页不动）。
         var best: TextHitPoint? = null
-        var bestDistance = Int.MAX_VALUE
+        var bestPosition = 0
         ordered.forEach { (page, offset) ->
             val hit = exactHitIn(page, offset, x, y, paddingLeft, paddingTop, horizontal)
                 ?: return@forEach
             val column = page.lines.getOrNull(hit.lineIndex)?.columns?.getOrNull(hit.columnIndex) as? TextColumn
                 ?: return@forEach
             val position = page.charStart + column.sourceStart
-            val distance = kotlin.math.abs(position - preferChapterPosition)
-            if (distance < bestDistance) {
-                bestDistance = distance
+            val better = best == null ||
+                (if (preferForward) position > bestPosition else position < bestPosition)
+            if (better) {
                 best = hit
+                bestPosition = position
             }
         }
         if (best != null) return best

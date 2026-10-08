@@ -249,6 +249,11 @@ internal class PageView(context: Context) : LinearLayout(context) {
         return contentView.consumePendingSelectionHandleRole()
     }
 
+    /** 手柄拖动开始：清掉方向判定的残留值。 */
+    fun resetHandleDragDirection() {
+        contentView.resetHandleDragDirection()
+    }
+
     fun selectionBounds(): ContentTextView.SelectionBounds? {
         val bounds = contentView.selectionBounds() ?: return null
         val contentLeft = contentView.left.toFloat()

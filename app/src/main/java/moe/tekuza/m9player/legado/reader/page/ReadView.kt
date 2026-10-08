@@ -548,6 +548,8 @@ internal class ReadView @JvmOverloads constructor(
                 longPressTriggered = false
                 activeSelectionHandle = selectionHandleAt(event.x, event.y)
                 if (activeSelectionHandle != SelectionHandle.NONE) {
+                    // 方向裁决要用干净的起点：残留的上一次 y 会把第一次移动判成反方向。
+                    pageView.resetHandleDragDirection()
                     hideSelectionMenu()
                     return true
                 }
