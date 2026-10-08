@@ -8129,7 +8129,11 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
     ) {
         val currentPlayer = player ?: return
         if (currentSharedReaderPlaybackKey() == null) return
-        val durationMs = currentAudioDurationMs() ?: pendingAudioRestoreDurationMs
+        // 存档要的是**整轨**时长：本地这套在裁剪态会退回窗口终点（clip.second）⇒ 会把"本页窗口"
+        // 当成整本书写盘，主页进度条/恢复就都按窗口算。统一走共享会话的口径（0 = 未知）。
+        val durationMs = BookReaderPlaybackSession.currentFullDurationMs()
+            .takeIf { it > 0L }
+            ?: pendingAudioRestoreDurationMs
         if (durationMs <= 0L) {
             return
         }
