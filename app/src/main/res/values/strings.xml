@@ -178,6 +178,7 @@
     <string name="dictionary_import_stage_import">导入辞典，可能需要几分钟</string>
     <string name="dictionary_import_stage_finalize">整理辞典</string>
     <string name="reader_no_next_page">已经是最后一页</string>
+    <string name="reader_page_loading">排版中…</string>
     <string name="reader_no_prev_page">已经是第一页</string>
     <string name="dictionary_import_stage_done">完成</string>
     <string name="dictionary_display_settings">显示设置</string>

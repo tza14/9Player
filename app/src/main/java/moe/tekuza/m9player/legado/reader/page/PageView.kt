@@ -212,6 +212,13 @@ internal class PageView(context: Context) : LinearLayout(context) {
 
     fun selectedText(): String = contentView.selectedText()
 
+    /** 占位页中央的一行提示（转发到内容视图）。 */
+    var placeholderMessage: String?
+        get() = contentView.placeholderMessage
+        set(value) {
+            contentView.placeholderMessage = value
+        }
+
     /** 章节原文提供者（跨页选区取整句用），转发到内容视图。 */
     var chapterTextProvider: ((Int) -> String?)?
         get() = contentView.chapterTextProvider

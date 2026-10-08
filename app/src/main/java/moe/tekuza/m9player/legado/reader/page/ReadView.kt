@@ -105,6 +105,13 @@ internal class ReadView @JvmOverloads constructor(
     var onImageClick: ((EbookImageRef) -> Unit)? = null
     var onPagePreview: ((Int) -> TextPage?)? = null
 
+    /** 占位页中央的一行提示（转发到 PageView）。 */
+    var placeholderMessage: String?
+        get() = pageView.placeholderMessage
+        set(value) {
+            pageView.placeholderMessage = value
+        }
+
     /** 章节原文提供者（跨页选区取整句用），转发到 PageView。 */
     var chapterTextProvider: ((Int) -> String?)?
         get() = pageView.chapterTextProvider

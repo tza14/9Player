@@ -623,6 +623,17 @@ internal class ContentTextView @JvmOverloads constructor(
      */
     var chapterTextProvider: ((Int) -> String?)? = null
 
+    /**
+     * 占位页中央的一行提示（例如"排版中…"）。为空时占位页就是空白 —— 那是 legado 标题占位页的
+     * 原样行为；设置了就照 legado 的"加载消息页"那样显示一行居中文字，免得用户看到白屏。
+     */
+    var placeholderMessage: String? = null
+
+    /** 画占位页提示用：尺寸/颜色取自视图自身（textSizePxValue / currentTextColor），不依赖主题字段。 */
+    private val placeholderPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+        textAlign = android.graphics.Paint.Align.CENTER
+    }
+
     fun selectedText(): String {
         // 章节坐标选区优先：直接取章节原文的子串 ⇒ 跨页选中拿到的就是完整一句。
         val chapterRange = selectionChapterRange
@@ -929,6 +940,21 @@ internal class ContentTextView @JvmOverloads constructor(
     ) {
         canvas.save()
         canvas.translate(offsetX, offsetY)
+        // 占位页（邻章还没排好）：画一行居中提示，别让用户看到白屏（照 legado 的加载消息页）。
+        if (current.isPlaceholder) {
+            placeholderMessage?.let { message ->
+                placeholderPaint.textSize = textSizePxValue
+                // 本视图继承 View（没有 currentTextColor），正文颜色由各行自带画笔决定 ⇒ 提示用中性灰。
+                // 待办：让宿主把阅读正文色传进来，跟随主题/夜间模式。
+                placeholderPaint.color = 0xFF808080.toInt()
+                canvas.drawText(
+                    message,
+                    (width - paddingLeft - paddingRight) / 2f,
+                    (height - paddingTop - paddingBottom) / 2f,
+                    placeholderPaint
+                )
+            }
+        }
         // 跨页选区：这一页只画"本页 ∩ 章节区间"的那一段（页内区间只覆盖当前页）。
         val pageSelection = selectionChapterRange?.let { chapterRange ->
             val start = maxOf(chapterRange.first, current.charStart) - current.charStart

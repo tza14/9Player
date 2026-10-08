@@ -3344,15 +3344,15 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
     }
 
     /**
-     * 邻章未就绪时的占位页：只有章名、没有正文行（画出来是一页空白）。
-     * 带 isPlaceholder 标记，命中/选区/进度都不认它；被锁的章仍走 D-3 的提示，不造占位页。
-     */
-    /**
      * 邻章未就绪时的占位页：**空白页**（照 legado —— 它的 `TextPage(title=…)` 里 `text` 为空，
      * `format()` 排版的是 text 所以一行都不画）。带 `isPlaceholder` 标记：命中/选区显式排除它，
      * 免得将来给它加内容时"没有 lines 所以命中不到"这条隐式规则失效。
+     * 绘制时若设置了 placeholderMessage，则照 legado 的"加载消息页"在中央显示一行提示。
      */
-    private fun placeholderPage(chapterIndex: Int, loaded: EbookDocument): TextPage = TextPage(
+    private fun placeholderPage(chapterIndex: Int, loaded: EbookDocument): TextPage {
+        // 顺手把提示交给视图：占位页不再是白屏（照 legado 的"加载消息页"）。幂等，重复设置无副作用。
+        readView.placeholderMessage = getString(R.string.reader_page_loading)
+        return TextPage(
         index = 0,
         text = "",
         title = loaded.chapters.getOrNull(chapterIndex)?.title.orEmpty(),
@@ -3365,7 +3365,8 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         charStart = 0,
         charEnd = 0,
         isPlaceholder = true
-    )
+        )
+    }
 
     private fun pagePreviewForDelta(delta: Int): TextPage? =
         when (val preview = resolvePagePreview(delta)) {
