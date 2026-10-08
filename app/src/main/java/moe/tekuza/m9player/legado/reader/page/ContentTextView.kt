@@ -533,19 +533,12 @@ internal class ContentTextView @JvmOverloads constructor(
      */
     private fun syncPageLocalSelection() {
         val chapterRange = selectionChapterRange ?: return
-        val current = page ?: return
-        // 区间是章节下标，列的下标也是章节下标 ⇒ 这里只把它**裁剪到当前页**，不减去 charStart。
-        val start = maxOf(chapterRange.first, current.charStart)
-        val end = minOf(chapterRange.last, current.charEnd - 1)
-        if (start <= end) {
-            selectionRange = start..end
-            selectionStartSource = start
-            selectionEndSource = end
-        } else {
-            selectionRange = null
-            selectionStartSource = null
-            selectionEndSource = null
-        }
+        // 列的下标就是章节下标 ⇒ 区间可直接用于命中/高亮，**不做换算、也不需要按页裁剪**：
+        // 每页绘制时由各行按"列是否与区间相交"自行过滤。之前用 page.charStart/charEnd 裁剪，
+        // 一旦这两个值与列口径不一致就会把区间裁空 ⇒ 高亮消失、手柄跑到屏幕边缘。
+        selectionRange = chapterRange
+        selectionStartSource = chapterRange.first
+        selectionEndSource = chapterRange.last
         invalidate()
     }
 
@@ -691,26 +684,9 @@ internal class ContentTextView @JvmOverloads constructor(
     }
 
     fun selectionBounds(): SelectionBounds? {
-        val chapterRange = selectionChapterRange
-        val currentPage = page
-        // 只有**真的跨页**时才走章节坐标端点。单页选区一律沿用页内端点（那条路径长期验证过；
-        // 实测章节坐标在单页情形下会把两个端点分别解析到相邻行 ⇒ 手柄上下各差一行）。
-        val spansPages = chapterRange != null && currentPage != null &&
-            (chapterRange.first < currentPage.charStart || chapterRange.last >= currentPage.charEnd)
-        if (chapterRange != null && spansPages) {
-            val start = chapterPositionRect(chapterRange.first)
-            val end = chapterPositionRect(chapterRange.last) ?: start
-            // 两端都在绘制上下文里 ⇒ 手柄贴真实端点页。
-            if (start != null && end != null) {
-                return SelectionBounds(
-                    startRect = start.first,
-                    endRect = end.first,
-                    startLineTop = start.second
-                )
-            }
-            // 端点页已被滚出上下文（视图坐标只对上下文内的页有意义）：退回"当前页那一段"的端点，
-            // 手柄宁可位置不精确也不能凭空消失 —— 章节坐标仍然精确，滚回去就重新贴回真实端点。
-        }
+        // 端点定位统一走"页内端点"这条路：selectionRange 与列下标同为章节下标，口径自洽。
+        // 跨页时两个端点都夹在当前页——手柄不会凭空消失，只是贴不到隔壁页的真实端点
+        //（视图坐标本来就只对绘制上下文内的页有意义）。
         val range = selectionRange ?: return null
         val startSource = selectionStartSource ?: range.first
         val endSource = selectionEndSource ?: range.last
@@ -967,12 +943,9 @@ internal class ContentTextView @JvmOverloads constructor(
                 )
             }
         }
-        // 跨页选区：这一页只画"本页 ∩ 章节区间"的那一段（区间与列下标都是章节下标，只做裁剪）。
-        val pageSelection = selectionChapterRange?.let { chapterRange ->
-            val start = maxOf(chapterRange.first, current.charStart)
-            val end = minOf(chapterRange.last, current.charEnd - 1)
-            if (start <= end) start..end else null
-        } ?: selectionRange
+        // 跨页选区：直接把章节区间交给各行 —— 每行的列会自己按"与区间相交"过滤，
+        // 所以这里不需要（也不能）用 page.charStart/charEnd 裁剪。
+        val pageSelection = selectionChapterRange ?: selectionRange
         current.lines.forEach { line ->
             when (line.layoutMode) {
                 M9LayoutMode.HORIZONTAL -> {
