@@ -560,6 +560,9 @@ internal class ContentTextView @JvmOverloads constructor(
         val end = positionAt(to) ?: start
         selectStart = start
         selectEnd = end
+        // 状态变了就必须重绘：旧的 syncPageLocalSelection() 末尾有一句 invalidate()，
+        // 删掉它时把重绘也一起删了 —— 症状就是"手柄跟着动、高亮冻在第一次"。
+        invalidate()
         // 诊断（限流 500ms —— 拖动手柄时这里每帧都会跑到，不限流会刷屏）。
         val nowMs = System.currentTimeMillis()
         if (nowMs - lastSelectionLogAtMs >= 500L) {
@@ -645,6 +648,7 @@ internal class ContentTextView @JvmOverloads constructor(
             selectEnd = hitPosition
             pendingSelectionHandleRole = SelectionHandleRole.END
         }
+        invalidate()
         return true
     }
 
@@ -664,6 +668,7 @@ internal class ContentTextView @JvmOverloads constructor(
             selectStart = hitPosition
             pendingSelectionHandleRole = SelectionHandleRole.START
         }
+        invalidate()
         return true
     }
 
