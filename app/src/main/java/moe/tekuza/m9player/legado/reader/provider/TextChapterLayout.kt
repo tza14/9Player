@@ -431,8 +431,12 @@ internal class TextChapterLayout(
         if (lines.size <= 1) return
         val lastBottom = lines.last().lineBottom
         val extra = availableHeight - lastBottom
-        if (extra <= lineHeight) return
-        val gap = (extra / (lines.size - 1)).coerceAtMost(lineHeight * 0.45f)
+        // 门判照 legado 的 TextPage.upLinesPosition()：**只有剩余空间不足一行**时才撑开行距
+        //（此时页底会露出一条细缝，摊到行间更好看）；剩余 ≥ 一行 ⇒ 什么都不做，留白留在页底。
+        // 我们原来写反了（只在空间不足一行时跳过）⇒ 等于把大段留白摊进行距，页内行距被撑大，
+        // 而跨页处永远是自然间距 ⇒ 页内与跨页看起来不一致（用户截图 1 即此）。
+        if (extra >= lineHeight) return
+        val gap = extra / (lines.size - 1)
         var offset = 0f
         lines.forEachIndexed { index, line ->
             line.lineTop += offset
