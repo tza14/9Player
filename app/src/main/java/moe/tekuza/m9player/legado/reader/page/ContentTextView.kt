@@ -174,9 +174,6 @@ internal class ContentTextView @JvmOverloads constructor(
 
     /** 坐标漂移守卫自己的时间戳：与跨度日志共用会让守卫恒不可达（那条日志先跑并刷新它）。 */
     private var lastDriftLogAtMs: Long = 0L
-
-    /** "每页画了什么高亮"诊断日志的时间戳（自己在消费点，不再与别的日志共用）。 */
-    private var lastDrawLogAtMs: Long = 0L
     private var scrollHorizontal: Boolean = false
     private var scrollReverse: Boolean = false
     val textSizePx: Float get() = textSizePxValue
@@ -943,11 +940,9 @@ internal class ContentTextView @JvmOverloads constructor(
             page = current,
             legacyPageRange = selectionRange
         )
-        // 诊断（限流 500ms）：把"这一页实际画了什么"打在消费点。区分两类灰底：
-        //   slice  = 选区那一段；cue = 朗读/句级高亮（highlightRange，只有中心页非空）。
-        val nowMs = System.currentTimeMillis()
-        if (nowMs - lastDrawLogAtMs >= 500L) {
-            lastDrawLogAtMs = nowMs
+        // 诊断：只打**真的有内容**的页（有切片、或带 cue 高亮）。
+        // 不能按"每 500ms 打第一页"——drawPageLines 是按上下文顺序逐页调用的，那样永远只打最上面那页。
+        if (pageSelection != null || highlight != null) {
             logDebug("M9Selection") {
                 "drawPage pageInChapter=${current.pageInChapter} charStart=${current.charStart} " +
                     "charEnd=${current.charEnd} slice=$pageSelection cue=${highlight != null} " +
