@@ -27,3 +27,15 @@ internal fun pageLocalSelectionSlice(
     // end >= 0：排除"页完全在区间之前"这种退化情况（charEnd <= charStart 的空页）。
     return if (start <= end && end >= 0) start..end else null
 }
+
+/**
+ * 章节位置落在页表里的哪一页（端点解析用）。
+ *
+ * 端点必须**自带页身份**（legado 的 TextPos(relativePagePos, …) 就是这个意思）：
+ * 拿"当前页"去解析另一个端点，跨页选区时必然失败 —— 真机症状就是"拖到下一页后手柄消失"
+ *（selectionBounds 返回 null ⇒ ReadView 把两个手柄设为 GONE）。
+ */
+internal fun pageForChapterPosition(pages: List<TextPage?>, chapterPosition: Int): TextPage? =
+    pages.firstOrNull { page ->
+        page != null && chapterPosition >= page.charStart && chapterPosition < page.charEnd
+    }

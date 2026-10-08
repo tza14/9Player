@@ -704,9 +704,25 @@ internal class ContentTextView @JvmOverloads constructor(
     fun selectedChapterIndex(): Int? = selectionChapterIndex.takeIf { it >= 0 }
 
     fun selectionBounds(): SelectionBounds? {
-        // 端点定位统一走"页内端点"这条路：selectionRange 与列下标同为章节下标，口径自洽。
-        // 跨页时两个端点都夹在当前页——手柄不会凭空消失，只是贴不到隔壁页的真实端点
-        //（视图坐标本来就只对绘制上下文内的页有意义）。
+        // 端点**自带页身份**（照 legado 的 TextPos）：跨页选区时起点/终点可能不在"当前页"上，
+        // 拿当前页解析另一个端点必然失败 ⇒ 手柄被隐藏（真机症状："拖到下一页后手柄消失"）。
+        val chapterRange = selectionChapterRange
+        if (chapterRange != null) {
+            val contextPages = if (scrollPages.isNotEmpty()) scrollPages else listOf(page)
+            val startPage = pageForChapterPosition(contextPages, chapterRange.first)
+            val endPage = pageForChapterPosition(contextPages, chapterRange.last) ?: startPage
+            val start = endpointAnchorFor(startPage, chapterRange.first, preferStart = true)
+            val end = endpointAnchorFor(endPage, chapterRange.last, preferStart = false) ?: start
+            if (start != null && end != null) {
+                return SelectionBounds(
+                    startRect = start.rect,
+                    endRect = end.rect,
+                    startLineTop = start.lineTop
+                )
+            }
+            // 端点页不在绘制上下文里（滚走了）⇒ 退回下面"当前页那一段"的端点：
+            // 手柄宁可位置不精确，也不能凭空消失。
+        }
         val range = selectionRange ?: return null
         val startSource = selectionStartSource ?: range.first
         val endSource = selectionEndSource ?: range.last
@@ -717,6 +733,33 @@ internal class ContentTextView @JvmOverloads constructor(
             endRect = end.rect,
             startLineTop = start.lineTop
         )
+    }
+
+    /**
+     * 章节位置在**指定页**上的锚点（列矩形 + 起始行顶），用该页自己的滚动偏移算。
+     * 端点解析靠它：每个端点用自己所在的那一页，而不是"当前页"。
+     */
+    private fun endpointAnchorFor(
+        target: TextPage?,
+        chapterPosition: Int,
+        preferStart: Boolean
+    ): SelectionColumnAnchor? {
+        val current = target ?: return null
+        val local = chapterPosition - current.charStart
+        val offset = offsetForPage(current)
+        current.lines.forEach { line ->
+            line.columns.filterIsInstance<TextColumn>().forEach { column ->
+                val contains = local >= column.sourceStart && local < column.sourceEnd
+                val hit = if (preferStart) contains else contains || column.sourceEnd == local + 1
+                if (hit) {
+                    return SelectionColumnAnchor(
+                        rect = columnRectWithOffset(line, column, offset),
+                        lineTop = line.lineTop + paddingTop + (if (scrollHorizontal) 0f else offset)
+                    )
+                }
+            }
+        }
+        return null
     }
 
     fun rangeBounds(range: IntRange): RectF? {
@@ -874,8 +917,12 @@ internal class ContentTextView @JvmOverloads constructor(
         return null
     }
 
-    private fun findColumnAnchor(source: Int, preferStart: Boolean): SelectionColumnAnchor? {
-        val current = page ?: return null
+    private fun findColumnAnchor(
+        source: Int,
+        preferStart: Boolean,
+        target: TextPage? = page
+    ): SelectionColumnAnchor? {
+        val current = target ?: return null
         val range = selectionRange
         current.lines.forEach { line ->
             line.columns.filterIsInstance<TextColumn>().forEach { column ->
@@ -887,9 +934,9 @@ internal class ContentTextView @JvmOverloads constructor(
                 }
                 if (hit) {
                     return SelectionColumnAnchor(
-                        rect = columnRect(line, column),
+                        rect = columnRectWithOffset(line, column, offsetForPage(current)),
                         // 菜单/手柄的锚点同样要带滚动偏移，否则滚动出余量后菜单会整体下移一截。
-                        lineTop = viewY(line.lineTop)
+                        lineTop = line.lineTop + paddingTop + (if (scrollHorizontal) 0f else offsetForPage(current))
                     )
                 }
             }
