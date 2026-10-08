@@ -188,14 +188,6 @@ internal class ContentTextView @JvmOverloads constructor(
     /** "一次取点耗时"日志的时间戳（自己的，不与上面那条共用 ⇒ 免得互相顶掉）。 */
     private var lastHitCostLogAtMs: Long = 0L
 
-    /** 上一次手柄拖动的 y（只用于判断手指往哪个方向走；与端点无关 ⇒ 不会形成反馈环）。 */
-    private var lastHandleDragY: Float? = null
-
-    /** 新手势开始：清掉上一次拖动留下的 y（否则第一次移动的方向会按上次的残留算错）。 */
-    fun resetHandleDragDirection() {
-        lastHandleDragY = null
-    }
-
     /** 手柄拖动时的几何诊断时间戳（自己一份 ⇒ 不会与别的日志互相顶掉）。 */
     private var lastGeometryLogAtMs: Long = 0L
 
@@ -226,17 +218,9 @@ internal class ContentTextView @JvmOverloads constructor(
     }
 
     /**
-     * 手指是否在**向下**移动（滑动轴为纵轴时看 y；横排竖读模式下也走同一轴）。
-     * 首次移动（没有上一次位置）返回 null ⇒ 不做方向裁决，按候选顺序取第一个。
+     * 手指是否在**向下**移动 —— **已删除**：槽位归属唯一之后没有平局可裁（见 `resolveTextHit` 的 KDoc）。
+     * 保留这段说明只为避免以后有人再把"方向裁决"当需求加回来。
      */
-    private fun dragDirectionDown(y: Float): Boolean? {
-        val previous = lastHandleDragY
-        lastHandleDragY = y
-        if (previous == null) return null
-        val delta = y - previous
-        if (kotlin.math.abs(delta) < 0.5f) return null
-        return delta > 0f
-    }
     private var pendingSelectionHandleRole: SelectionHandleRole? = null
     private var highlightRange: IntRange? = null
     private var searchRange: IntRange? = null
@@ -502,11 +486,7 @@ internal class ContentTextView @JvmOverloads constructor(
     private fun viewY(y: Float): Float = y + paddingTop + (if (scrollHorizontal) 0f else offsetForPage(page))
 
     fun findImageAt(x: Float, y: Float): EbookImageRef? {
-        // 候选按"带区含触点"重排（结果不变，常见情况下少扫 8 页）：见 candidatesWithBandFirst 的证明。
-        val candidates = candidatesWithBandFirst(
-            hitCandidates(), x, y, paddingLeft.toFloat(), paddingTop.toFloat()
-        )
-        for ((candidate, offset) in candidates) {
+        for ((candidate, offset) in hitCandidates()) {
             val localX = x - paddingLeft - (if (scrollHorizontal) offset else 0f)
             val localY = y - paddingTop - (if (scrollHorizontal) 0f else offset)
             candidate.lines.forEach { line ->
@@ -533,11 +513,7 @@ internal class ContentTextView @JvmOverloads constructor(
     }
 
     fun findAssistTokenAt(x: Float, y: Float): AssistToken? {
-        // 同上：重排而非丢弃 ⇒ 同一个赢家，常见情况下少扫 8 页。
-        val candidates = candidatesWithBandFirst(
-            hitCandidates(), x, y, paddingLeft.toFloat(), paddingTop.toFloat()
-        )
-        for ((candidate, offset) in candidates) {
+        for ((candidate, offset) in hitCandidates()) {
             val localX = x - paddingLeft - (if (scrollHorizontal) offset else 0f)
             val localY = y - paddingTop - (if (scrollHorizontal) 0f else offset)
             candidate.lines.forEachIndexed { lineIndex, line ->
@@ -689,8 +665,8 @@ internal class ContentTextView @JvmOverloads constructor(
     }
 
     fun updateSelectionStartAt(x: Float, y: Float): Boolean {
-        // 平局（两页行带重叠）时按**手指移动方向**裁决：向下取更靠后的字，向上取更靠前的字。
-        val hit = findTextHitAt(x, y, preferForward = dragDirectionDown(y)) ?: return false
+        // 平局不需要裁决：一个触点只属于一页（resolveTextHit 先按槽位定页）。
+        val hit = findTextHitAt(x, y) ?: return false
         logHandleDragGeometry(x, y)
         val hitPage = hit.page ?: return false
         val end = selectEnd ?: return false
@@ -713,8 +689,7 @@ internal class ContentTextView @JvmOverloads constructor(
     }
 
     fun updateSelectionEndAt(x: Float, y: Float): Boolean {
-        // 同上：按手指移动方向裁决，不参照端点（那会构成反馈环 ⇒ 终点黏在上一页）。
-        val hit = findTextHitAt(x, y, preferForward = dragDirectionDown(y)) ?: return false
+        val hit = findTextHitAt(x, y) ?: return false
         logHandleDragGeometry(x, y)
         val hitPage = hit.page ?: return false
         val start = selectStart ?: return false
@@ -868,7 +843,7 @@ internal class ContentTextView @JvmOverloads constructor(
         return bounds
     }
 
-    fun findTextHitAt(x: Float, y: Float, preferForward: Boolean? = null): TextHit? {
+    fun findTextHitAt(x: Float, y: Float): TextHit? {
         // 取点逻辑全在 resolveTextHit（纯函数、有单测）；这里只负责把结果包成带 rect 的 TextHit。
         val candidates = hitCandidates()
         val startedAtNs = System.nanoTime()
@@ -878,8 +853,7 @@ internal class ContentTextView @JvmOverloads constructor(
             y = y,
             paddingLeft = paddingLeft.toFloat(),
             paddingTop = paddingTop.toFloat(),
-            horizontal = scrollHorizontal,
-            preferForward = preferForward
+            horizontal = scrollHorizontal
         ) ?: return null
         // 诊断（限流 500ms）：一次取点扫了几页、耗时多少微秒 —— 用来判断"收窄候选"这类优化值不值得。
         val nowMs = System.currentTimeMillis()

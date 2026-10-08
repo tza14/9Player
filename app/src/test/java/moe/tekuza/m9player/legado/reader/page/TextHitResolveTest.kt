@@ -5,17 +5,15 @@ import moe.tekuza.m9player.legado.reader.entities.TextColumn
 import moe.tekuza.m9player.legado.reader.entities.TextLine
 import moe.tekuza.m9player.legado.reader.entities.TextPage
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
  * 命中取点的规则守卫（纯 JVM，不需要 android.*）。
  *
- * 这些规则是拿真机日志换来的：以前命中会改写"当前页"，于是下一次命中依赖上一次 ⇒
- * 页边界处 `hostPage` 在 19/20 之间交替，配合端点交换把选区来回翻转。现在取点是纯函数，
- * 顺序（= 候选页优先级）与兜底范围都被这里钉住。
+ * 规则只剩三步（照 legado 的 `touch()`）：**先按槽位定页 → 在这一页里找精确命中 → 都没中就取该页最近的字**。
+ * 这里把每一步的判据钉住，尤其是"槽位定页"——它是真机 `geomDrag` 数据证实过的唯一归属依据
+ *（各页 offset 逐位自洽：off_{n+1} = off_n + span_n），也是删掉 snap / 方向裁决那两套补丁的前提。
  */
 class TextHitResolveTest {
 
@@ -53,59 +51,30 @@ class TextHitResolveTest {
         resolveTextHit(candidates, x, y, paddingLeft = 0f, paddingTop = 0f, horizontal = false)
 
     @Test
-    fun exactHitOnTheCentrePageWins() {
-        // charStart 只是标记，用来确认命中的是哪一页
-        val centre = page(100, 200, 0f, 50f, 0f, 30f)
-        val result = hit(listOf(centre to 0f), x = 10f, y = 20f)
-        assertEquals(centre, result?.page)
+    fun exactHitOnTheOwningPageWins() {
+        val owner = page(100, 200, 0f, 50f, 0f, 30f)
+        val result = hit(listOf(owner to 0f), x = 10f, y = 20f)
+        assertEquals(owner, result?.page)
         assertEquals(0, result?.columnIndex)
     }
 
     @Test
-    fun exactHitOnANeighbourPageIsFound() {
-        // 中心页这一行在 y=0..50，邻页在 y=200..250 ⇒ y=220 必须落到邻页（跨页拖手柄靠它）
+    fun thePageWhoseSlotContainsTheTouchOwnsIt() {
+        // 槽位：中心页 [0, 1836)，下一页 [1836, …)。触点 y=1900 ⇒ 属于下一页。
         val centre = page(100, 200, 0f, 50f, 0f, 30f)
-        val neighbour = page(200, 300, 200f, 250f, 0f, 30f)
-        val result = hit(listOf(centre to 0f, neighbour to 0f), x = 10f, y = 220f)
-        assertEquals(neighbour, result?.page)
+        val next = page(200, 300, 0f, 50f, 0f, 30f)
+        val result = hit(listOf(centre to 0f, next to 1836f), x = 10f, y = 1900f)
+        assertEquals(next, result?.page)
     }
 
     @Test
-    fun overlappingBandsBelongToTheFirstCandidate() {
-        // 页带区重叠（同一 y 两页都能精确命中）⇒ 归候选顺序里最靠前的那页 —— 顺序即优先级，可预测
-        val first = page(100, 200, 0f, 100f, 0f, 30f)
-        val second = page(200, 300, 0f, 100f, 0f, 30f)
-        val result = hit(listOf(first to 0f, second to 0f), x = 10f, y = 50f)
-        assertEquals(first, result?.page)
-    }
-
-    @Test
-    fun preferForwardPicksTheLaterCandidateAndPreferBackwardTheEarlier() {
-        // 两页行带重叠（手指压在页边界）时的裁决：按**手指移动方向**取更靠后 / 更靠前的那个。
-        // 曾经用"离当前端点最近" —— 那是反馈环：已经停在前一页的终点会把新命中拽回去（终点黏住不动）。
-        val first = page(100, 200, 0f, 100f, 0f, 30f, sourceStart = 90, sourceEnd = 91) // 位置 190
-        val second = page(200, 300, 0f, 100f, 0f, 30f, sourceStart = 0, sourceEnd = 1)  // 位置 200
-        val candidates = listOf(first to 0f, second to 0f)
-
-        // 向下拖（preferForward = true）⇒ 取更靠后的 second（尽管 first 在候选顺序里更靠前）
-        assertEquals(
-            second,
-            resolveTextHit(candidates, 10f, 50f, 0f, 0f, horizontal = false, preferForward = true)?.page
-        )
-        // 向上拖（preferForward = false）⇒ 取更靠前的 first
-        assertEquals(
-            first,
-            resolveTextHit(candidates, 10f, 50f, 0f, 0f, horizontal = false, preferForward = false)?.page
-        )
-    }
-
-    @Test
-    fun preferForwardDoesNotOverrideASingleExactHit() {
-        val only = page(100, 200, 0f, 100f, 0f, 30f, sourceStart = 10, sourceEnd = 11)
-        val result = resolveTextHit(
-            listOf(only to 0f), 10f, 50f, 0f, 0f, horizontal = false, preferForward = true
-        )
-        assertEquals(only, result?.page)
+    fun aTouchInsideTheOwningSlotHitsEvenIfTheCentrePageAlsoHasTextThere() {
+        // 中心页的行带是屏幕坐标 0..50（offset 0）；下一页在 1836 之后。
+        // 触点 1856 只属于下一页 ⇒ 命中必须落在下一页，哪怕中心页"看起来"也在附近。
+        val centre = page(100, 200, 0f, 50f, 0f, 30f)
+        val next = page(200, 300, 0f, 50f, 0f, 30f)
+        val result = hit(listOf(centre to 0f, next to 1836f), x = 10f, y = 1856f)
+        assertEquals(next, result?.page)
     }
 
     @Test
@@ -127,92 +96,15 @@ class TextHitResolveTest {
     }
 
     @Test
-    fun betweenLinesAlsoStaysOnTheCentrePage() {
+    fun betweenLinesAlsoStaysOnTheOwningPage() {
         val centre = page(100, 200, 0f, 50f, 0f, 30f)
         val result = hit(listOf(centre to 0f), x = 10f, y = 70f)
         assertEquals(centre, result?.page)
     }
 
     @Test
-    fun candidateOffsetShiftsTheBand() {
-        // 候选页带自己的滚动偏移：同一屏幕位置在不同偏移下命中不同行
-        val shifted = page(100, 200, 300f, 350f, 0f, 30f)
-        // 偏移 -300 ⇒ 屏幕 y=20 对应内容 y=320 ⇒ 落在 300..350 内
-        val result = hit(listOf(shifted to -300f), x = 10f, y = 20f)
-        assertEquals(shifted, result?.page)
-    }
-
-    @Test
     fun emptyCandidatesGiveNull() {
         assertNull(hit(emptyList(), x = 10f, y = 10f))
-    }
-
-    @Test
-    fun bandFilterNeverChangesAnExactHit() {
-        // 收窄候选只省扫描量：精确命中按定义落在某一行内，而行必然在该页带区内。
-        // 触点落在**行间空隙**（带区内、行外）时，仍然由"中心页取最近"兜住。
-        val centre = page(100, 200, 0f, 100f, 0f, 30f)
-        val result = hit(listOf(centre to 0f), x = 10f, y = 150f) // 行外、带区外 ⇒ 回退全量
-        assertEquals(centre, result?.page)
-    }
-
-    @Test
-    fun bandFilterFallsBackToTheWholeListWhenNothingContainsThePoint() {
-        // 邻页被自己的偏移推到很远（触点在它带区外）⇒ 它不该参与，但中心页必须仍能给出结果
-        val centre = page(100, 200, 0f, 100f, 0f, 30f)
-        val far = page(200, 300, 0f, 100f, 0f, 30f)
-        val result = hit(listOf(centre to 0f, far to -100000f), x = 10f, y = 900f)
-        assertEquals(centre, result?.page)
-    }
-
-    @Test
-    fun isWithinPageBandChecksTheScrollAxisWithOneLineTolerance() {
-        val target = page(100, 200, 0f, 100f, 0f, 30f)
-        // 带区内
-        assertTrue(isWithinPageBand(target, 0f, 10f, 50f, 0f, 0f))
-        // 超出一行高的容差 ⇒ 不算这一页（曾经轴判写反，y=1000 也判"在内"）
-        assertFalse(isWithinPageBand(target, 0f, 10f, 1000f, 0f, 0f))
-        // 邻页在 y=200..250：触点 220 只属于邻页，中心页（0..50）必须被滤掉
-        val centre = page(100, 200, 0f, 50f, 0f, 30f)
-        val neighbour = page(200, 300, 200f, 250f, 0f, 30f)
-        assertFalse(isWithinPageBand(centre, 0f, 10f, 220f, 0f, 0f))
-        assertTrue(isWithinPageBand(neighbour, 0f, 10f, 220f, 0f, 0f))
-        // 超出带区但在一行高的容差内 ⇒ 仍算这一页（手指略微越过页底不应丢命中）
-        assertTrue(isWithinPageBand(target, 0f, 10f, 180f, 0f, 0f))
-    }
-
-    @Test
-    fun candidatesWithBandFirstReordersWithoutDropping() {
-        // 手指在中心页（带区 0..50）之外的 y=220 上：邻页（200..250）应被提到前面，
-        // 但**两页都必须在列表里**（不是丢弃）—— 否则带区判定一旦有误就会丢命中。
-        val centre = page(100, 200, 0f, 50f, 0f, 30f)
-        val neighbour = page(200, 300, 200f, 250f, 0f, 30f)
-        val reordered = candidatesWithBandFirst(
-            listOf(centre to 0f, neighbour to 0f), 10f, 220f, 0f, 0f
-        )
-        assertEquals(2, reordered.size)
-        assertEquals(neighbour, reordered[0].first)
-        assertEquals(centre, reordered[1].first)
-    }
-
-    @Test
-    fun candidatesWithBandFirstKeepsTheOriginalListWhenOneSideIsEmpty() {
-        // 所有候选都在带区内（或都不在）⇒ 原样返回，零风险路径
-        val centre = page(100, 200, 0f, 50f, 0f, 30f)
-        val other = page(200, 300, 0f, 50f, 0f, 30f)
-        val same = listOf(centre to 0f, other to 0f)
-        assertEquals(same, candidatesWithBandFirst(same, 10f, 20f, 0f, 0f))
-        val far = listOf(centre to 0f, other to -100000f)
-        assertEquals(far, candidatesWithBandFirst(far, 10f, 9999f, 0f, 0f))
-    }
-
-    @Test
-    fun reorderingDoesNotChangeTheWinner() {
-        // 带区外的页不可能精确命中 ⇒ 重排前后的赢家相同（用邻页能精确命中、中心页不能的构造验证）
-        val centre = page(100, 200, 0f, 50f, 0f, 30f)
-        val neighbour = page(200, 300, 200f, 250f, 0f, 30f)
-        val result = hit(listOf(centre to 0f, neighbour to 0f), x = 10f, y = 220f)
-        assertEquals(neighbour, result?.page)
     }
 
     @Test

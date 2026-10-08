@@ -548,8 +548,6 @@ internal class ReadView @JvmOverloads constructor(
                 longPressTriggered = false
                 activeSelectionHandle = selectionHandleAt(event.x, event.y)
                 if (activeSelectionHandle != SelectionHandle.NONE) {
-                    // 方向裁决要用干净的起点：残留的上一次 y 会把第一次移动判成反方向。
-                    pageView.resetHandleDragDirection()
                     hideSelectionMenu()
                     return true
                 }
@@ -588,7 +586,6 @@ internal class ReadView @JvmOverloads constructor(
                 // 长按后可以直接滑动扩大选区）。否则必须抬手再按一次才能拖 —— 与 legado 不符。
                 if (longPressTriggered && isTextSelected) {
                     activeSelectionHandle = SelectionHandle.END
-                    pageView.resetHandleDragDirection()
                     updateSelectionHandle(event.x, event.y)
                     return true
                 }
