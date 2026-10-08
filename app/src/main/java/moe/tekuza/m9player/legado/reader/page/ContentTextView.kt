@@ -341,13 +341,18 @@ internal class ContentTextView @JvmOverloads constructor(
             // 首列右边缘恒等于视口宽 ⇒ 再取 max 就永远等于整屏，内容没占满时会多滑一段空白。
             page.width
         } else {
-            maxOf(
-                page.height,
-                page.lines.maxOfOrNull { it.crossEnd } ?: 0f,
-                // 末尾行/段距可能没有计入 crossEnd（实测同一页 crossEnd=1805.8 而 lineBottom=1928.0），
-                // 少算这 122px 就会让相邻页画近一截，两页的行交错 ⇒ 正文"字叠字"。
-                page.lines.maxOfOrNull { it.lineBottom } ?: 0f
-            )
+            val maxCrossEnd = page.lines.maxOfOrNull { it.crossEnd } ?: 0f
+            val maxLineBottom = page.lines.maxOfOrNull { it.lineBottom } ?: 0f
+            // 守卫：line* 与 cross* 是两套平行坐标，历史上漂过 122px（page.height=1805.8 / lineBottom=1928.0），
+            // 一漂就会让相邻页画近、正文"字叠字"。release 下 logDebug 整段消失（VERBOSE_LOGS 门控），
+            // debug 下留一条限流的痕迹（借用跨度日志的时间戳，避免每帧刷屏）。
+            val nowMs = System.currentTimeMillis()
+            if (kotlin.math.abs(maxCrossEnd - maxLineBottom) > 1f && nowMs - lastExtentLogAtMs >= 500L) {
+                logDebug("M9PageScroll") {
+                    "coordDrift pageHeight=${page.height} maxCrossEnd=$maxCrossEnd maxLineBottom=$maxLineBottom"
+                }
+            }
+            maxOf(page.height, maxCrossEnd, maxLineBottom)
         }
         // 页边界 = 该页沿滚动轴的**真实跨度**（照 legado 的紧贴拼接，不再向上取整到整屏、不留空白带）。
         // 只保一个很小的下限：滚动上下文固定 ±4 页（ReadView.SCROLL_CONTEXT_RADIUS），
