@@ -25,6 +25,11 @@ internal data class TextPage(
     var isPlaceholder: Boolean = false,
     var height: Float = 0f,
     var width: Float = 0f,
+    /**
+     * 沿滚动轴的真实跨度缓存（见 `ContentTextView.pageScrollExtent`）。
+     * 布局在绘制之前就完成，页对象在重新分页时整体重建 ⇒ 首次绘制算一次即可，无需失效逻辑。
+     */
+    var scrollSpanCache: Float = 0f,
     private val textLines: ArrayList<TextLine> = arrayListOf()
 ) {
     val lines: List<TextLine> get() = textLines

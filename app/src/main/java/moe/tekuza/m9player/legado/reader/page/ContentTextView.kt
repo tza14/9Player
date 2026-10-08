@@ -306,6 +306,13 @@ internal class ContentTextView @JvmOverloads constructor(
     }
 
     fun pageScrollExtent(page: TextPage?, horizontal: Boolean): Float {
+        // 跨度只算一次就缓存在页上：绘制一帧要对上下文里每页反复取它（scrollOffsetForIndex 还要累加），
+        // 而布局早于绘制完成、页对象在重新分页时整体重建 ⇒ 缓存不需要失效逻辑。
+        if (page != null && page.scrollSpanCache > 0f) return page.scrollSpanCache
+        return computePageScrollExtent(page, horizontal)
+    }
+
+    private fun computePageScrollExtent(page: TextPage?, horizontal: Boolean): Float {
         val viewportWidth = (width - paddingLeft - paddingRight).coerceAtLeast(1).toFloat()
         val viewportHeight = (height - paddingTop - paddingBottom).coerceAtLeast(1).toFloat()
         if (page == null) return if (horizontal) viewportWidth else viewportHeight
@@ -346,7 +353,7 @@ internal class ContentTextView @JvmOverloads constructor(
         // 只保一个很小的下限：滚动上下文固定 ±4 页（ReadView.SCROLL_CONTEXT_RADIUS），
         // 9 × 下限必须 ≥ 视口，否则屏幕边缘会露出没画到的空白 ⇒ 下限取 视口 / 4。
         val minSpan = (if (horizontal) viewportWidth else viewportHeight) / 4f
-        return contentExtent.coerceAtLeast(minSpan)
+        return contentExtent.coerceAtLeast(minSpan).also { page.scrollSpanCache = it }
     }
 
     private fun TextPage.hasImageColumn(): Boolean {
