@@ -986,12 +986,12 @@ internal class ContentTextView @JvmOverloads constructor(
             when (line.layoutMode) {
                 M9LayoutMode.HORIZONTAL -> {
                     if (line.crossEnd + offsetY < 0f || line.crossStart + offsetY > height - paddingTop - paddingBottom) return@forEach
-                    line.draw(this, canvas, selectionRange, highlight, search)
+                    line.draw(this, canvas, pageSelection, highlight, search)
                     drawHorizontalUnderline(canvas, line)
                 }
                 M9LayoutMode.VERTICAL -> {
                     if (line.lineBottom + offsetX < 0f || line.lineTop + offsetX > width - paddingLeft - paddingRight) return@forEach
-                    line.draw(this, canvas, selectionRange, highlight, search)
+                    line.draw(this, canvas, pageSelection, highlight, search)
                 }
             }
         }
