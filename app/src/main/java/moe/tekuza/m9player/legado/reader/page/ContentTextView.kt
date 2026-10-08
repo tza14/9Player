@@ -534,8 +534,9 @@ internal class ContentTextView @JvmOverloads constructor(
     private fun syncPageLocalSelection() {
         val chapterRange = selectionChapterRange ?: return
         val current = page ?: return
-        val start = maxOf(chapterRange.first, current.charStart) - current.charStart
-        val end = minOf(chapterRange.last, current.charEnd - 1) - current.charStart
+        // 区间是章节下标，列的下标也是章节下标 ⇒ 这里只把它**裁剪到当前页**，不减去 charStart。
+        val start = maxOf(chapterRange.first, current.charStart)
+        val end = minOf(chapterRange.last, current.charEnd - 1)
         if (start <= end) {
             selectionRange = start..end
             selectionStartSource = start
@@ -556,11 +557,12 @@ internal class ContentTextView @JvmOverloads constructor(
         val current = page ?: return false
         val wordRange = wordRangeAround(current, hit.lineIndex, hit.columnIndex)
         val range = wordRange ?: orderedRange(hit.sourceStart, hit.sourceEnd)
-        // 以命中页为基准换算成章节坐标（跨页唯一可比），页内区间由 syncPageLocalSelection 派生。
+        // TextColumn.sourceStart/sourceEnd **本来就是章节下标**（TextChapterLayout: sourceStart = chapterPosition + local），
+        // 所以这里拿到的就是章节坐标，绝不能再加 page.charStart —— 加了会整体平移 ⇒ 高亮碎成几块、手柄乱位。
         setChapterSelection(
             chapterIndex = current.chapterIndex,
-            startChapter = hit.chapterStartOffset + range.first,
-            endChapter = hit.chapterStartOffset + range.last
+            startChapter = range.first,
+            endChapter = range.last
         )
         pendingSelectionHandleRole = null
         invalidate()
@@ -572,8 +574,8 @@ internal class ContentTextView @JvmOverloads constructor(
         val current = page ?: return false
         // 选区不跨章：命中落到别的章就忽略（章节区间跨章没有意义）。
         if (current.chapterIndex != selectionChapterIndex) return false
-        val hitChapterStart = current.charStart + hit.sourceStart
-        val hitChapterEnd = current.charStart + hit.sourceEnd - 1
+        val hitChapterStart = hit.sourceStart
+        val hitChapterEnd = hit.sourceEnd - 1
         val keepEnd = selectionEndChapter ?: hitChapterEnd
         if (hitChapterStart <= keepEnd) {
             setChapterSelection(current.chapterIndex, hitChapterStart, keepEnd)
@@ -590,8 +592,8 @@ internal class ContentTextView @JvmOverloads constructor(
         val hit = findTextHitAt(x, y) ?: return false
         val current = page ?: return false
         if (current.chapterIndex != selectionChapterIndex) return false
-        val hitChapterStart = current.charStart + hit.sourceStart
-        val hitChapterEnd = current.charStart + hit.sourceEnd - 1
+        val hitChapterStart = hit.sourceStart
+        val hitChapterEnd = hit.sourceEnd - 1
         val keepStart = selectionStartChapter ?: hitChapterStart
         if (hitChapterEnd >= keepStart) {
             setChapterSelection(current.chapterIndex, keepStart, hitChapterEnd)
@@ -965,10 +967,10 @@ internal class ContentTextView @JvmOverloads constructor(
                 )
             }
         }
-        // 跨页选区：这一页只画"本页 ∩ 章节区间"的那一段（页内区间只覆盖当前页）。
+        // 跨页选区：这一页只画"本页 ∩ 章节区间"的那一段（区间与列下标都是章节下标，只做裁剪）。
         val pageSelection = selectionChapterRange?.let { chapterRange ->
-            val start = maxOf(chapterRange.first, current.charStart) - current.charStart
-            val end = minOf(chapterRange.last, current.charEnd - 1) - current.charStart
+            val start = maxOf(chapterRange.first, current.charStart)
+            val end = minOf(chapterRange.last, current.charEnd - 1)
             if (start <= end) start..end else null
         } ?: selectionRange
         current.lines.forEach { line ->
