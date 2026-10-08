@@ -5553,6 +5553,8 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
             }
             return cachedPages
         }
+        // 计时：只覆盖"真的重排"这一段（缓存命中在上面已经 return 了），用来量冷首屏成本。
+        val paginateStartMs = SystemClock.elapsedRealtime()
         val factory = buildTextPageFactory().apply {
             // 模拟阅读下页脚/进度的分母用"已解锁章数"，与目录/进度条口径一致（照 legado）。
             chapterCountOverride =
@@ -5572,6 +5574,7 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         logDebug(READER_LAYOUT_LOG_TAG) {
             "paginateChapter chapter=$safeChapterIndex pages=${pages.size} width=$contentWidthPx " +
                 "height=$contentHeightPx reserve=$firstPageReservePx cacheSize=${chapterPageCache.size} " +
+                "costMs=${SystemClock.elapsedRealtime() - paginateStartMs} " +
                 "view=${readView.width}x${readView.height}"
         }
         return pages
