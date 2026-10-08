@@ -544,12 +544,19 @@ internal class ContentTextView @JvmOverloads constructor(
      */
     private fun syncPageLocalSelection() {
         val chapterRange = selectionChapterRange ?: return
-        // 列的下标就是章节下标 ⇒ 区间可直接用于命中/高亮，**不做换算、也不需要按页裁剪**：
-        // 每页绘制时由各行按"列是否与区间相交"自行过滤。之前用 page.charStart/charEnd 裁剪，
-        // 一旦这两个值与列口径不一致就会把区间裁空 ⇒ 高亮消失、手柄跑到屏幕边缘。
-        selectionRange = chapterRange
-        selectionStartSource = chapterRange.first
-        selectionEndSource = chapterRange.last
+        val current = page ?: return
+        // 章节区间 → **本页页内区间**（列的下标是页内下标）⇒ 减去 page.charStart 并裁剪到本页。
+        val start = maxOf(chapterRange.first, current.charStart) - current.charStart
+        val end = minOf(chapterRange.last, current.charEnd - 1) - current.charStart
+        if (start <= end) {
+            selectionRange = start..end
+            selectionStartSource = start
+            selectionEndSource = end
+        } else {
+            selectionRange = null
+            selectionStartSource = null
+            selectionEndSource = null
+        }
         invalidate()
     }
 
@@ -569,12 +576,12 @@ internal class ContentTextView @JvmOverloads constructor(
         val current = page ?: return false
         val wordRange = wordRangeAround(current, hit.lineIndex, hit.columnIndex)
         val range = wordRange ?: orderedRange(hit.sourceStart, hit.sourceEnd)
-        // TextColumn.sourceStart/sourceEnd **本来就是章节下标**（TextChapterLayout: sourceStart = chapterPosition + local），
-        // 所以这里拿到的就是章节坐标，绝不能再加 page.charStart —— 加了会整体平移 ⇒ 高亮碎成几块、手柄乱位。
+        // 实测（M9Selection 日志）：本页列的 source 是 **页内下标**（colSource=0..213，而 pageCharStart=13831）
+        // ⇒ 章节坐标 = page.charStart + 页内下标；绘制侧再减回去。这是唯一自洽的口径。
         setChapterSelection(
             chapterIndex = current.chapterIndex,
-            startChapter = range.first,
-            endChapter = range.last
+            startChapter = current.charStart + range.first,
+            endChapter = current.charStart + range.last
         )
         pendingSelectionHandleRole = null
         invalidate()
@@ -586,8 +593,8 @@ internal class ContentTextView @JvmOverloads constructor(
         val current = page ?: return false
         // 选区不跨章：命中落到别的章就忽略（章节区间跨章没有意义）。
         if (current.chapterIndex != selectionChapterIndex) return false
-        val hitChapterStart = hit.sourceStart
-        val hitChapterEnd = hit.sourceEnd - 1
+        val hitChapterStart = current.charStart + hit.sourceStart
+        val hitChapterEnd = current.charStart + hit.sourceEnd - 1
         val keepEnd = selectionEndChapter ?: hitChapterEnd
         if (hitChapterStart <= keepEnd) {
             setChapterSelection(current.chapterIndex, hitChapterStart, keepEnd)
@@ -604,8 +611,8 @@ internal class ContentTextView @JvmOverloads constructor(
         val hit = findTextHitAt(x, y) ?: return false
         val current = page ?: return false
         if (current.chapterIndex != selectionChapterIndex) return false
-        val hitChapterStart = hit.sourceStart
-        val hitChapterEnd = hit.sourceEnd - 1
+        val hitChapterStart = current.charStart + hit.sourceStart
+        val hitChapterEnd = current.charStart + hit.sourceEnd - 1
         val keepStart = selectionStartChapter ?: hitChapterStart
         if (hitChapterEnd >= keepStart) {
             setChapterSelection(current.chapterIndex, keepStart, hitChapterEnd)
@@ -962,9 +969,12 @@ internal class ContentTextView @JvmOverloads constructor(
                 )
             }
         }
-        // 跨页选区：直接把章节区间交给各行 —— 每行的列会自己按"与区间相交"过滤，
-        // 所以这里不需要（也不能）用 page.charStart/charEnd 裁剪。
-        val pageSelection = selectionChapterRange ?: selectionRange
+        // 跨页选区：这一页只画"本页 ∩ 章节区间"那一段 —— 列是**页内下标**，所以要减 page.charStart。
+        val pageSelection = selectionChapterRange?.let { chapterRange ->
+            val start = maxOf(chapterRange.first, current.charStart) - current.charStart
+            val end = minOf(chapterRange.last, current.charEnd - 1) - current.charStart
+            if (start <= end) start..end else null
+        } ?: selectionRange
         current.lines.forEach { line ->
             when (line.layoutMode) {
                 M9LayoutMode.HORIZONTAL -> {
