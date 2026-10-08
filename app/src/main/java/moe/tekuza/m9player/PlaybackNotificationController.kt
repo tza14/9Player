@@ -29,8 +29,8 @@ internal class PlaybackNotificationController(
     private val contentIntent: PendingIntent?,
     // 进度口径由调用方给：裁剪态（读完此页暂停 / 逐句重复）下 player 的 position/duration 只是窗口内的值，
     // 共享播放器路径要传「正文绝对位置 + 整轨时长」，否则通知里的百分比会按一页来算。
-    private val currentPositionMsProvider: () -> Long = { player.currentPosition.coerceAtLeast(0L) },
-    private val durationMsProvider: () -> Long = { player.duration },
+    private val currentPositionMsProvider: () -> Long,
+    private val durationMsProvider: () -> Long,
 ) {
     private val appContext = context.applicationContext
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)

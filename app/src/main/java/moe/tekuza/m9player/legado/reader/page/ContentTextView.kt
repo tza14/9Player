@@ -176,6 +176,9 @@ internal class ContentTextView @JvmOverloads constructor(
 
     /** `pageScrollExtent` 诊断日志的时间节流（毫秒）。 */
     private var lastExtentLogAtMs: Long = 0L
+
+    /** 坐标漂移守卫自己的时间戳：与跨度日志共用会让守卫恒不可达（那条日志先跑并刷新它）。 */
+    private var lastDriftLogAtMs: Long = 0L
     private var scrollHorizontal: Boolean = false
     private var scrollReverse: Boolean = false
     val textSizePx: Float get() = textSizePxValue
@@ -348,9 +351,10 @@ internal class ContentTextView @JvmOverloads constructor(
             val maxLineBottom = page.lines.maxOfOrNull { it.lineBottom } ?: 0f
             // 守卫：line* 与 cross* 是两套平行坐标，历史上漂过 122px（page.height=1805.8 / lineBottom=1928.0），
             // 一漂就会让相邻页画近、正文"字叠字"。release 下 logDebug 整段消失（VERBOSE_LOGS 门控），
-            // debug 下留一条限流的痕迹（借用跨度日志的时间戳，避免每帧刷屏）。
+            // debug 下留一条限流的痕迹（用**自己的**时间戳，否则会被跨度日志的刷新压成恒不可达）。
             val nowMs = System.currentTimeMillis()
-            if (kotlin.math.abs(maxCrossEnd - maxLineBottom) > 1f && nowMs - lastExtentLogAtMs >= 500L) {
+            if (kotlin.math.abs(maxCrossEnd - maxLineBottom) > 1f && nowMs - lastDriftLogAtMs >= 500L) {
+                lastDriftLogAtMs = nowMs
                 logDebug("M9PageScroll") {
                     "coordDrift pageHeight=${page.height} maxCrossEnd=$maxCrossEnd maxLineBottom=$maxLineBottom"
                 }
@@ -413,13 +417,7 @@ internal class ContentTextView @JvmOverloads constructor(
         return out
     }
 
-    private fun contentX(x: Float): Float = x - paddingLeft - (if (scrollHorizontal) offsetForPage(page) else 0f)
-
-    private fun contentY(y: Float): Float = y - paddingTop - (if (scrollHorizontal) 0f else offsetForPage(page))
-
-    /** 内容坐标 → 视图坐标（[contentX]/[contentY] 的反函数）：画手柄/选区菜单要用。 */
-    private fun viewX(x: Float): Float = x + paddingLeft + (if (scrollHorizontal) offsetForPage(page) else 0f)
-
+    /** 内容坐标 → 视图坐标：画手柄/选区菜单要用（横轴的反函数已无调用点，只留仍在用的 [viewY]）。 */
     private fun viewY(y: Float): Float = y + paddingTop + (if (scrollHorizontal) 0f else offsetForPage(page))
 
     fun findImageAt(x: Float, y: Float): EbookImageRef? {
@@ -691,30 +689,6 @@ internal class ContentTextView @JvmOverloads constructor(
 
     /** 选区所在章号（章节坐标口径，配合 selectedChapterRange() 使用）。 */
     fun selectedChapterIndex(): Int? = selectionChapterIndex.takeIf { it >= 0 }
-
-    /**
-     * 章节坐标 → 该位置所在页的（列矩形, 起始行顶）。
-     * 跨页选区的两个端点可能落在不同页上，必须各自按**那一页**的偏移算，手柄才贴得住。
-     */
-    private fun chapterPositionRect(chapterPosition: Int): Pair<RectF, Float>? {
-        val contextPages = if (scrollPages.isNotEmpty()) scrollPages else listOf(page)
-        contextPages.forEachIndexed { index, candidate ->
-            val target = candidate ?: return@forEachIndexed
-            if (chapterPosition < target.charStart || chapterPosition >= target.charEnd) return@forEachIndexed
-            val local = chapterPosition - target.charStart
-            val offset = if (scrollPages.isNotEmpty()) scrollOffsetForIndex(index) else scrollOffset
-            target.lines.forEach { line ->
-                line.columns.filterIsInstance<TextColumn>().forEach { column ->
-                    if (local >= column.sourceStart && local < column.sourceEnd) {
-                        val rect = columnRectWithOffset(line, column, offset)
-                        val lineTop = line.lineTop + paddingTop + (if (scrollHorizontal) 0f else offset)
-                        return rect to lineTop
-                    }
-                }
-            }
-        }
-        return null
-    }
 
     fun selectionBounds(): SelectionBounds? {
         // 端点定位统一走"页内端点"这条路：selectionRange 与列下标同为章节下标，口径自洽。

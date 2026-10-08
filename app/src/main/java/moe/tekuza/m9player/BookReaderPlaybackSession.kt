@@ -124,12 +124,6 @@ object BookReaderPlaybackSession {
     }
 
     /**
-     * 播放器上的实际时长：裁剪态下这是**裁剪段**长度。
-     * 手表 / 通知 / 进度存档要的是整轨时长，请用 [currentFullDurationMs]。
-     */
-    fun currentDurationMs(): Long = player?.duration?.takeIf { it > 0L } ?: 0L
-
-    /**
      * 阅读器把「裁剪前的完整时长」发布到这里（[currentFullDurationMs] 的唯一外部来源）。
      * 按当前音轨打标签：换书/换轨后旧值自动失效，不需要调用方手工清理；传 0/负值即清除。
      */

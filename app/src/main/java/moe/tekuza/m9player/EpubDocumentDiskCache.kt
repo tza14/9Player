@@ -21,6 +21,11 @@ import java.nio.charset.StandardCharsets
  *   任何不一致就删掉缓存、退回内存里这份解析结果。这样将来实体加字段忘了同步，最坏也只是"缓存不生效"，
  *   不会读出错误的书。
  */
+/**
+ * 解析缓存的**结构版本**：解析逻辑或落盘结构一有变化就必须 +1。
+ * 别指望 stamp 里的条目缓存版本兜住它 —— 那只在"重新解包"时才变；回读指纹也只自检
+ * "缓存 vs 它自己的 manifest"，同样发现不了逻辑变化。这个常量是唯一的显式作废开关。
+ */
 private const val EPUB_DOC_CACHE_VERSION = 1
 private const val EPUB_DOC_DIR = "reader_doc_v1"
 private const val EPUB_DOC_MANIFEST = "manifest.json"
@@ -257,7 +262,7 @@ private fun readRuby(file: File): List<EbookRubySpan> {
         val segments = ArrayList<EbookRubySegment>(segmentCount)
         var cursor = 5
         repeat(segmentCount) {
-            if (cursor + 2 >= parts.size + 0 && cursor + 2 > parts.lastIndex) return@forEach
+            if (cursor + 2 > parts.lastIndex) return@forEach
             val baseStart = parts[cursor].toIntOrNull()
             val baseEnd = parts.getOrNull(cursor + 1)?.toIntOrNull()
             val text = parts.getOrNull(cursor + 2)
