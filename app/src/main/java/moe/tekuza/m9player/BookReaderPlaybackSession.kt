@@ -22,12 +22,15 @@ object BookReaderPlaybackSession {
     @Volatile
     private var currentAudioUriText: String? = null
 
-    /** 阅读器发布的「裁剪前完整时长」；用 [publishedFullDurationUri] 标记它属于哪条音轨。 */
+    /**
+     * 阅读器发布的「裁剪前完整时长」+ 它属于哪条音轨。
+     * 两者必须**成对**换：以前是两个 `@Volatile` 分开写，极端交错下会留下"新 URI + 旧时长"并通过
+     * tag 校验（手表/通知于是拿到错误的整轨时长）。现在换成一个不可变对象，一次引用赋值就完成。
+     */
     @Volatile
-    private var publishedFullDurationMs: Long = 0L
+    private var publishedFullDuration: PublishedFullDuration? = null
 
-    @Volatile
-    private var publishedFullDurationUri: String? = null
+    private data class PublishedFullDuration(val durationMs: Long, val uri: String?)
 
     @Synchronized
     fun acquirePlayer(context: Context): ExoPlayer {
@@ -129,26 +132,31 @@ object BookReaderPlaybackSession {
      */
     fun publishFullDurationMs(durationMs: Long) {
         val normalized = durationMs.takeIf { it > 0L } ?: 0L
-        publishedFullDurationMs = normalized
-        publishedFullDurationUri = if (normalized > 0L) currentAudioUriText else null
+        publishedFullDuration = if (normalized > 0L) {
+            PublishedFullDuration(normalized, currentAudioUriText)
+        } else {
+            null
+        }
     }
 
     /**
-     * 手表与通知看到的**整轨**时长。裁剪态下 [currentDurationMs] 只是窗口长度（进度会显示成一小段），
-     * 所以优先用阅读器发布的完整时长；没有裁剪时 player.duration 本身就是整轨时长，顺手记为真值。
-     * 两者都拿不到才退回 [currentDurationMs]（旧行为：至多显示未知，不会把进度截断成一小段）。
+     * 手表与通知看到的**整轨**时长。裁剪态下播放器的 `duration` 只是窗口长度，所以优先用阅读器
+     * 发布的完整时长；没有裁剪时 `player.duration` 本身就是整轨时长，顺手记为真值（成对写）。
+     * 两者都拿不到 ⇒ 交给 [resolveFullDurationMs] 决定（裁剪态且没人发布过时返回 0 = 未知，
+     * 这样调用方不会拿窗口长度去夹"绝对目标"）。
      */
     fun currentFullDurationMs(): Long {
         val sharedPlayer = player
         val rawDurationMs = sharedPlayer?.duration?.takeIf { it > 0L } ?: 0L
         val hasActiveClip = sharedPlayer != null && activeClipRangeMs(sharedPlayer) != null
         if (rawDurationMs > 0L && !hasActiveClip) {
-            // 没有裁剪时 player.duration 就是整轨时长：顺手记为真值，之后进入裁剪态也有得用
-            publishedFullDurationMs = rawDurationMs
-            publishedFullDurationUri = currentAudioUriText
+            // 没有裁剪时 player.duration 就是整轨时长：顺手记为真值（一次赋值，URI 与该值同时生效）
+            publishedFullDuration = PublishedFullDuration(rawDurationMs, currentAudioUriText)
         }
-        val published = publishedFullDurationMs
-            .takeIf { it > 0L && publishedFullDurationUri == currentAudioUriText }
+        val published = publishedFullDuration
+            ?.takeIf { it.uri == currentAudioUriText }
+            ?.durationMs
+            ?.takeIf { it > 0L }
             ?: 0L
         return resolveFullDurationMs(rawDurationMs, hasActiveClip, published)
     }
