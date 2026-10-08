@@ -458,8 +458,8 @@ internal class ContentTextView @JvmOverloads constructor(
                         M9LayoutMode.VERTICAL -> localY >= column.start && localY <= column.end
                     }
                     if (hit) {
-                        // 命中邻页：把"当前页"对齐过去，后续 rect/手柄/菜单都用这一页的几何与偏移。
-                        page = candidate
+                        // 不改写"当前页"：调用方（ReadView.handleTap）只用返回的 image 去开预览，
+                        // 不需要页对齐的几何 —— 留着这个副作用只会再养出"命中依赖上一次命中"的坑。
                         return column.image
                     }
                 }
@@ -480,9 +480,8 @@ internal class ContentTextView @JvmOverloads constructor(
                     if (column !is TextColumn) return@forEachIndexed
                     if (!isSidewaysAsciiText(column.charData)) return@forEachIndexed
                     if (localY < column.start || localY > column.end) return@forEachIndexed
-                    // 命中邻页：先对齐"当前页"，气泡 rect（columnRect）才会用那一页的偏移。
-                    page = candidate
-                    return assistTokenAround(candidate, lineIndex, columnIndex)
+                    // 气泡 rect 用**命中页自己的偏移**算（把偏移传进去），不再改写"当前页"。
+                    return assistTokenAround(candidate, lineIndex, columnIndex, offset)
                 }
             }
         }
@@ -496,7 +495,12 @@ internal class ContentTextView @JvmOverloads constructor(
      * 的长串，永远合不成一句 —— 所以改为按正文范围取值（见 [assistSentenceRange]）：
      * 整句是西文才给整句（跨列跨页都覆盖），含 CJK 只给落点那一段，免得整段日语铺满气泡。
      */
-    private fun assistTokenAround(page: TextPage, lineIndex: Int, columnIndex: Int): AssistToken? {
+    private fun assistTokenAround(
+        page: TextPage,
+        lineIndex: Int,
+        columnIndex: Int,
+        offset: Float
+    ): AssistToken? {
         val refs = buildList {
             page.lines.forEachIndexed { pageLineIndex, line ->
                 if (line.layoutMode != M9LayoutMode.VERTICAL) return@forEachIndexed
@@ -507,7 +511,7 @@ internal class ContentTextView @JvmOverloads constructor(
                                 lineIndex = pageLineIndex,
                                 columnIndex = pageColumnIndex,
                                 column = column,
-                                rect = columnRect(line, column)
+                                rect = columnRectWithOffset(line, column, offset)
                             )
                         )
                     }
