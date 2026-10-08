@@ -519,20 +519,36 @@ private fun loadEpubDocumentFromCache(
     val title = opf.title.ifBlank { fallbackTitle }
     val epubImages = buildEpubImageMapFromCache(root, opf.manifest, basePath)
     val tocEntries = buildEpubTocEntriesFromCache(root, opf, basePath, preferredCharsetName)
+    // 每个 spine 文件是独立的一次"HTML→正文"转换（实测这步占首屏的大头，且原本串行）⇒ 并行做，
+    // 顺序由 invokeAll 保证（与串行结果一一对应）。共享的只有只读的 epubImages/tocEntries。
+    val spineChapters: List<List<EbookChapter>> = run {
+        val pool = java.util.concurrent.Executors.newFixedThreadPool(
+            Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
+        )
+        try {
+            val tasks = opf.spineIds.mapIndexed { index, id ->
+                java.util.concurrent.Callable {
+                    val item = opf.manifest[id] ?: return@Callable emptyList()
+                    val path = resolveEpubPath(basePath, item.href)
+                    val file = root.resolveSafeEpubPath(path)?.takeIf { it.isFile }
+                        ?: return@Callable emptyList()
+                    val html = file.readBytes().decodeTextFile(preferredCharsetName)
+                    buildEpubChaptersFromHtml(
+                        html = html,
+                        path = path,
+                        imageResources = epubImages,
+                        tocEntriesForFile = tocEntries.filter { it.path == path },
+                        isFirstSpineItem = index == 0
+                    )
+                }
+            }
+            pool.invokeAll(tasks).map { future -> future.get() }
+        } finally {
+            pool.shutdown()
+        }
+    }
     val chapters = mergeSpinePartsIntoChapters(
-        opf.spineIds.mapIndexedNotNull { index, id ->
-            val item = opf.manifest[id] ?: return@mapIndexedNotNull null
-            val path = resolveEpubPath(basePath, item.href)
-            val file = root.resolveSafeEpubPath(path)?.takeIf { it.isFile } ?: return@mapIndexedNotNull null
-            val html = file.readBytes().decodeTextFile(preferredCharsetName)
-            buildEpubChaptersFromHtml(
-                html = html,
-                path = path,
-                imageResources = epubImages,
-                tocEntriesForFile = tocEntries.filter { it.path == path },
-                isFirstSpineItem = index == 0
-            )
-        }.flatten().ifEmpty {
+        spineChapters.flatten().ifEmpty {
             htmlFiles(root).mapIndexed { index, file ->
                 val path = file.relativeTo(root).invariantSeparatorsPath
                 val html = file.readBytes().decodeTextFile(preferredCharsetName)
