@@ -102,8 +102,21 @@ internal fun resolveTextHit(
         }
         if (best != null) return best
     }
-    // 最近字兜底：**只认原来的第一页（中心页）**，不跟着上面的重排走 —— 这条是防抖规则，不能变。
-    val (center, centerOffset) = candidates.firstOrNull() ?: return null
+    // 精确命中都没中（落在行间、段间或**页底空白**）⇒ 用**槽位**（各页的 offset）定出"手指在哪一页"，
+    // 再在该页里取最近的字 —— 这就是 legado 的 touch()：页由 offset 决定，不由"内容带区"决定。
+    //
+    // 为什么不能只认中心页：手指深入下一页的槽位、但那一带是页底空白（没有字）时，内容带区并不含它，
+    // 中心页兜底就会把端子拽回上一页（真机症状：拖到下一页，选区停在上一页末尾；以及"闪回上一页"）。
+    // geomDrag 诊断已证实各页 offset 逐位自洽（off_{n+1} = off_n + span_n）⇒ 槽位归属唯一。
+    // `horizontal` 的含义是"**偏移作用在 x 轴上**"（看上面 localX 的算法）⇒ 槽位轴就是 x；
+    // 竖排横读时才是 y。这里和 isWithinPageBand 的轴判都踩过同一个坑，故写明。
+    val axis = if (horizontal) x - paddingLeft else y - paddingTop
+    val owner = candidates
+        .filter { (_, offset) -> offset <= axis }
+        .maxByOrNull { (_, offset) -> offset }
+        ?: candidates.minByOrNull { (_, offset) -> offset }
+        ?: return null
+    val (center, centerOffset) = owner
     val localX = x - paddingLeft - (if (horizontal) centerOffset else 0f)
     val localY = y - paddingTop - (if (horizontal) 0f else centerOffset)
     var nearest: TextHitPoint? = null

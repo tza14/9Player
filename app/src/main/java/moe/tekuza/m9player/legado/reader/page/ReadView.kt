@@ -584,6 +584,14 @@ internal class ReadView @JvmOverloads constructor(
                     updateSelectionHandle(event.x, event.y)
                     return true
                 }
+                // 长按刚出选区、手指还没抬起来就继续拖 ⇒ 当作在拖**末端手柄**（legado 的手感：
+                // 长按后可以直接滑动扩大选区）。否则必须抬手再按一次才能拖 —— 与 legado 不符。
+                if (longPressTriggered && isTextSelected) {
+                    activeSelectionHandle = SelectionHandle.END
+                    pageView.resetHandleDragDirection()
+                    updateSelectionHandle(event.x, event.y)
+                    return true
+                }
                 if (longPressTriggered) return true
                 handleMove(event)
                 return true

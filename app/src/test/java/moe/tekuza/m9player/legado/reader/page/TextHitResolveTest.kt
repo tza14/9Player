@@ -109,11 +109,20 @@ class TextHitResolveTest {
     }
 
     @Test
-    fun belowTheLastLineFallsBackToTheNearestColumnOfTheCentrePage() {
-        // 手指在页底空白：不许跳到别页，只在中心页里取最近
+    fun nearestFallbackFollowsThePageSlotNotTheCentrePage() {
+        // 手指深入下一页的**槽位**（offset 1000 起），但那一带是页底空白（行带在上面，不含触点）⇒
+        // 兜底必须落在下一页 —— 只认中心页会把端子拽回上一页（真机：拖到下一页却停在中页末尾）。
         val centre = page(100, 200, 0f, 100f, 0f, 30f)
-        val other = page(200, 300, 200f, 300f, 0f, 30f)
-        val result = hit(listOf(centre to 0f, other to 0f), x = 10f, y = 1000f)
+        val lower = page(200, 300, 0f, 100f, 0f, 30f)
+        val result = hit(listOf(centre to 0f, lower to 1000f), x = 10f, y = 1200f)
+        assertEquals(lower, result?.page)
+    }
+
+    @Test
+    fun nearestFallbackUsesTheTopmostPageWhenThePointIsAboveAllSlots() {
+        val centre = page(100, 200, 0f, 100f, 0f, 30f)
+        val lower = page(200, 300, 0f, 100f, 0f, 30f)
+        val result = hit(listOf(centre to 500f, lower to 1500f), x = 10f, y = 20f)
         assertEquals(centre, result?.page)
     }
 
