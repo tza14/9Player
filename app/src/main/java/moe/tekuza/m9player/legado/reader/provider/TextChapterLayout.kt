@@ -80,17 +80,14 @@ internal class TextChapterLayout(
         val pageStarts = mutableListOf<Int>()
         var currentLines = mutableListOf<TextLine>()
         var pageStart = 0
-        var y = 0f
+        // 章首标题现在由正文视图**自己绘制在同一块区域里**（不再是一个占高度的独立视图），
+        // 所以排版必须把第一页的内容整体下移预留高度 —— 否则首行会压在标题上（真机已复现"上面字重叠"）。
+        // 下移之后首页的下边界回到 visibleHeight（见 currentPageHeight），总占位仍是一屏。
+        var y = firstPageReservePx
         var paragraphNum = 0
 
-        // 首页可用高度 = 页高 - 章节标题预留（正文区在标题显示时会被压缩）；
-        // 第一页完成翻页后恢复整页高度，避免标题换行等导致的最下面文字被裁剪。
-        fun currentPageHeight(): Float =
-            if (pageLineGroups.isEmpty()) {
-                (visibleHeight - firstPageReservePx).coerceAtLeast(1f)
-            } else {
-                visibleHeight.toFloat()
-            }
+        // 可用高度：预留已经通过"内容下移"体现（见 y 起点）⇒ 这里不再重复扣除，否则首页会少排一行。
+        fun currentPageHeight(): Float = visibleHeight.toFloat()
 
         /**
          * 填充一个不含图片标记的文字段 [segmentStart, segmentEnd)。
@@ -247,13 +244,11 @@ internal class TextChapterLayout(
             // 底对齐只对纯文字页生效：图片行的绘制矩形使用 cross 坐标，
             // 而 justifyPageBottom 只平移 lineTop/lineBase/lineBottom，会把文字推进
             // 图片的绘制区域导致文字被图片盖住（吞字）。
-            // 首页使用扣除标题预留后的可用高度（此时 pageLineGroups 已非空，
-            // currentPageHeight() 已回到整页高度，需用首次计算值）。
-            val firstPageHeight = (visibleHeight - firstPageReservePx).coerceAtLeast(1f)
+            // 首页不再需要单独的可用高度：预留靠"内容下移"实现（见 y 起点与 currentPageHeight）。
             if (config.textBottomJustify && lines.none { line -> line.columns.any { it is ImageColumn } }) {
                 justifyPageBottom(
                     lines,
-                    availableHeight = if (index == 0) firstPageHeight else visibleHeight.toFloat()
+                    availableHeight = visibleHeight.toFloat()
                 )
             }
             val rangeStart = pageStarts.getOrElse(index) { 0 }.coerceIn(0, text.length)
