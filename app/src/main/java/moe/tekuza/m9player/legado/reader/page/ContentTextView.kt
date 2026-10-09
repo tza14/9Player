@@ -230,9 +230,13 @@ internal class ContentTextView @JvmOverloads constructor(
         verticalText: Boolean,
         bodyRightEdge: Float,
         overrideText: String? = null,
-        pageTitleStyle: Boolean = false
+        pageTitleStyle: Boolean = false,
+        forceCenter: Boolean = false
     ) {
         val text = (overrideText ?: bodyTitleText)?.takeIf { it.isNotBlank() } ?: return
+        // 居中与否：章首标题跟随阅读设置（bodyTitleAlignCenter）；**纯标题页（卷页）恒定居中**，
+        // 与设置解耦（照 legado：卷页标题就是居中的，旧注释也写着"卷页标题改由正文区居中渲染"）。
+        val centered = forceCenter || bodyTitleAlignCenter
         // 样式来源：章首标题用宿主下发的 bodyTitle 字号；纯标题页（卷名页）沿用旧的大字号 titlePaint
         //（= 正文 × READER_TITLE_SCALE，加粗），这样删掉旧的 isTitle 行排版后观感不变。
         bodyTitleTextSizePx = if (pageTitleStyle) textSizePxValue * READER_TITLE_SCALE else bodyTitleTextSizePx
@@ -242,7 +246,7 @@ internal class ContentTextView @JvmOverloads constructor(
         // 竖排：标题是**一列（或多列）竖着写的字**，占最右侧（允许占多列，超出可用宽度省略）。
         // 横排：一条横带，用 StaticLayout 与旧 TextView 同引擎。
         if (verticalText) {
-            drawVerticalBodyTitle(canvas, offset, bodyRightEdge, text)
+            drawVerticalBodyTitle(canvas, offset, bodyRightEdge, text, centered)
             return
         }
         // 横排交给 StaticLayout：画笔必须是 LEFT 对齐（StaticLayout 自己按 setAlignment 排）。
@@ -254,10 +258,9 @@ internal class ContentTextView @JvmOverloads constructor(
             layout = android.text.StaticLayout.Builder
                 .obtain(text, 0, text.length, bodyTitlePaint, width)
                 .setAlignment(
-                    if (bodyTitleAlignCenter) android.text.Layout.Alignment.ALIGN_CENTER
+                    if (centered) android.text.Layout.Alignment.ALIGN_CENTER
                     else android.text.Layout.Alignment.ALIGN_NORMAL
-                )
-                .setMaxLines(2)
+                )                .setMaxLines(2)
                 .setEllipsize(android.text.TextUtils.TruncateAt.END)
                 .setIncludePad(true)
                 .build()
@@ -308,7 +311,13 @@ internal class ContentTextView @JvmOverloads constructor(
         return cursor to rows
     }
 
-    private fun drawVerticalBodyTitle(canvas: Canvas, offset: Float, bodyRightEdge: Float, title: String) {
+    private fun drawVerticalBodyTitle(
+        canvas: Canvas,
+        offset: Float,
+        bodyRightEdge: Float,
+        title: String,
+        centered: Boolean
+    ) {
         val text = title.takeIf { it.isNotBlank() } ?: return
         bodyTitlePaint.textSize = bodyTitleTextSizePx
         bodyTitlePaint.color = textColor
@@ -334,7 +343,7 @@ internal class ContentTextView @JvmOverloads constructor(
             }
             // 先规划这一列：居中要看它用了几行；绘制再按同一次规划走（同一事实，不重复算）。
             val plan = planVerticalTitleColumn(text, index, perColumn, cell)
-            val columnStartY = if (bodyTitleAlignCenter && plan.second < perColumn) {
+            val columnStartY = if (centered && plan.second < perColumn) {
                 columnTop + (perColumn - plan.second) * step * 0.5f
             } else {
                 columnTop
@@ -1199,7 +1208,7 @@ internal class ContentTextView @JvmOverloads constructor(
         } else {
             val verticalText = current.lines.firstOrNull()?.layoutMode == M9LayoutMode.VERTICAL
             if (current.lines.isNotEmpty() && current.lines.all { it.isTitle }) {
-                drawBodyTitle(canvas, 0f, verticalText = verticalText, bodyRightEdge = paddingLeft.toFloat(), overrideText = current.title, pageTitleStyle = true)
+                drawBodyTitle(canvas, 0f, verticalText = verticalText, bodyRightEdge = paddingLeft.toFloat(), overrideText = current.title, pageTitleStyle = true, forceCenter = true)
             } else if (current.pageInChapter == 0) {
                 val bodyRightEdge = current.lines.maxOfOrNull { it.lineBottom } ?: paddingLeft.toFloat()
                 drawBodyTitle(canvas, 0f, verticalText = verticalText, bodyRightEdge = bodyRightEdge)
@@ -1227,7 +1236,8 @@ internal class ContentTextView @JvmOverloads constructor(
                     verticalText = verticalText,
                     bodyRightEdge = paddingLeft.toFloat(),
                     overrideText = textPage.title,
-                    pageTitleStyle = true
+                    pageTitleStyle = true,
+                    forceCenter = true
                 )
             } else if (textPage.pageInChapter == 0) {
                 drawBodyTitle(
