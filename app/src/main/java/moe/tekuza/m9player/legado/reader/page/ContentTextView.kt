@@ -229,9 +229,13 @@ internal class ContentTextView @JvmOverloads constructor(
         offset: Float,
         verticalText: Boolean,
         bodyRightEdge: Float,
-        overrideText: String? = null
+        overrideText: String? = null,
+        pageTitleStyle: Boolean = false
     ) {
         val text = (overrideText ?: bodyTitleText)?.takeIf { it.isNotBlank() } ?: return
+        // 样式来源：章首标题用宿主下发的 bodyTitle 字号；纯标题页（卷名页）沿用旧的大字号 titlePaint
+        //（= 正文 × READER_TITLE_SCALE，加粗），这样删掉旧的 isTitle 行排版后观感不变。
+        bodyTitleTextSizePx = if (pageTitleStyle) textSizePxValue * READER_TITLE_SCALE else bodyTitleTextSizePx
         // 颜色由宿主注入的正文色决定（夜间模式/主题）：不设就会退回 Paint 默认黑 ⇒ 黑底黑字。
         bodyTitlePaint.color = textColor
         bodyTitlePaint.textSize = bodyTitleTextSizePx
@@ -1159,7 +1163,7 @@ internal class ContentTextView @JvmOverloads constructor(
         } else {
             val verticalText = current.lines.firstOrNull()?.layoutMode == M9LayoutMode.VERTICAL
             if (current.lines.isNotEmpty() && current.lines.all { it.isTitle }) {
-                drawBodyTitle(canvas, 0f, verticalText = verticalText, bodyRightEdge = paddingLeft.toFloat(), overrideText = current.title)
+                drawBodyTitle(canvas, 0f, verticalText = verticalText, bodyRightEdge = paddingLeft.toFloat(), overrideText = current.title, pageTitleStyle = true)
             } else if (current.pageInChapter == 0) {
                 val bodyRightEdge = current.lines.maxOfOrNull { it.lineBottom } ?: paddingLeft.toFloat()
                 drawBodyTitle(canvas, 0f, verticalText = verticalText, bodyRightEdge = bodyRightEdge)
@@ -1186,7 +1190,8 @@ internal class ContentTextView @JvmOverloads constructor(
                     offset = if (verticalText) offsetX else offsetY,
                     verticalText = verticalText,
                     bodyRightEdge = paddingLeft.toFloat(),
-                    overrideText = textPage.title
+                    overrideText = textPage.title,
+                    pageTitleStyle = true
                 )
             } else if (textPage.pageInChapter == 0) {
                 drawBodyTitle(
@@ -1256,6 +1261,12 @@ internal class ContentTextView @JvmOverloads constructor(
         // 跨页选区：这一页只画"本页 ∩ 章节区间"那一段；交集为空 ⇒ 不画。
         // 端点制之后这里只有一个口径：按页求交（端点自带页身份，不需要任何回退分支）。
         val pageSelection = pageLocalSelectionSlice(selectionChapterRange, current)
+        // 纯标题页（卷名页）的文字已由标题渲染器画过 ⇒ 这里不再画那些 isTitle 行，
+        // 否则同一段标题会被画两遍（真机截图上就是一列新版 + 一列旧版）。
+        if (current.lines.isNotEmpty() && current.lines.all { it.isTitle }) {
+            canvas.restore()
+            return
+        }
         // 诊断：只打**真的有内容**的页（有切片、或带 cue 高亮）。
         // 不能按"每 500ms 打第一页"——drawPageLines 是按上下文顺序逐页调用的，那样永远只打最上面那页。
         if (pageSelection != null || highlight != null) {
