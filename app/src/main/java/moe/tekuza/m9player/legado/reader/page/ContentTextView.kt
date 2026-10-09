@@ -224,11 +224,11 @@ internal class ContentTextView @JvmOverloads constructor(
      * 画章首标题（只在该章第一页 ✓）。用 StaticLayout ⇒ 折行/字距与旧 TextView 同引擎，
      * 最多两行、超出省略，避免长标题把版式挤歪。
      */
-    private fun drawBodyTitle(canvas: Canvas, offset: Float, horizontal: Boolean, bodyRightEdge: Float) {
+    private fun drawBodyTitle(canvas: Canvas, offset: Float, verticalText: Boolean, bodyRightEdge: Float) {
         val text = bodyTitleText?.takeIf { it.isNotBlank() } ?: return
-        // 竖排：标题是**一列（或多列）竖着写的字**，占最右侧（(b) 允许占多列，超出可用宽度省略）。
+        // 竖排：标题是**一列（或多列）竖着写的字**，占最右侧（允许占多列，超出可用宽度省略）。
         // 横排：一条横带，用 StaticLayout 与旧 TextView 同引擎。
-        if (horizontal) {
+        if (verticalText) {
             drawVerticalBodyTitle(canvas, offset, bodyRightEdge)
             return
         }
@@ -1128,7 +1128,8 @@ internal class ContentTextView @JvmOverloads constructor(
         } else {
             if (current.pageInChapter == 0) {
                 val bodyRightEdge = current.lines.maxOfOrNull { it.lineBottom } ?: paddingLeft.toFloat()
-                drawBodyTitle(canvas, 0f, horizontal = false, bodyRightEdge = bodyRightEdge)
+                val verticalText = current.lines.firstOrNull()?.layoutMode == M9LayoutMode.VERTICAL
+                drawBodyTitle(canvas, 0f, verticalText = verticalText, bodyRightEdge = bodyRightEdge)
             }
             drawPageLines(canvas, current, 0f, 0f, highlightRange, searchRange)
         }
@@ -1144,8 +1145,14 @@ internal class ContentTextView @JvmOverloads constructor(
             // 章首标题由本视图绘制（跟着第 0 页滚动，不占额外布局高度）。
             if (textPage.pageInChapter == 0) {
                 val bodyRightEdge = textPage.lines.maxOfOrNull { it.lineBottom } ?: paddingLeft.toFloat()
-                if (scrollHorizontal) drawBodyTitle(canvas, offsetX, horizontal = true, bodyRightEdge = bodyRightEdge)
-                else drawBodyTitle(canvas, offsetY, horizontal = false, bodyRightEdge = bodyRightEdge)
+                // 竖排与否问**页面自己的行**（排版用同一个事实）；不再借用含义暧昧的 scrollHorizontal。
+                val verticalText = textPage.lines.firstOrNull()?.layoutMode == M9LayoutMode.VERTICAL
+                drawBodyTitle(
+                    canvas = canvas,
+                    offset = if (verticalText) offsetX else offsetY,
+                    verticalText = verticalText,
+                    bodyRightEdge = bodyRightEdge
+                )
             }
             // 绘制侧几何诊断：**只在真的越出可视区时**打一行（限流 500ms）。
             // 用来分开"布局算错"与"绘制用了别的高度/起点"：布局侧自检是 M9Layout bottomOverflow，
