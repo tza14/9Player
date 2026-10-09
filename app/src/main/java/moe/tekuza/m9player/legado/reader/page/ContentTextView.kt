@@ -235,6 +235,8 @@ internal class ContentTextView @JvmOverloads constructor(
             drawVerticalBodyTitle(canvas, offset, bodyRightEdge)
             return
         }
+        // 横排交给 StaticLayout：画笔必须是 LEFT 对齐（StaticLayout 自己按 setAlignment 排）。
+        bodyTitlePaint.textAlign = Paint.Align.LEFT
         val width = (this.width - paddingLeft - paddingRight).coerceAtLeast(1)
         var layout = bodyTitleLayout
         if (layout == null || layout.width != width) {
@@ -265,6 +267,10 @@ internal class ContentTextView @JvmOverloads constructor(
     private fun drawVerticalBodyTitle(canvas: Canvas, offset: Float, bodyRightEdge: Float) {
         val text = bodyTitleText?.takeIf { it.isNotBlank() } ?: return
         bodyTitlePaint.textSize = bodyTitleTextSizePx
+        bodyTitlePaint.color = textColor
+        // 逐字绘制时 x 是**字心** ⇒ 必须 CENTER；默认 LEFT 会让每个字右偏半个字宽
+        //（真机现象：最右列的字被切掉一半）。
+        bodyTitlePaint.textAlign = Paint.Align.CENTER
         val metrics = bodyTitlePaint.fontMetrics
         val step = (metrics.descent - metrics.ascent).coerceAtLeast(1f)
         val advance = bodyTitleTextSizePx.coerceAtLeast(1f)
