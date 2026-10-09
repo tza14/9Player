@@ -83,14 +83,9 @@ internal class VerticalTextChapterLayout(
         var x = (visibleWidth - columnWidth).coerceAtLeast(0f)
         var paragraphNum = 0
 
-        // 首页可用高度 = 页高 - 章节标题预留；第一页完成后恢复整页高度，
-        // 避免标题换行等导致的最下面文字被裁剪。
-        fun currentPageHeight(): Float =
-            if (pageColumns.isEmpty()) {
-                (visibleHeight - firstPageReservePx).coerceAtLeast(1f)
-            } else {
-                visibleHeight.toFloat()
-            }
+        // 章首标题现在由正文视图**自己绘制在同一块区域里**（不再是占高度的独立视图）⇒ 与横排同口径：
+        // 预留靠"第一列整体下移"体现，预算不再重复扣除。否则首列会压在标题上（真机已复现）。
+        fun currentPageHeight(): Float = visibleHeight.toFloat()
 
         /**
          * 竖排句子块所需列数：模拟 buildVerticalLineEnd 逐列切行（含段首缩进），
@@ -160,6 +155,11 @@ internal class VerticalTextChapterLayout(
                     0f
                 }
             }
+
+            /** 章首第一列要从标题预留之下开始（测量与落列必须用同一个起点，否则两者会差一个 reserve）。 */
+            fun firstColumnStartY(lineStart: Int): Float =
+                indentYFor(lineStart) +
+                    if (pageColumns.isEmpty() && currentColumns.isEmpty()) firstPageReservePx else 0f
             var blockStart = segmentStart
             while (blockStart < segmentEnd) {
                 // 「句子不跨页」开启时才切句子块（块 = 一句）：整句必须放进同一页，放不下就整块
@@ -173,7 +173,7 @@ internal class VerticalTextChapterLayout(
                     segmentEnd
                 }
                 if (usesSentenceBlocks) {
-                    val blockColumns = measureVerticalBlockColumns(blockStart, blockEnd, indentYFor(blockStart))
+                    val blockColumns = measureVerticalBlockColumns(blockStart, blockEnd, firstColumnStartY(blockStart))
                     val remainingColumns = (x / columnWidth).toInt() + 1
                     if (currentColumns.isNotEmpty() && blockColumns > remainingColumns) {
                         pageColumns += currentColumns
@@ -186,7 +186,7 @@ internal class VerticalTextChapterLayout(
                 var lineStart = blockStart
                 var limit = blockEnd
                 while (lineStart < limit) {
-                    var y = indentYFor(lineStart)
+                    var y = firstColumnStartY(lineStart)
                     if (y + glyphHeight > currentPageHeight()) {
                         x -= columnWidth
                         y = 0f

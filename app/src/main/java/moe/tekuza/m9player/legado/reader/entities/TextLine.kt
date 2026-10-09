@@ -35,6 +35,21 @@ internal data class TextLine(
         textColumns += column
     }
 
+    /**
+     * 沿滚动轴平移这一行。
+     *
+     * **两份坐标必须一起动**：`line*` 用于绘制与命中，`cross*` 用于 `page.height`/跨度。
+     * 历史上只改一份就出过 `page.height=1805.8 而 maxLineBottom=1928.0` 的分叉 ⇒ 相邻页画近 122px ⇒
+     * 字叠字 / 页底吞字。所以平移只留这一个入口，别在别处自己写 `lineTop += dy`。
+     */
+    fun shift(dy: Float) {
+        lineTop += dy
+        lineBase += dy
+        lineBottom += dy
+        crossStart += dy
+        crossEnd += dy
+    }
+
     fun draw(
         view: moe.tekuza.m9player.legado.reader.page.ContentTextView,
         canvas: Canvas,

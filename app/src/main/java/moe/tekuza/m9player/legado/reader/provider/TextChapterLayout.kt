@@ -86,9 +86,6 @@ internal class TextChapterLayout(
         var y = firstPageReservePx
         var paragraphNum = 0
 
-        // 可用高度：预留已经通过"内容下移"体现（见 y 起点）⇒ 这里不再重复扣除，否则首页会少排一行。
-        fun currentPageHeight(): Float = visibleHeight.toFloat()
-
         /**
          * 填充一个不含图片标记的文字段 [segmentStart, segmentEnd)。
          * 缩进只给段首第一行；段末行视为段落结尾（便于朗读/选词分组）。
@@ -115,7 +112,7 @@ internal class TextChapterLayout(
                 if (usesSentenceBlocks) {
                     // 预测量块高度（按当前行宽逐行模拟）
                     val blockLineCount = measureTextLines(text, blockStart, blockEnd)
-                    if (currentLines.isNotEmpty() && y + blockLineCount * lineHeight > currentPageHeight()) {
+                    if (currentLines.isNotEmpty() && y + blockLineCount * lineHeight > visibleHeight.toFloat()) {
                         pageLineGroups += currentLines
                         pageStarts += pageStart
                         pageStart = blockStart
@@ -150,7 +147,7 @@ internal class TextChapterLayout(
                     }
                     val lineEnd = (lineStart + count).coerceAtMost(blockEnd)
                     val lineText = text.substring(lineStart, lineEnd)
-                    if (currentLines.isNotEmpty() && y + lineHeight > currentPageHeight()) {
+                    if (currentLines.isNotEmpty() && y + lineHeight > visibleHeight.toFloat()) {
                         // 兜底：超长句子块（超过一页）内部仍按行翻页
                         pageLineGroups += currentLines
                         pageStarts += pageStart
@@ -212,8 +209,8 @@ internal class TextChapterLayout(
                         segmentEnd = markerIndex
                     )
                 }
-                val (imageWidth, imageHeight) = imageSize(chapter, markerIndex, currentPageHeight())
-                if (currentLines.isNotEmpty() && y + imageHeight > currentPageHeight()) {
+                val (imageWidth, imageHeight) = imageSize(chapter, markerIndex, visibleHeight.toFloat())
+                if (currentLines.isNotEmpty() && y + imageHeight > visibleHeight.toFloat()) {
                     pageLineGroups += currentLines
                     pageStarts += pageStart
                     pageStart = markerIndex
@@ -441,13 +438,8 @@ internal class TextChapterLayout(
         val gap = extra / lines.size
         var offset = 0f
         lines.forEachIndexed { index, line ->
-            line.lineTop += offset
-            line.lineBase += offset
-            line.lineBottom += offset
-            // cross* 是 line* 的平行副本（page.height 取自 crossEnd）：这里不同步就会出现
-            // "page.height=1805.8 而 maxLineBottom=1928.0" 的分叉 ⇒ 相邻页画近 122px ⇒ 字叠字。
-            line.crossStart += offset
-            line.crossEnd += offset
+            // 平移只有shift(dy) 一个入口（两份坐标一起动，见 TextLine.shift 的 KDoc）。
+            line.shift(offset)
             if (index < lines.lastIndex) offset += gap
         }
         // 不变量自检（只在破的时候打一行）：本文件是"先定 page.height、再在页收尾时推低行位置"，

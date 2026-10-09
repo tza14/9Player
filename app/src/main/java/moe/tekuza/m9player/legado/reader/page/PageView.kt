@@ -495,7 +495,6 @@ internal class PageView(context: Context) : LinearLayout(context) {
         )
         contentView.bodyTitleAlignCenter = bodyTitleMode == ReaderBodyTitleMode.CENTER
         contentView.bodyTitleTopSpacingPx = dp(bodyTitleTopSpacingDp).toFloat()
-        contentView.bodyTitleBottomSpacingPx = dp(bodyTitleBottomSpacingDp).toFloat()
         // 测量视图仍用于"这一章的标题要预留多少"（分页参数，按标题文本确定性计算）。
         titleMeasureView.typeface = Typeface.create(readerTitleTypeface ?: Typeface.DEFAULT, Typeface.BOLD)
         titleMeasureView.textSize = contentTextSizeSp + bodyTitleSizeAddSp

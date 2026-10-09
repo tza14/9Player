@@ -210,11 +210,10 @@ internal class ContentTextView @JvmOverloads constructor(
             invalidate()
         }
 
-    /** 标题字号（px）、对齐、上下留白（px），由宿主按设置传入。 */
+    /** 标题字号（px）、对齐、上留白（px），由宿主按设置传入。 */
     var bodyTitleTextSizePx: Float = 0f
     var bodyTitleAlignCenter: Boolean = false
     var bodyTitleTopSpacingPx: Float = 0f
-    var bodyTitleBottomSpacingPx: Float = 0f
 
     private val bodyTitlePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
         typeface = Typeface.create(readerTypeface ?: Typeface.DEFAULT, Typeface.BOLD)
