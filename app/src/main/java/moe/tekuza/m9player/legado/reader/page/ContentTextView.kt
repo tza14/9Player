@@ -226,6 +226,9 @@ internal class ContentTextView @JvmOverloads constructor(
      */
     private fun drawBodyTitle(canvas: Canvas, offset: Float, verticalText: Boolean, bodyRightEdge: Float) {
         val text = bodyTitleText?.takeIf { it.isNotBlank() } ?: return
+        // 颜色由宿主注入的正文色决定（夜间模式/主题）：不设就会退回 Paint 默认黑 ⇒ 黑底黑字。
+        bodyTitlePaint.color = textColor
+        bodyTitlePaint.textSize = bodyTitleTextSizePx
         // 竖排：标题是**一列（或多列）竖着写的字**，占最右侧（允许占多列，超出可用宽度省略）。
         // 横排：一条横带，用 StaticLayout 与旧 TextView 同引擎。
         if (verticalText) {
