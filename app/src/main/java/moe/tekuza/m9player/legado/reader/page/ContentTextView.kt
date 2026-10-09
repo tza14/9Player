@@ -224,12 +224,12 @@ internal class ContentTextView @JvmOverloads constructor(
      * 画章首标题（只在该章第一页 ✓）。用 StaticLayout ⇒ 折行/字距与旧 TextView 同引擎，
      * 最多两行、超出省略，避免长标题把版式挤歪。
      */
-    private fun drawBodyTitle(canvas: Canvas, offset: Float, horizontal: Boolean) {
+    private fun drawBodyTitle(canvas: Canvas, offset: Float, horizontal: Boolean, bodyRightEdge: Float) {
         val text = bodyTitleText?.takeIf { it.isNotBlank() } ?: return
         // 竖排：标题是**一列（或多列）竖着写的字**，占最右侧（(b) 允许占多列，超出可用宽度省略）。
         // 横排：一条横带，用 StaticLayout 与旧 TextView 同引擎。
         if (horizontal) {
-            drawVerticalBodyTitle(canvas, offset)
+            drawVerticalBodyTitle(canvas, offset, bodyRightEdge)
             return
         }
         val width = (this.width - paddingLeft - paddingRight).coerceAtLeast(1)
@@ -259,7 +259,7 @@ internal class ContentTextView @JvmOverloads constructor(
      * 竖排标题：字从上往下叠，写完一列往左开一列（列从右往左），最多占 reservedWidth（由排版预留）。
      * 用同一个 title paint 逐字绘制 ⇒ 字号/字重与横排一致；超出可用区域就省略。
      */
-    private fun drawVerticalBodyTitle(canvas: Canvas, offset: Float) {
+    private fun drawVerticalBodyTitle(canvas: Canvas, offset: Float, bodyRightEdge: Float) {
         val text = bodyTitleText?.takeIf { it.isNotBlank() } ?: return
         bodyTitlePaint.textSize = bodyTitleTextSizePx
         val metrics = bodyTitlePaint.fontMetrics
@@ -268,6 +268,9 @@ internal class ContentTextView @JvmOverloads constructor(
         val columnTop = paddingTop.toFloat() + bodyTitleTopSpacingPx
         val bottom = (height - paddingBottom).toFloat()
         val perColumn = ((bottom - columnTop) / step).toInt().coerceAtLeast(1)
+        // **边界来自实际布局**：正文最右一列的右缘（竖排里 lineBottom 是 x 坐标）。
+        // 标题的每一列都必须落在它右边 ⇒ 不可能压到正文上（不再靠"预留了多少"的算术去猜）。
+        val limitX = if (bodyRightEdge > paddingLeft) bodyRightEdge else paddingLeft.toFloat()
         var column = 0
         var index = 0
         canvas.save()
@@ -275,9 +278,8 @@ internal class ContentTextView @JvmOverloads constructor(
         while (index < text.length) {
             val columnRight = width - paddingRight - column * advance
             val baselineX = columnRight - advance * 0.5f
-            if (baselineX < paddingLeft) {
-                // 没有更多列可放 ⇒ 省略（(a)/(b) 的兜底，不越界）
-                bodyTitlePaint.textSize = bodyTitleTextSizePx
+            if (baselineX - advance * 0.5f < limitX) {
+                // 下一列会越过正文 ⇒ 就地省略（不越界、不压正文）
                 canvas.drawText("…", baselineX + advance * 0.5f, columnTop + step, bodyTitlePaint)
                 break
             }
@@ -1124,7 +1126,10 @@ internal class ContentTextView @JvmOverloads constructor(
         if (scrollPages.isNotEmpty()) {
             drawScrollPages(canvas)
         } else {
-            if (current.pageInChapter == 0) drawBodyTitle(canvas, 0f, horizontal = false)
+            if (current.pageInChapter == 0) {
+                val bodyRightEdge = current.lines.maxOfOrNull { it.lineBottom } ?: paddingLeft.toFloat()
+                drawBodyTitle(canvas, 0f, horizontal = false, bodyRightEdge = bodyRightEdge)
+            }
             drawPageLines(canvas, current, 0f, 0f, highlightRange, searchRange)
         }
         canvas.restore()
@@ -1138,8 +1143,9 @@ internal class ContentTextView @JvmOverloads constructor(
             val offsetY = if (scrollHorizontal) 0f else offset
             // 章首标题由本视图绘制（跟着第 0 页滚动，不占额外布局高度）。
             if (textPage.pageInChapter == 0) {
-                if (scrollHorizontal) drawBodyTitle(canvas, offsetX, horizontal = true)
-                else drawBodyTitle(canvas, offsetY, horizontal = false)
+                val bodyRightEdge = textPage.lines.maxOfOrNull { it.lineBottom } ?: paddingLeft.toFloat()
+                if (scrollHorizontal) drawBodyTitle(canvas, offsetX, horizontal = true, bodyRightEdge = bodyRightEdge)
+                else drawBodyTitle(canvas, offsetY, horizontal = false, bodyRightEdge = bodyRightEdge)
             }
             // 绘制侧几何诊断：**只在真的越出可视区时**打一行（限流 500ms）。
             // 用来分开"布局算错"与"绘制用了别的高度/起点"：布局侧自检是 M9Layout bottomOverflow，
