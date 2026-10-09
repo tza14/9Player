@@ -5444,7 +5444,10 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
             ),
             emptyPageText = readerString(R.string.reader_no_text),
             sentenceStartsByChapter = sentenceBoundariesByChapter.mapValues { it.value.first },
-            sentenceEndsByChapter = sentenceBoundariesByChapter.mapValues { it.value.second }
+            sentenceEndsByChapter = sentenceBoundariesByChapter.mapValues { it.value.second },
+            // 竖排标题的列长与绘制侧同源：绘制侧的列顶是 paddingTop + 这份上留白
+            //（ContentTextView.bodyTitleTopSpacingPx，同一个 reader 设置值），测量侧必须扣掉同一份。
+            titleTopSpacingPx = dp(bodyTitleTopSpacingDp).toFloat()
         )
     }
 

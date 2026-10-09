@@ -30,7 +30,13 @@ internal class TextPageFactory(
     /** 句尾处理（句子不跨页）：按章节索引的句子起点集合（章节坐标） */
     private val sentenceStartsByChapter: Map<Int, Set<Int>> = emptyMap(),
     /** 句尾处理（句子不跨页）：按章节索引的句子结尾集合（章节坐标） */
-    private val sentenceEndsByChapter: Map<Int, Set<Int>> = emptyMap()
+    private val sentenceEndsByChapter: Map<Int, Set<Int>> = emptyMap(),
+    /**
+     * 竖排章首标题的**上留白**（px，来源 = `PageView.bodyTitleTopSpacingDp`）。
+     * 绘制侧把标题列顶放在 `paddingTop + 上留白`（`ContentTextView.drawVerticalBodyTitle`），
+     * 所以测量侧算"一列能放几个字"时必须从正文区高度里扣掉同一份留白，否则会多留列宽。
+     */
+    private val titleTopSpacingPx: Float = 0f
 ) {
     fun createPages(
         document: EbookDocument,
@@ -123,11 +129,15 @@ internal class TextPageFactory(
         )
         // 竖排：预留量的是**宽度**（标题占几列 × 列宽），不是高度。调用方按横排口径量出来的
         // firstPageReservePx > 0 只表示"本章有章首标题"，这里换成竖排自己的量法（=0 仍表示不显示标题）。
+        // 列长扣掉标题上留白：绘制侧标题列顶 = paddingTop + 上留白（见 ContentTextView），
+        // 两侧必须是同一个"可用列长"，否则测量会多算出一列。
         val reserveForLayout = when (config.layoutMode) {
             M9LayoutMode.VERTICAL ->
                 if (firstPageReservePx > 0f) {
                     VerticalTextChapterLayout.titleColumnReserve(
-                        config, chapter.title, contentHeightPx
+                        config,
+                        chapter.title,
+                        (contentHeightPx - titleTopSpacingPx).coerceAtLeast(1f)
                     ).toFloat()
                 } else {
                     0f

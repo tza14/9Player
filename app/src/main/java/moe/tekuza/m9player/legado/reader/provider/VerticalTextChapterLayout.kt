@@ -33,23 +33,30 @@ internal class VerticalTextChapterLayout(
          * 竖排章首标题要占的**宽度**（= 列数 × 列宽）。
          *
          * 为什么不能用横排那套"标题高度"：竖排的标题是一列（或多列）竖着的字，吃掉的是**宽度**。
-         * 这里的列宽/字步进与 [layout] 里排正文用的是**同一套 config 参数与同一支画笔**，
-         * 列数按"标题字数 ÷ 每列可容字数"算 ⇒ 预留值与实际画出来的标题不会互相打脸。
+         *
+         * 列数与每列字数**必须和绘制侧同源**（`ContentTextView.drawVerticalBodyTitle`）：
+         * - 步进 = `descent - ascent`，与绘制侧的 `step` 同一个定义，**不含 letterSpacing**
+         *  （绘制侧下一个字就是往下挪这么多；这里多算一份字距会让每列少放一个字 ⇒ 多留一列
+         *   ⇒ 正文右缘左移 ⇒ 长标题提前被省略）。
+         * - 列长 = 调用方给的可用列长，调用方（`TextPageFactory`）已经从正文区高度里扣掉了
+         *   标题上留白 `bodyTitleTopSpacingPx`，与绘制侧 `columnTop = paddingTop + 上留白` 对齐。
+         * - 列数走 [VerticalTitleColumnPlan]，token 规则走 [verticalTitleTokens]，与绘制侧同一份。
          */
-        fun titleColumnReserve(config: M9ReadBookConfig, title: String, columnLengthPx: Int): Int {
-            if (title.isEmpty() || columnLengthPx <= 0) return 0
+        fun titleColumnReserve(config: M9ReadBookConfig, title: String, columnLengthPx: Float): Int {
+            if (title.isEmpty() || columnLengthPx <= 0f) return 0
             val paint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
                 textSize = config.textSizePx * READER_TITLE_SCALE
                 typeface = Typeface.create(config.typeface ?: Typeface.DEFAULT, Typeface.BOLD)
             }
             val metrics = paint.fontMetrics
-            val glyphHeight = (metrics.descent - metrics.ascent + config.letterSpacingPx).coerceAtLeast(1f)
+            val glyphHeight = (metrics.descent - metrics.ascent).coerceAtLeast(1f)
             // 列宽必须与排版正文用的**同一个来源**（VerticalTextGlyphEngine.estimateCellWidth），
             // 否则预留与实际列宽会差一点点，长标题就会多占/少占一列。
             val glyphWidth = VerticalTextGlyphEngine.estimateCellWidth(paint)
             val columnWidth = (glyphWidth + config.lineSpacingPx).coerceAtLeast(1f)
-            val perColumn = (columnLengthPx / glyphHeight).toInt().coerceAtLeast(1)
-            val columns = ((title.length + perColumn - 1) / perColumn).coerceAtLeast(1)
+            val perColumn = VerticalTitleColumnPlan.rowsPerColumn(columnLengthPx, glyphHeight)
+            val tokens = verticalTitleTokens(title, glyphWidth) { paint.measureText(it) }
+            val columns = VerticalTitleColumnPlan.columnCount(tokens, perColumn).coerceAtLeast(1)
             return (columns * columnWidth).toInt().coerceAtLeast(1)
         }
     }
