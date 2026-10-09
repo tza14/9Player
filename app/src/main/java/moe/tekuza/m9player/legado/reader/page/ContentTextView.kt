@@ -1207,7 +1207,7 @@ internal class ContentTextView @JvmOverloads constructor(
             drawScrollPages(canvas)
         } else {
             val verticalText = current.lines.firstOrNull()?.layoutMode == M9LayoutMode.VERTICAL
-            if (current.lines.isNotEmpty() && current.lines.all { it.isTitle }) {
+            if (current.isVolume) {
                 drawBodyTitle(canvas, 0f, verticalText = verticalText, bodyRightEdge = paddingLeft.toFloat(), overrideText = current.title, pageTitleStyle = true, forceCenter = true)
             } else if (current.pageInChapter == 0) {
                 val bodyRightEdge = current.lines.maxOfOrNull { it.lineBottom } ?: paddingLeft.toFloat()
@@ -1229,7 +1229,7 @@ internal class ContentTextView @JvmOverloads constructor(
             // 西文整段旋转、不再一个字母一行（排版那边为这类页生成的是 isTitle 行）。
             val verticalText = textPage.lines.firstOrNull()?.layoutMode == M9LayoutMode.VERTICAL
             val bodyRightEdge = textPage.lines.maxOfOrNull { it.lineBottom } ?: paddingLeft.toFloat()
-            if (textPage.lines.isNotEmpty() && textPage.lines.all { it.isTitle }) {
+            if (textPage.isVolume) {
                 drawBodyTitle(
                     canvas = canvas,
                     offset = if (verticalText) offsetX else offsetY,
@@ -1307,9 +1307,11 @@ internal class ContentTextView @JvmOverloads constructor(
         // 跨页选区：这一页只画"本页 ∩ 章节区间"那一段；交集为空 ⇒ 不画。
         // 端点制之后这里只有一个口径：按页求交（端点自带页身份，不需要任何回退分支）。
         val pageSelection = pageLocalSelectionSlice(selectionChapterRange, current)
-        // 纯标题页（卷名页）的文字已由标题渲染器画过 ⇒ 这里不再画那些 isTitle 行，
+        // 纯标题页（卷页）的文字已由标题渲染器画过 ⇒ 这里不再画那些 isTitle 行，
         // 否则同一段标题会被画两遍（真机截图上就是一列新版 + 一列旧版）。
-        if (current.lines.isNotEmpty() && current.lines.all { it.isTitle }) {
+        // 判定用 page.isVolume（排版自己打的标记），不要用"行是否全是 isTitle"——
+        // 只要页里混进一行空行/其它行，那个条件就不成立，卷页会退回"章首标题"口径（顶对齐）。
+        if (current.isVolume) {
             canvas.restore()
             return
         }
