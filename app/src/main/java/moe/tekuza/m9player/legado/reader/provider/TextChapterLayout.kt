@@ -8,6 +8,7 @@ import moe.tekuza.m9player.EBOOK_IMAGE_MARKER
 import moe.tekuza.m9player.EbookImageRef
 import moe.tekuza.m9player.decodeBitmapBounds
 import moe.tekuza.m9player.legado.reader.M9LayoutMode
+import moe.tekuza.m9player.logDebug
 import moe.tekuza.m9player.legado.reader.M9ReadBookConfig
 import moe.tekuza.m9player.legado.reader.READER_TITLE_SCALE
 import moe.tekuza.m9player.legado.reader.applyM9TextWeight
@@ -18,6 +19,9 @@ import moe.tekuza.m9player.legado.reader.entities.TextColumn
 import moe.tekuza.m9player.legado.reader.entities.TextLine
 import moe.tekuza.m9player.legado.reader.entities.TextPage
 import kotlin.math.max
+
+/** 排版诊断日志的 tag（与 LegadoReaderActivity 的 READER_LAYOUT_LOG_TAG 同名，便于一起筛）。 */
+private const val LAYOUT_LOG_TAG = "M9Layout"
 
 internal class TextChapterLayout(
     private val config: M9ReadBookConfig,
@@ -431,11 +435,15 @@ internal class TextChapterLayout(
         if (lines.size <= 1) return
         val lastBottom = lines.last().lineBottom
         val extra = availableHeight - lastBottom
-        // 撤回 `cf33362`（照 legado 的门判）：那次只撑行距、**没有**像 legado 的 upLinesPosition 那样
-        // `height += surplus`，而本文件是"先定 page.height、再在页收尾时推低行位置"⇒ 行被推到页高之外
-        // ⇒ 真机上出现"页底的字被吞"。恢复长期在用的口径（剩余**大于**一行时按 0.45 行封顶摊开）。
-        if (extra <= lineHeight) return
-        val gap = (extra / (lines.size - 1)).coerceAtMost(lineHeight * 0.45f)
+        // 门判照 legado 的 TextPage.upLinesPosition()：**只有剩余不足一行**时才摊开行距。
+        // 剩余 ≥ 一行 ⇒ 什么都不做（留白留在页底）——这也是 legado 对"章末页/短页"的行为，
+        // 所以我们旧口径（剩余 > 一行时按 0.45 行摊开）才是异类：它把页内行距撑开，而跨页处永远是
+        // 自然间距 ⇒ 两者看起来不一致。
+        if (extra >= lineHeight) return
+        // 分母用 size 而不是 size-1：后者会让最后一行正好落在 availableHeight（贴着裁剪边缘），
+        // 真机表现就是"页底的字被切掉半截"。用 size ⇒ 最后一行下方恰好留出一个 gap 的余量（与行间距同源，
+        // 不是魔法常数），同时页内每行只被摊到 extra/size（10 行时 ≤0.1 行，肉眼与跨页间距一致）。
+        val gap = extra / lines.size
         var offset = 0f
         lines.forEachIndexed { index, line ->
             line.lineTop += offset
@@ -446,6 +454,18 @@ internal class TextChapterLayout(
             line.crossStart += offset
             line.crossEnd += offset
             if (index < lines.lastIndex) offset += gap
+        }
+        // 不变量自检（只在破的时候打一行）：本文件是"先定 page.height、再在页收尾时推低行位置"，
+        // 两者很容易脱钩；脱钩的表现就是"页底字被吞 / 与下一页叠字"。
+        val contentBottom = maxOf(
+            lines.maxOfOrNull { line -> line.lineBottom } ?: 0f,
+            lines.maxOfOrNull { line -> line.crossEnd } ?: 0f
+        )
+        if (contentBottom > availableHeight + 0.5f || contentBottom > visibleHeight + 0.5f) {
+            logDebug(LAYOUT_LOG_TAG) {
+                "bottomOverflow contentBottom=$contentBottom availableHeight=$availableHeight " +
+                    "visibleHeight=$visibleHeight gap=$gap lines=${lines.size}"
+            }
         }
     }
 
