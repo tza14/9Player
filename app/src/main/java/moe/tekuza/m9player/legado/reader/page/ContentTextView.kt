@@ -215,6 +215,17 @@ internal class ContentTextView @JvmOverloads constructor(
     var bodyTitleAlignCenter: Boolean = false
     var bodyTitleTopSpacingPx: Float = 0f
 
+    /**
+     * 这一页标题**实际**用的字号（px）。
+     *
+     * 章首标题 = 宿主下发的 [bodyTitleTextSizePx]；卷页（纯标题页）恒用"正文 × [READER_TITLE_SCALE]"的大字号。
+     * 以前这个判断写在 [drawBodyTitle] 里、并且**反写**回 [bodyTitleTextSizePx] —— 画一张卷页就把字段污染成
+     * 卷标题口径，之后同一视图再画章首标题就偏大。现在只在这里定义，绘制（本类）与测量
+     *（`VerticalTextChapterLayout.titleColumnReserve`）读同一份口径 ⇒ 不会各写一份而差出一列。
+     */
+    private fun resolveBodyTitleTextSizePx(pageTitleStyle: Boolean): Float =
+        if (pageTitleStyle) textSizePxValue * READER_TITLE_SCALE else bodyTitleTextSizePx
+
     private val bodyTitlePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
         typeface = Typeface.create(readerTypeface ?: Typeface.DEFAULT, Typeface.BOLD)
     }
@@ -241,14 +252,15 @@ internal class ContentTextView @JvmOverloads constructor(
         // 样式来源：章首标题用宿主下发的 bodyTitle 字号；纯标题页（卷名页）用卷标题的大字号
         //（= 正文 × READER_TITLE_SCALE，加粗）——这是卷页标题**唯一**的字号来源，
         // 排版那边已经不再为它排任何行（删掉的那套逐字排版是第二套近似）。
-        bodyTitleTextSizePx = if (pageTitleStyle) textSizePxValue * READER_TITLE_SCALE else bodyTitleTextSizePx
+        // 只解析、不回写字段：绘制一张卷页不能改变"章首标题用多大字"这个事实。
+        val titleSizePx = resolveBodyTitleTextSizePx(pageTitleStyle)
         // 颜色由宿主注入的正文色决定（夜间模式/主题）：不设就会退回 Paint 默认黑 ⇒ 黑底黑字。
         bodyTitlePaint.color = textColor
-        bodyTitlePaint.textSize = bodyTitleTextSizePx
+        bodyTitlePaint.textSize = titleSizePx
         // 竖排：标题是**一列（或多列）竖着写的字**，占最右侧（允许占多列，超出可用宽度省略）。
         // 横排：一条横带，用 StaticLayout 与旧 TextView 同引擎。
         if (verticalText) {
-            drawVerticalBodyTitle(canvas, offset, bodyRightEdge, text, centered, screenCentered)
+            drawVerticalBodyTitle(canvas, offset, bodyRightEdge, text, centered, screenCentered, titleSizePx)
             return
         }
         // 横排交给 StaticLayout：画笔必须是 LEFT 对齐（StaticLayout 自己按 setAlignment 排）。
@@ -256,7 +268,7 @@ internal class ContentTextView @JvmOverloads constructor(
         val width = (this.width - paddingLeft - paddingRight).coerceAtLeast(1)
         var layout = bodyTitleLayout
         if (layout == null || layout.width != width) {
-            bodyTitlePaint.textSize = bodyTitleTextSizePx
+            bodyTitlePaint.textSize = titleSizePx
             layout = android.text.StaticLayout.Builder
                 .obtain(text, 0, text.length, bodyTitlePaint, width)
                 .setAlignment(
@@ -298,27 +310,32 @@ internal class ContentTextView @JvmOverloads constructor(
         bodyRightEdge: Float,
         title: String,
         centered: Boolean,
-        screenCentered: Boolean
+        screenCentered: Boolean,
+        titleSizePx: Float
     ) {
         val text = title.takeIf { it.isNotBlank() } ?: return
-        bodyTitlePaint.textSize = bodyTitleTextSizePx
+        bodyTitlePaint.textSize = titleSizePx
         bodyTitlePaint.color = textColor
         bodyTitlePaint.textAlign = Paint.Align.CENTER
         val metrics = bodyTitlePaint.fontMetrics
         // 步进 = descent - ascent：竖排下一个字就是往下挪这么多（不是挪一个行距）。
         val step = (metrics.descent - metrics.ascent).coerceAtLeast(1f)
         val cell = VerticalTextGlyphEngine.estimateCellWidth(bodyTitlePaint)
-        // 列顶与列长：列顶扣掉标题上留白，列长 = 正文区高度 − 上留白。
+        // 以下所有坐标都在**已平移坐标系**里（onDraw 已经把画布按 (paddingLeft, paddingTop) 平移过，
+        // 见本文件 onDraw 的第一行）⇒ 正文区在这个坐标系里是 [0, width − paddingLeft − paddingRight] ×
+        // [0, height − paddingTop − paddingBottom]。再减一次 padding 就是重复计入（卷页标题会偏右偏下）。
+        val contentWidth = width - paddingLeft - paddingRight
+        val contentHeight = height - paddingTop - paddingBottom
+        // 列顶扣掉标题上留白，列长 = 正文区高度 − 上留白。
         // 测量侧扣的是**同一个值**（TextPageFactory.titleTopSpacingPx ← PageView.bodyTitleTopSpacingDp）。
-        val columnTop = paddingTop.toFloat() + bodyTitleTopSpacingPx
-        val bottom = (height - paddingBottom).toFloat()
-        val perColumn = VerticalTitleColumnPlan.rowsPerColumn(bottom - columnTop, step)
+        val columnTop = bodyTitleTopSpacingPx
+        val perColumn = VerticalTitleColumnPlan.rowsPerColumn(contentHeight - columnTop, step)
         // token 规则与测量侧同源：西文整段占多行、空白 token 不占行（见 verticalTitleTokens）。
         val tokens = verticalTitleTokens(text, cell) { bodyTitlePaint.measureText(it) }
         // 边界来自实际布局：正文最右一列的右缘（竖排里 lineBottom 是 x 坐标）⇒ 标题不可能压到正文。
-        val limitX = if (bodyRightEdge > paddingLeft) bodyRightEdge else paddingLeft.toFloat()
+        val limitX = if (bodyRightEdge > 0f) bodyRightEdge else 0f
         // 卷页标题要落在**正文区水平中点**（不是一个字一个字地贴在右边）；章首标题仍贴右（竖排书的首列位置）。
-        val centerX = paddingLeft + (width - paddingLeft - paddingRight) / 2f
+        val centerX = contentWidth / 2f
         val rect = RectF()
         var tokenIndex = 0
         var column = 0
@@ -328,7 +345,7 @@ internal class ContentTextView @JvmOverloads constructor(
             val cellCenterX = if (screenCentered) {
                 centerX - column * cell
             } else {
-                width - paddingRight - column * cell - cell * 0.5f
+                contentWidth - column * cell - cell * 0.5f
             }
             if (!screenCentered && cellCenterX - cell * 0.5f < limitX) {
                 canvas.drawText("…", cellCenterX, columnTop + step, bodyTitlePaint)
@@ -1185,9 +1202,11 @@ internal class ContentTextView @JvmOverloads constructor(
         } else {
             val verticalText = current.isVerticalText()
             if (current.isVolume) {
-                drawBodyTitle(canvas, 0f, verticalText = verticalText, bodyRightEdge = paddingLeft.toFloat(), overrideText = current.title, pageTitleStyle = true, forceCenter = true, screenCentered = true)
+                drawBodyTitle(canvas, 0f, verticalText = verticalText, bodyRightEdge = 0f, overrideText = current.title, pageTitleStyle = true, forceCenter = true, screenCentered = true)
             } else if (current.pageInChapter == 0) {
-                val bodyRightEdge = current.lines.maxOfOrNull { it.lineBottom } ?: paddingLeft.toFloat()
+                // lineBottom 是"已平移坐标系"里的列右缘（排版与绘制同坐标系）——
+                // 没有行时退回 0（= 正文区左缘），标题不与任何正文列比较。
+                val bodyRightEdge = current.lines.maxOfOrNull { it.lineBottom } ?: 0f
                 drawBodyTitle(canvas, 0f, verticalText = verticalText, bodyRightEdge = bodyRightEdge)
             }
             drawPageLines(canvas, current, 0f, 0f, highlightRange, searchRange)
@@ -1216,13 +1235,13 @@ internal class ContentTextView @JvmOverloads constructor(
             // 纯标题页（卷名页 / 只有标题的章）整页交给标题渲染器：竖排时走竖排引擎 ⇒
             // 西文整段旋转、不再一个字母一行。
             val verticalText = textPage.isVerticalText()
-            val bodyRightEdge = textPage.lines.maxOfOrNull { it.lineBottom } ?: paddingLeft.toFloat()
+            val bodyRightEdge = textPage.lines.maxOfOrNull { it.lineBottom } ?: 0f
             if (textPage.isVolume) {
                 drawBodyTitle(
                     canvas = canvas,
                     offset = if (verticalText) offsetX else offsetY,
                     verticalText = verticalText,
-                    bodyRightEdge = paddingLeft.toFloat(),
+                    bodyRightEdge = 0f,
                     overrideText = textPage.title,
                     pageTitleStyle = true,
                     forceCenter = true,
