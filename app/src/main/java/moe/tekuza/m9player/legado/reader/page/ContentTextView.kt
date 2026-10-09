@@ -224,15 +224,21 @@ internal class ContentTextView @JvmOverloads constructor(
      * 画章首标题（只在该章第一页 ✓）。用 StaticLayout ⇒ 折行/字距与旧 TextView 同引擎，
      * 最多两行、超出省略，避免长标题把版式挤歪。
      */
-    private fun drawBodyTitle(canvas: Canvas, offset: Float, verticalText: Boolean, bodyRightEdge: Float) {
-        val text = bodyTitleText?.takeIf { it.isNotBlank() } ?: return
+    private fun drawBodyTitle(
+        canvas: Canvas,
+        offset: Float,
+        verticalText: Boolean,
+        bodyRightEdge: Float,
+        overrideText: String? = null
+    ) {
+        val text = (overrideText ?: bodyTitleText)?.takeIf { it.isNotBlank() } ?: return
         // 颜色由宿主注入的正文色决定（夜间模式/主题）：不设就会退回 Paint 默认黑 ⇒ 黑底黑字。
         bodyTitlePaint.color = textColor
         bodyTitlePaint.textSize = bodyTitleTextSizePx
         // 竖排：标题是**一列（或多列）竖着写的字**，占最右侧（允许占多列，超出可用宽度省略）。
         // 横排：一条横带，用 StaticLayout 与旧 TextView 同引擎。
         if (verticalText) {
-            drawVerticalBodyTitle(canvas, offset, bodyRightEdge)
+            drawVerticalBodyTitle(canvas, offset, bodyRightEdge, text)
             return
         }
         // 横排交给 StaticLayout：画笔必须是 LEFT 对齐（StaticLayout 自己按 setAlignment 排）。
@@ -267,8 +273,8 @@ internal class ContentTextView @JvmOverloads constructor(
      * 走它的 `draw` / `drawLatinRun`，西文整段占多个 cell 一起旋转 ⇒ 不会再出现 `functio` 换列、`ns` 接行。
      * 手写逐字绘制做不到这件事（它只看得到单个字符），那是上一版把 Functions 拆开的根因。
      */
-    private fun drawVerticalBodyTitle(canvas: Canvas, offset: Float, bodyRightEdge: Float) {
-        val text = bodyTitleText?.takeIf { it.isNotBlank() } ?: return
+    private fun drawVerticalBodyTitle(canvas: Canvas, offset: Float, bodyRightEdge: Float, title: String) {
+        val text = title.takeIf { it.isNotBlank() } ?: return
         bodyTitlePaint.textSize = bodyTitleTextSizePx
         bodyTitlePaint.color = textColor
         bodyTitlePaint.textAlign = Paint.Align.CENTER
@@ -1151,9 +1157,11 @@ internal class ContentTextView @JvmOverloads constructor(
         if (scrollPages.isNotEmpty()) {
             drawScrollPages(canvas)
         } else {
-            if (current.pageInChapter == 0) {
+            val verticalText = current.lines.firstOrNull()?.layoutMode == M9LayoutMode.VERTICAL
+            if (current.lines.isNotEmpty() && current.lines.all { it.isTitle }) {
+                drawBodyTitle(canvas, 0f, verticalText = verticalText, bodyRightEdge = paddingLeft.toFloat(), overrideText = current.title)
+            } else if (current.pageInChapter == 0) {
                 val bodyRightEdge = current.lines.maxOfOrNull { it.lineBottom } ?: paddingLeft.toFloat()
-                val verticalText = current.lines.firstOrNull()?.layoutMode == M9LayoutMode.VERTICAL
                 drawBodyTitle(canvas, 0f, verticalText = verticalText, bodyRightEdge = bodyRightEdge)
             }
             drawPageLines(canvas, current, 0f, 0f, highlightRange, searchRange)
@@ -1168,10 +1176,19 @@ internal class ContentTextView @JvmOverloads constructor(
             val offsetX = if (scrollHorizontal) offset else 0f
             val offsetY = if (scrollHorizontal) 0f else offset
             // 章首标题由本视图绘制（跟着第 0 页滚动，不占额外布局高度）。
-            if (textPage.pageInChapter == 0) {
-                val bodyRightEdge = textPage.lines.maxOfOrNull { it.lineBottom } ?: paddingLeft.toFloat()
-                // 竖排与否问**页面自己的行**（排版用同一个事实）；不再借用含义暧昧的 scrollHorizontal。
-                val verticalText = textPage.lines.firstOrNull()?.layoutMode == M9LayoutMode.VERTICAL
+            // 纯标题页（卷名页 / 只有标题的章）整页交给标题渲染器：竖排时走竖排引擎 ⇒
+            // 西文整段旋转、不再一个字母一行（排版那边为这类页生成的是 isTitle 行）。
+            val verticalText = textPage.lines.firstOrNull()?.layoutMode == M9LayoutMode.VERTICAL
+            val bodyRightEdge = textPage.lines.maxOfOrNull { it.lineBottom } ?: paddingLeft.toFloat()
+            if (textPage.lines.isNotEmpty() && textPage.lines.all { it.isTitle }) {
+                drawBodyTitle(
+                    canvas = canvas,
+                    offset = if (verticalText) offsetX else offsetY,
+                    verticalText = verticalText,
+                    bodyRightEdge = paddingLeft.toFloat(),
+                    overrideText = textPage.title
+                )
+            } else if (textPage.pageInChapter == 0) {
                 drawBodyTitle(
                     canvas = canvas,
                     offset = if (verticalText) offsetX else offsetY,
