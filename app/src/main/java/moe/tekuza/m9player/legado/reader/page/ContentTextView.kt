@@ -231,7 +231,8 @@ internal class ContentTextView @JvmOverloads constructor(
         bodyRightEdge: Float,
         overrideText: String? = null,
         pageTitleStyle: Boolean = false,
-        forceCenter: Boolean = false
+        forceCenter: Boolean = false,
+        screenCentered: Boolean = false
     ) {
         val text = (overrideText ?: bodyTitleText)?.takeIf { it.isNotBlank() } ?: return
         // 居中与否：章首标题跟随阅读设置（bodyTitleAlignCenter）；**纯标题页（卷页）恒定居中**，
@@ -246,7 +247,7 @@ internal class ContentTextView @JvmOverloads constructor(
         // 竖排：标题是**一列（或多列）竖着写的字**，占最右侧（允许占多列，超出可用宽度省略）。
         // 横排：一条横带，用 StaticLayout 与旧 TextView 同引擎。
         if (verticalText) {
-            drawVerticalBodyTitle(canvas, offset, bodyRightEdge, text, centered)
+            drawVerticalBodyTitle(canvas, offset, bodyRightEdge, text, centered, screenCentered)
             return
         }
         // 横排交给 StaticLayout：画笔必须是 LEFT 对齐（StaticLayout 自己按 setAlignment 排）。
@@ -268,7 +269,13 @@ internal class ContentTextView @JvmOverloads constructor(
         }
         canvas.save()
         // 画布在 onDraw 里已经按 (paddingLeft, paddingTop) 平移过 ⇒ 这里只加标题留白与该页的滚动偏移。
-        canvas.translate(0f, bodyTitleTopSpacingPx + offset)
+        // 卷页（screenCentered）在正文区**垂直居中**：整块文字的中心落在可用高度中点。
+        val yOffset = if (screenCentered) {
+            ((height - paddingTop - paddingBottom) - layout.height) / 2f
+        } else {
+            0f
+        }
+        canvas.translate(0f, bodyTitleTopSpacingPx + offset + yOffset)
         layout.draw(canvas)
         canvas.restore()
     }
@@ -316,7 +323,8 @@ internal class ContentTextView @JvmOverloads constructor(
         offset: Float,
         bodyRightEdge: Float,
         title: String,
-        centered: Boolean
+        centered: Boolean,
+        screenCentered: Boolean
     ) {
         val text = title.takeIf { it.isNotBlank() } ?: return
         bodyTitlePaint.textSize = bodyTitleTextSizePx
@@ -330,14 +338,20 @@ internal class ContentTextView @JvmOverloads constructor(
         val perColumn = ((bottom - columnTop) / step).toInt().coerceAtLeast(1)
         // 边界来自实际布局：正文最右一列的右缘（竖排里 lineBottom 是 x 坐标）⇒ 标题不可能压到正文。
         val limitX = if (bodyRightEdge > paddingLeft) bodyRightEdge else paddingLeft.toFloat()
+        // 卷页标题要落在**正文区水平中点**（不是一个字一个字地贴在右边）；章首标题仍贴右（竖排书的首列位置）。
+        val centerX = paddingLeft + (width - paddingLeft - paddingRight) / 2f
         val rect = RectF()
         var index = 0
         var column = 0
         canvas.save()
         canvas.translate(offset, 0f)
         while (index < text.length) {
-            val cellCenterX = width - paddingRight - column * cell - cell * 0.5f
-            if (cellCenterX - cell * 0.5f < limitX) {
+            val cellCenterX = if (screenCentered) {
+                centerX - column * cell
+            } else {
+                width - paddingRight - column * cell - cell * 0.5f
+            }
+            if (!screenCentered && cellCenterX - cell * 0.5f < limitX) {
                 canvas.drawText("…", cellCenterX, columnTop + step, bodyTitlePaint)
                 break
             }
@@ -1208,7 +1222,7 @@ internal class ContentTextView @JvmOverloads constructor(
         } else {
             val verticalText = current.lines.firstOrNull()?.layoutMode == M9LayoutMode.VERTICAL
             if (current.isVolume) {
-                drawBodyTitle(canvas, 0f, verticalText = verticalText, bodyRightEdge = paddingLeft.toFloat(), overrideText = current.title, pageTitleStyle = true, forceCenter = true)
+                drawBodyTitle(canvas, 0f, verticalText = verticalText, bodyRightEdge = paddingLeft.toFloat(), overrideText = current.title, pageTitleStyle = true, forceCenter = true, screenCentered = true)
             } else if (current.pageInChapter == 0) {
                 val bodyRightEdge = current.lines.maxOfOrNull { it.lineBottom } ?: paddingLeft.toFloat()
                 drawBodyTitle(canvas, 0f, verticalText = verticalText, bodyRightEdge = bodyRightEdge)
@@ -1237,7 +1251,8 @@ internal class ContentTextView @JvmOverloads constructor(
                     bodyRightEdge = paddingLeft.toFloat(),
                     overrideText = textPage.title,
                     pageTitleStyle = true,
-                    forceCenter = true
+                    forceCenter = true,
+                    screenCentered = true
                 )
             } else if (textPage.pageInChapter == 0) {
                 drawBodyTitle(
