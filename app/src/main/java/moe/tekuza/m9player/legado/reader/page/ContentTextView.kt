@@ -195,6 +195,64 @@ internal class ContentTextView @JvmOverloads constructor(
     private var lastDrawGeomLogAtMs: Long = 0L
 
     /**
+     * 章首正文标题（由**本视图自己绘制**，不再是 PageView 里的独立 TextView）。
+     *
+     * 为什么搬进来：独立视图是 LinearLayout 里的 `WRAP_CONTENT` 子项，而正文视图是 `weight=1`
+     * ⇒ 标题一显隐，正文视图的高度就变 ⇒ "分页高度基准"随之变化。真机上抓到过渡态
+     *（标题已 VISIBLE、正文区还没缩）导致基准多出 131px，于是每页末尾多排一行被裁掉 —— "页底吞字"。
+     * 搬进来后正文视图高度与标题无关 ⇒ 高度只有一个来源。
+     */
+    var bodyTitleText: String? = null
+        set(value) {
+            if (field == value) return
+            field = value
+            bodyTitleLayout = null
+            invalidate()
+        }
+
+    /** 标题字号（px）、对齐、上下留白（px），由宿主按设置传入。 */
+    var bodyTitleTextSizePx: Float = 0f
+    var bodyTitleAlignCenter: Boolean = false
+    var bodyTitleTopSpacingPx: Float = 0f
+    var bodyTitleBottomSpacingPx: Float = 0f
+
+    private val bodyTitlePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+        typeface = Typeface.create(readerTypeface ?: Typeface.DEFAULT, Typeface.BOLD)
+    }
+    private var bodyTitleLayout: android.text.StaticLayout? = null
+
+    /**
+     * 画章首标题（只在该章第一页 ✓）。用 StaticLayout ⇒ 折行/字距与旧 TextView 同引擎，
+     * 最多两行、超出省略，避免长标题把版式挤歪。
+     */
+    private fun drawBodyTitle(canvas: Canvas, offset: Float, horizontal: Boolean) {
+        val text = bodyTitleText?.takeIf { it.isNotBlank() } ?: return
+        val width = (this.width - paddingLeft - paddingRight).coerceAtLeast(1)
+        var layout = bodyTitleLayout
+        if (layout == null || layout.width != width) {
+            bodyTitlePaint.textSize = bodyTitleTextSizePx
+            layout = android.text.StaticLayout.Builder
+                .obtain(text, 0, text.length, bodyTitlePaint, width)
+                .setAlignment(
+                    if (bodyTitleAlignCenter) android.text.Layout.Alignment.ALIGN_CENTER
+                    else android.text.Layout.Alignment.ALIGN_NORMAL
+                )
+                .setMaxLines(2)
+                .setEllipsize(android.text.TextUtils.TruncateAt.END)
+                .setIncludePad(true)
+                .build()
+            bodyTitleLayout = layout
+        }
+        canvas.save()
+        // 画布在 onDraw 里已经按 (paddingLeft, paddingTop) 平移过 ⇒ 这里只加标题留白与该页的滚动偏移。
+        // 横排竖读（滚动轴为 x）时同一套坐标，偏移加在 x 上。
+        if (horizontal) canvas.translate(bodyTitleTopSpacingPx + offset, 0f)
+        else canvas.translate(0f, bodyTitleTopSpacingPx + offset)
+        layout.draw(canvas)
+        canvas.restore()
+    }
+
+    /**
      * 手柄拖动时的几何诊断（限流 500ms）：逐页列出"跨度 span / 布局高度 h / 内容真实底 maxBottom"。
      *
      * 目的只有一个：证明或否证"相邻页的行带在屏幕上重叠"（那时两页都能精确命中 ⇒ 命中在页间摆动、
@@ -1018,6 +1076,7 @@ internal class ContentTextView @JvmOverloads constructor(
         if (scrollPages.isNotEmpty()) {
             drawScrollPages(canvas)
         } else {
+            if (current.pageInChapter == 0) drawBodyTitle(canvas, 0f, horizontal = false)
             drawPageLines(canvas, current, 0f, 0f, highlightRange, searchRange)
         }
         canvas.restore()
@@ -1029,6 +1088,11 @@ internal class ContentTextView @JvmOverloads constructor(
             val offset = scrollOffsetForIndex(index)
             val offsetX = if (scrollHorizontal) offset else 0f
             val offsetY = if (scrollHorizontal) 0f else offset
+            // 章首标题由本视图绘制（跟着第 0 页滚动，不占额外布局高度）。
+            if (textPage.pageInChapter == 0) {
+                if (scrollHorizontal) drawBodyTitle(canvas, offsetX, horizontal = true)
+                else drawBodyTitle(canvas, offsetY, horizontal = false)
+            }
             // 绘制侧几何诊断：**只在真的越出可视区时**打一行（限流 500ms）。
             // 用来分开"布局算错"与"绘制用了别的高度/起点"：布局侧自检是 M9Layout bottomOverflow，
             // 这里是决定性的那一条（viewBottom = 视图高 − 底部内边距）。

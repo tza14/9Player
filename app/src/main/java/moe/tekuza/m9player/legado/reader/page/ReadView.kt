@@ -185,10 +185,9 @@ internal class ReadView @JvmOverloads constructor(
     }
 
     /**
-     * 当前**已显示**的正文标题实际吃掉的高度（未显示为 0）。分页基准用这个值才能与
-     * "此刻显示的是哪一页"解耦——否则显示 A 章时给 B 章分页会算出另一种高度，缓存反复作废。
+     * appliedBodyTitleReservePx 已删除：正文标题改由 `contentView` 自己绘制（不再占布局高度），
+     * 所以"正文区高度 + 标题高度 = 无标题基准"这一步不再需要 —— 正文区的高度与标题显隐无关。
      */
-    val appliedBodyTitleReservePx: Int get() = pageView.appliedBodyTitleReservePx
 
     init {
         addView(targetPageView, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))

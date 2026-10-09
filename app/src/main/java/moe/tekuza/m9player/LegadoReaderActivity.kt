@@ -5487,32 +5487,25 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
             ?: (resources.displayMetrics.widthPixels - dp(44))
     }
 
+    /**
+     * 分页高度基准 = 正文区**实测**高度。
+     *
+     * 历史上这里是"实测 + 标题预留"（把正文区还原成"无标题"高度）——那时标题是 PageView 里
+     * `WRAP_CONTENT` 的独立视图，而正文视图是 `weight=1`，标题一显隐正文区高度就变。真机抓到过渡态：
+     * 标题已 VISIBLE、正文区还没缩 ⇒ 两数相加多出 131px ⇒ 每页末尾多排一行被裁掉（"页底吞字"）。
+     * 现在标题由正文视图自己绘制（不占布局高度）⇒ 正文区高度与标题显隐无关 ⇒ 基准就是它本身，
+     * 只有一个来源，过渡态在结构上不存在。
+     */
     private fun currentNoTitleContentHeightPx(): Int {
-        // 分页高度基准 = 无标题时的正文区高度：当前正文区实测高度 +
-        // （若此刻标题正显示）标题占用高度，保证任何时刻分页都在同一基准上。
-        //
-        // 实测高度还要**加回导航栏避让吃掉的那一段**（照 legado：正文尺寸/分页与系统栏显隐解耦）。
-        // 导航栏只在阅读菜单打开时露出（shouldHideNavigationBarForReaderChrome），那一段本来就被
-        // 菜单自己盖住；若把它算进分页高度，菜单一显隐就改高度 ⇒ 所有章节的分页缓存键失效 ⇒
-        // 整章重排（滚动模式下快速滑动就表现为"一直重复"）。实测日志：同一章在 1836/2032、
-        // 1908/1960 两组高度之间交替，cacheSize 每次掉回 1。
-        // 分页高度 = 正文区**实测**高度（正文区已经让开了状态栏/导航栏，见 contentContainer 的
-        // padding=安全区）。原来在这里再加一次导航栏避让量，会让分页高度比可视区高 63~124px，
-        // 于是每页最后一行被挤到可视区外——就是"下面的字被吞了"。
         val measured = readView.contentHeight.takeIf { it > 0 }
             ?: (resources.displayMetrics.heightPixels - dp(220))
-        // 标题占用问**视图本身**（此刻是否真的占着标题那一行），不要按"当前显示页"重算：
-        // 后者在"显示 A 章、同时给 B 章分页"时会算出另一种基准（实测同一章在 1960/2032 间跳），
-        // 每跳一次整章分页缓存就作废 ⇒ 章末相邻页取不到 ⇒ 卡住/重复。
-        val extra = readView.appliedBodyTitleReservePx
-        // 分页基准日志：正文区实测高度 + 标题预留 + 导航栏预留 = 用于分页的高度。
-        // 与 paginateChapter 打出的 height 对不上时，就是"最后一行被吞"的来源。
+        // 分页基准日志：正文区实测高度 = 用于分页的高度（与 paginateChapter 打出的 height 对不上时，
+        // 就是"最后一行被吞"的来源）。
         logDebug(READER_LAYOUT_LOG_TAG) {
-            "basis measured=$measured extra=$extra navReserve=$navigationBarInsetReservedPx " +
-                "total=${(measured + extra).coerceAtLeast(dp(120))} view=${readView.contentHeight} " +
-                "width=${readView.contentWidth} page=$pageIndex"
+            "basis measured=$measured navReserve=$navigationBarInsetReservedPx " +
+                "view=${readView.contentHeight} width=${readView.contentWidth} page=$pageIndex"
         }
-        return (measured + extra).coerceAtLeast(dp(120))
+        return measured.coerceAtLeast(dp(120))
     }
 
     private fun bodyTitleShownOnCurrentPage(): Boolean {

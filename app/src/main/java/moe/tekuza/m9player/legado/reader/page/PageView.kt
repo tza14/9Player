@@ -33,7 +33,6 @@ internal class PageView(context: Context) : LinearLayout(context) {
     private val headerLeftView = ReaderBatteryTextView(context)
     private val headerMiddleView = ReaderBatteryTextView(context)
     private val headerRightView = ReaderBatteryTextView(context)
-    private val bodyTitleView = TextView(context)
     val contentView = ContentTextView(context)
     private val footerLeftView = ReaderBatteryTextView(context)
     private val footerMiddleView = ReaderBatteryTextView(context)
@@ -94,10 +93,9 @@ internal class PageView(context: Context) : LinearLayout(context) {
             addTipView(headerRightView, Gravity.END or Gravity.CENTER_VERTICAL)
         }, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
         addView(headerDividerView, LayoutParams(LayoutParams.MATCH_PARENT, dp(1)))
-        addView(bodyTitleView.apply {
-            includeFontPadding = true
-            maxLines = 2
-        }, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
+        // 章首标题不再作为**占布局的视图**存在（原来它是 WRAP_CONTENT 子项，而正文视图是 weight=1
+        // ⇒ 标题一显隐，正文区高度就变 ⇒ 分页基准抖 ⇒ 页底吞字）。现在由 contentView 自己绘制，
+        // 预留高度只通过 firstPageReservePx 告诉排版（见 applyBodyTitleStyle / bodyTitleReserveFor）。
         addView(contentView.apply {
             setPadding(0, dp(18), 0, dp(18))
         }, LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f))
@@ -282,7 +280,6 @@ internal class PageView(context: Context) : LinearLayout(context) {
             headerLeftView,
             headerMiddleView,
             headerRightView,
-            bodyTitleView,
             footerLeftView,
             footerMiddleView,
             footerRightView
@@ -461,7 +458,6 @@ internal class PageView(context: Context) : LinearLayout(context) {
         bindTipClick(footerLeftView, ReaderInfoSlot.FOOTER_LEFT, tipFooterLeft)
         bindTipClick(footerMiddleView, ReaderInfoSlot.FOOTER_MIDDLE, tipFooterMiddle)
         bindTipClick(footerRightView, ReaderInfoSlot.FOOTER_RIGHT, tipFooterRight)
-        bodyTitleView.text = page?.title.orEmpty()
         applyBodyTitleStyle()
     }
 
@@ -488,31 +484,21 @@ internal class PageView(context: Context) : LinearLayout(context) {
         // 卷页标题改由正文区居中渲染（isVolume），头部标题不再显示，避免重复。
         val show = page != null && page.pageInChapter == 0 &&
             bodyTitleMode != ReaderBodyTitleMode.HIDE && page.isVolume != true
-        bodyTitleView.visibility = if (show) View.VISIBLE else View.GONE
-        bodyTitleView.gravity = when (bodyTitleMode) {
-            ReaderBodyTitleMode.LEFT -> Gravity.START
-            ReaderBodyTitleMode.CENTER -> Gravity.CENTER
-            ReaderBodyTitleMode.HIDE -> Gravity.START
-        }
-        // 标题格式：加粗 + 可配置字号加成（bodyTitleSizeAddSp），
-        // 与参考实现 legado 用 titlePaint 渲染章节标题的观感对齐。
-        bodyTitleView.typeface = Typeface.create(readerTitleTypeface ?: Typeface.DEFAULT, Typeface.BOLD)
-        bodyTitleView.textSize = contentTextSizeSp + bodyTitleSizeAddSp
-        // 注意：TextView.textSize 属性读写不对称（读返回 px、写按 sp 解释），
-        // 不能把 bodyTitleView.textSize 读回来再赋给测量视图，必须用同一个 sp 值。
-        titleMeasureView.typeface = bodyTitleView.typeface
+        // 标题交给**正文视图自己绘制**：文本、字号、对齐、上下留白一次推过去（内部用 StaticLayout，
+        // 折行与旧 TextView 同引擎）。这样标题不再占布局高度 ⇒ 正文区高度与标题显隐无关
+        // ⇒ 分页基准只有一个来源（原来标题是 WRAP_CONTENT 子项、正文是 weight=1，两者会互推）。
+        contentView.bodyTitleText = if (show) page?.title.orEmpty() else null
+        contentView.bodyTitleTextSizePx = TypedValue.applyDimension(
+            TypedValue.COMPLEX_UNIT_SP,
+            contentTextSizeSp + bodyTitleSizeAddSp,
+            resources.displayMetrics
+        )
+        contentView.bodyTitleAlignCenter = bodyTitleMode == ReaderBodyTitleMode.CENTER
+        contentView.bodyTitleTopSpacingPx = dp(bodyTitleTopSpacingDp).toFloat()
+        contentView.bodyTitleBottomSpacingPx = dp(bodyTitleBottomSpacingDp).toFloat()
+        // 测量视图仍用于"这一章的标题要预留多少"（分页参数，按标题文本确定性计算）。
+        titleMeasureView.typeface = Typeface.create(readerTitleTypeface ?: Typeface.DEFAULT, Typeface.BOLD)
         titleMeasureView.textSize = contentTextSizeSp + bodyTitleSizeAddSp
-        (bodyTitleView.layoutParams as? LayoutParams)?.let { params ->
-            val top = dp(bodyTitleTopSpacingDp)
-            val bottom = dp(bodyTitleBottomSpacingDp)
-            // 只在真的变了时写：无条件赋值会每次换页多触发一趟 requestLayout
-            //（滚动模式每跨一页都会跑一次 updateTipText）。
-            if (params.topMargin != top || params.bottomMargin != bottom) {
-                params.topMargin = top
-                params.bottomMargin = bottom
-                bodyTitleView.layoutParams = params
-            }
-        }
     }
 
     /**
@@ -530,18 +516,8 @@ internal class PageView(context: Context) : LinearLayout(context) {
         return titleMeasureView.measuredHeight + dp(bodyTitleTopSpacingDp) + dp(bodyTitleBottomSpacingDp)
     }
 
-    /**
-     * 当前**已显示**的正文标题实际吃掉的高度（未显示为 0）。分页基准要用它把正文区还原成
-     * "无标题"高度，而且必须问这个视图本身：用"当前页的标题"重算，只要与真实渲染的折行差一行
-     * （≈72px），分页高度就会抖，进而把整章分页缓存冲掉（表现为滚动模式下快速滑动"一直重复"）。
-     */
-    val appliedBodyTitleReservePx: Int
-        get() = if (bodyTitleView.visibility == VISIBLE) {
-            val params = bodyTitleView.layoutParams as? LayoutParams
-            bodyTitleView.measuredHeight + (params?.topMargin ?: 0) + (params?.bottomMargin ?: 0)
-        } else {
-            0
-        }
+    // appliedBodyTitleReservePx 已删除：标题不再是占布局的视图 ⇒ 正文区高度与它无关，
+    // 分页基准直接用 contentView 的实测高度即可（见 LegadoReaderActivity.currentNoTitleContentHeightPx）。
 
     private fun tipText(
         content: ReaderTipContent,
