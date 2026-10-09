@@ -191,6 +191,9 @@ internal class ContentTextView @JvmOverloads constructor(
     /** 手柄拖动时的几何诊断时间戳（自己一份 ⇒ 不会与别的日志互相顶掉）。 */
     private var lastGeometryLogAtMs: Long = 0L
 
+    /** 绘制越界诊断的时间戳（同上，自己一份）。 */
+    private var lastDrawGeomLogAtMs: Long = 0L
+
     /**
      * 手柄拖动时的几何诊断（限流 500ms）：逐页列出"跨度 span / 布局高度 h / 内容真实底 maxBottom"。
      *
@@ -1026,6 +1029,24 @@ internal class ContentTextView @JvmOverloads constructor(
             val offset = scrollOffsetForIndex(index)
             val offsetX = if (scrollHorizontal) offset else 0f
             val offsetY = if (scrollHorizontal) 0f else offset
+            // 绘制侧几何诊断：**只在真的越出可视区时**打一行（限流 500ms）。
+            // 用来分开"布局算错"与"绘制用了别的高度/起点"：布局侧自检是 M9Layout bottomOverflow，
+            // 这里是决定性的那一条（viewBottom = 视图高 − 底部内边距）。
+            val lastCross = textPage.lines.maxOfOrNull { it.crossEnd } ?: 0f
+            val lastBottom = textPage.lines.maxOfOrNull { it.lineBottom } ?: 0f
+            val viewBottom = height - paddingBottom
+            if (offsetY + lastCross > viewBottom + 0.5f) {
+                val nowMs = System.currentTimeMillis()
+                if (nowMs - lastDrawGeomLogAtMs >= 500L) {
+                    lastDrawGeomLogAtMs = nowMs
+                    logDebug("M9Layout") {
+                        "drawOverflow page=${textPage.pageInChapter} ${textPage.charStart}..${textPage.charEnd} " +
+                            "h=${textPage.height} lines=${textPage.lines.size} offsetY=$offsetY " +
+                            "lastBottom=$lastBottom lastCross=$lastCross viewH=$height " +
+                            "padTop=$paddingTop padBottom=$paddingBottom viewBottom=$viewBottom"
+                    }
+                }
+            }
             drawPageLines(
                 canvas = canvas,
                 current = textPage,
