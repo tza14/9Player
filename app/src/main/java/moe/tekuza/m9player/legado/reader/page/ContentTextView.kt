@@ -261,50 +261,66 @@ internal class ContentTextView @JvmOverloads constructor(
     }
 
     /**
-     * 竖排标题：字从上往下叠，写完一列往左开一列（列从右往左），最多占 reservedWidth（由排版预留）。
-     * 用同一个 title paint 逐字绘制 ⇒ 字号/字重与横排一致；超出可用区域就省略。
+     * 竖排标题：字从上往下叠，写完一列往左开一列（列从右往左）。
+     *
+     * 绘制**交给正文同一个引擎**（VerticalTextGlyphEngine）：逐**token**（一个字 / 一整段西文 / 拗音）
+     * 走它的 `draw` / `drawLatinRun`，西文整段占多个 cell 一起旋转 ⇒ 不会再出现 `functio` 换列、`ns` 接行。
+     * 手写逐字绘制做不到这件事（它只看得到单个字符），那是上一版把 Functions 拆开的根因。
      */
     private fun drawVerticalBodyTitle(canvas: Canvas, offset: Float, bodyRightEdge: Float) {
         val text = bodyTitleText?.takeIf { it.isNotBlank() } ?: return
         bodyTitlePaint.textSize = bodyTitleTextSizePx
         bodyTitlePaint.color = textColor
-        // 逐字绘制时 x 是**字心** ⇒ 必须 CENTER；默认 LEFT 会让每个字右偏半个字宽
-        //（真机现象：最右列的字被切掉一半）。
         bodyTitlePaint.textAlign = Paint.Align.CENTER
         val metrics = bodyTitlePaint.fontMetrics
         val step = (metrics.descent - metrics.ascent).coerceAtLeast(1f)
-        val advance = bodyTitleTextSizePx.coerceAtLeast(1f)
+        val cell = VerticalTextGlyphEngine.estimateCellWidth(bodyTitlePaint)
         val columnTop = paddingTop.toFloat() + bodyTitleTopSpacingPx
         val bottom = (height - paddingBottom).toFloat()
         val perColumn = ((bottom - columnTop) / step).toInt().coerceAtLeast(1)
-        // **边界来自实际布局**：正文最右一列的右缘（竖排里 lineBottom 是 x 坐标）。
-        // 标题的每一列都必须落在它右边 ⇒ 不可能压到正文上（不再靠"预留了多少"的算术去猜）。
+        // 边界来自实际布局：正文最右一列的右缘（竖排里 lineBottom 是 x 坐标）⇒ 标题不可能压到正文。
         val limitX = if (bodyRightEdge > paddingLeft) bodyRightEdge else paddingLeft.toFloat()
-        var column = 0
+        val rect = RectF()
         var index = 0
+        var column = 0
         canvas.save()
         canvas.translate(offset, 0f)
         while (index < text.length) {
-            val columnRight = width - paddingRight - column * advance
-            val baselineX = columnRight - advance * 0.5f
-            if (baselineX - advance * 0.5f < limitX) {
-                // 下一列会越过正文 ⇒ 就地省略（不越界、不压正文）
-                canvas.drawText("…", baselineX + advance * 0.5f, columnTop + step, bodyTitlePaint)
+            val cellCenterX = width - paddingRight - column * cell - cell * 0.5f
+            if (cellCenterX - cell * 0.5f < limitX) {
+                canvas.drawText("…", cellCenterX, columnTop + step, bodyTitlePaint)
                 break
             }
-            for (row in 0 until perColumn) {
-                if (index >= text.length) break
-                val char = text[index]
-                index++
-                val baselineY = columnTop + row * step - metrics.ascent
-                // 竖排里居中对齐 = 每一列居中；左对齐 = 贴列顶（与横排 gravity 语义对应）
-                val y = if (bodyTitleAlignCenter) {
-                    val used = minOf(perColumn, text.length) * step
-                    columnTop + (bottom - columnTop - used) / 2f + row * step - metrics.ascent
-                } else {
-                    baselineY
+            var row = 0
+            while (row < perColumn && index < text.length) {
+                val token = VerticalTextGlyphEngine.nextVerticalTextToken(text, index, text.length)
+                if (token.text.isBlank()) {
+                    index = token.sourceEndExclusive.coerceAtLeast(index + 1)
+                    continue
                 }
-                canvas.drawText(char.toString(), baselineX, y, bodyTitlePaint)
+                // 西文整段按需要的 cell 数占位（一起旋转；放不下就整段换列，绝不拆词）
+                val span = if (isSidewaysAsciiText(token.text)) {
+                    kotlin.math.ceil(bodyTitlePaint.measureText(token.text) / cell).toInt().coerceAtLeast(1)
+                } else {
+                    1
+                }
+                if (row + span > perColumn) {
+                    if (row == 0) break
+                    break
+                }
+                rect.set(
+                    cellCenterX - cell * 0.5f,
+                    columnTop + row * step,
+                    cellCenterX + cell * 0.5f,
+                    columnTop + (row + span) * step
+                )
+                if (isSidewaysAsciiText(token.text)) {
+                    VerticalTextGlyphEngine.drawLatinRun(canvas, bodyTitlePaint, token.text, rect)
+                } else {
+                    VerticalTextGlyphEngine.draw(canvas, bodyTitlePaint, token.text, rect)
+                }
+                index = token.sourceEndExclusive.coerceAtLeast(index + 1)
+                row += span
             }
             column++
         }
