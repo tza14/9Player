@@ -80,7 +80,9 @@ internal class VerticalTextChapterLayout(
         val pageStarts = mutableListOf<Int>()
         var currentColumns = mutableListOf<TextLine>()
         var pageStart = 0
-        var x = (visibleWidth - columnWidth).coerceAtLeast(0f)
+        // 章首标题由正文视图**自己绘制在最右几列**（竖排 ✓）⇒ 预留吃掉的是**宽度**：
+        // 首页的列游标整体左移 firstPageReservePx，预算（列长）不变。原来把它当高度扣除 ⇒ 首列压标题。
+        var x = (visibleWidth - columnWidth - firstPageReservePx).coerceAtLeast(0f)
         var paragraphNum = 0
 
         // 章首标题现在由正文视图**自己绘制在同一块区域里**（不再是占高度的独立视图）⇒ 与横排同口径：
@@ -156,10 +158,8 @@ internal class VerticalTextChapterLayout(
                 }
             }
 
-            /** 章首第一列要从标题预留之下开始（测量与落列必须用同一个起点，否则两者会差一个 reserve）。 */
-            fun firstColumnStartY(lineStart: Int): Float =
-                indentYFor(lineStart) +
-                    if (pageColumns.isEmpty() && currentColumns.isEmpty()) firstPageReservePx else 0f
+            /** 章首第一列要从标题预留**左侧**开始（列从右往左排；标题自己占最右的那几列）。 */
+            fun firstColumnStartY(lineStart: Int): Float = indentYFor(lineStart)
             var blockStart = segmentStart
             while (blockStart < segmentEnd) {
                 // 「句子不跨页」开启时才切句子块（块 = 一句）：整句必须放进同一页，放不下就整块

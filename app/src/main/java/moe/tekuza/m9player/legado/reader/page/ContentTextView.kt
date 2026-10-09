@@ -226,6 +226,12 @@ internal class ContentTextView @JvmOverloads constructor(
      */
     private fun drawBodyTitle(canvas: Canvas, offset: Float, horizontal: Boolean) {
         val text = bodyTitleText?.takeIf { it.isNotBlank() } ?: return
+        // 竖排：标题是**一列（或多列）竖着写的字**，占最右侧（(b) 允许占多列，超出可用宽度省略）。
+        // 横排：一条横带，用 StaticLayout 与旧 TextView 同引擎。
+        if (horizontal) {
+            drawVerticalBodyTitle(canvas, offset)
+            return
+        }
         val width = (this.width - paddingLeft - paddingRight).coerceAtLeast(1)
         var layout = bodyTitleLayout
         if (layout == null || layout.width != width) {
@@ -244,10 +250,53 @@ internal class ContentTextView @JvmOverloads constructor(
         }
         canvas.save()
         // 画布在 onDraw 里已经按 (paddingLeft, paddingTop) 平移过 ⇒ 这里只加标题留白与该页的滚动偏移。
-        // 横排竖读（滚动轴为 x）时同一套坐标，偏移加在 x 上。
-        if (horizontal) canvas.translate(bodyTitleTopSpacingPx + offset, 0f)
-        else canvas.translate(0f, bodyTitleTopSpacingPx + offset)
+        canvas.translate(0f, bodyTitleTopSpacingPx + offset)
         layout.draw(canvas)
+        canvas.restore()
+    }
+
+    /**
+     * 竖排标题：字从上往下叠，写完一列往左开一列（列从右往左），最多占 reservedWidth（由排版预留）。
+     * 用同一个 title paint 逐字绘制 ⇒ 字号/字重与横排一致；超出可用区域就省略。
+     */
+    private fun drawVerticalBodyTitle(canvas: Canvas, offset: Float) {
+        val text = bodyTitleText?.takeIf { it.isNotBlank() } ?: return
+        bodyTitlePaint.textSize = bodyTitleTextSizePx
+        val metrics = bodyTitlePaint.fontMetrics
+        val step = (metrics.descent - metrics.ascent).coerceAtLeast(1f)
+        val advance = bodyTitleTextSizePx.coerceAtLeast(1f)
+        val columnTop = paddingTop.toFloat() + bodyTitleTopSpacingPx
+        val bottom = (height - paddingBottom).toFloat()
+        val perColumn = ((bottom - columnTop) / step).toInt().coerceAtLeast(1)
+        var column = 0
+        var index = 0
+        canvas.save()
+        canvas.translate(offset, 0f)
+        while (index < text.length) {
+            val columnRight = width - paddingRight - column * advance
+            val baselineX = columnRight - advance * 0.5f
+            if (baselineX < paddingLeft) {
+                // 没有更多列可放 ⇒ 省略（(a)/(b) 的兜底，不越界）
+                bodyTitlePaint.textSize = bodyTitleTextSizePx
+                canvas.drawText("…", baselineX + advance * 0.5f, columnTop + step, bodyTitlePaint)
+                break
+            }
+            for (row in 0 until perColumn) {
+                if (index >= text.length) break
+                val char = text[index]
+                index++
+                val baselineY = columnTop + row * step - metrics.ascent
+                // 竖排里居中对齐 = 每一列居中；左对齐 = 贴列顶（与横排 gravity 语义对应）
+                val y = if (bodyTitleAlignCenter) {
+                    val used = minOf(perColumn, text.length) * step
+                    columnTop + (bottom - columnTop - used) / 2f + row * step - metrics.ascent
+                } else {
+                    baselineY
+                }
+                canvas.drawText(char.toString(), baselineX, y, bodyTitlePaint)
+            }
+            column++
+        }
         canvas.restore()
     }
 
