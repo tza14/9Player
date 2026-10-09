@@ -277,6 +277,37 @@ internal class ContentTextView @JvmOverloads constructor(
      * 走它的 `draw` / `drawLatinRun`，西文整段占多个 cell 一起旋转 ⇒ 不会再出现 `functio` 换列、`ns` 接行。
      * 手写逐字绘制做不到这件事（它只看得到单个字符），那是上一版把 Functions 拆开的根因。
      */
+    /**
+     * 规划一列：从 [index] 起、在 [perColumn] 行内能放下的 token 与它们占的行数。
+     * 返回 `(下一个 index, 本列占用的行数)`；居中与绘制共用这一次规划 ⇒ 不会出现"两套算法"。
+     * 西文 run 占多行（放不下就整段留给下一列 ⇒ 不拆词）。
+     */
+    private fun planVerticalTitleColumn(
+        text: String,
+        index: Int,
+        perColumn: Int,
+        cell: Float
+    ): Pair<Int, Int> {
+        var cursor = index
+        var rows = 0
+        while (rows < perColumn && cursor < text.length) {
+            val token = VerticalTextGlyphEngine.nextVerticalTextToken(text, cursor, text.length)
+            if (token.text.isBlank()) {
+                cursor = token.sourceEndExclusive.coerceAtLeast(cursor + 1)
+                continue
+            }
+            val span = if (isSidewaysAsciiText(token.text)) {
+                kotlin.math.ceil(bodyTitlePaint.measureText(token.text) / cell).toInt().coerceAtLeast(1)
+            } else {
+                1
+            }
+            if (rows + span > perColumn) break
+            cursor = token.sourceEndExclusive.coerceAtLeast(cursor + 1)
+            rows += span
+        }
+        return cursor to rows
+    }
+
     private fun drawVerticalBodyTitle(canvas: Canvas, offset: Float, bodyRightEdge: Float, title: String) {
         val text = title.takeIf { it.isNotBlank() } ?: return
         bodyTitlePaint.textSize = bodyTitleTextSizePx
@@ -301,6 +332,13 @@ internal class ContentTextView @JvmOverloads constructor(
                 canvas.drawText("…", cellCenterX, columnTop + step, bodyTitlePaint)
                 break
             }
+            // 先规划这一列：居中要看它用了几行；绘制再按同一次规划走（同一事实，不重复算）。
+            val plan = planVerticalTitleColumn(text, index, perColumn, cell)
+            val columnStartY = if (bodyTitleAlignCenter && plan.second < perColumn) {
+                columnTop + (perColumn - plan.second) * step * 0.5f
+            } else {
+                columnTop
+            }
             var row = 0
             while (row < perColumn && index < text.length) {
                 val token = VerticalTextGlyphEngine.nextVerticalTextToken(text, index, text.length)
@@ -314,15 +352,13 @@ internal class ContentTextView @JvmOverloads constructor(
                 } else {
                     1
                 }
-                if (row + span > perColumn) {
-                    if (row == 0) break
-                    break
-                }
+                if (row + span > perColumn) break
+                if (index >= plan.first) break
                 rect.set(
                     cellCenterX - cell * 0.5f,
-                    columnTop + row * step,
+                    columnStartY + row * step,
                     cellCenterX + cell * 0.5f,
-                    columnTop + (row + span) * step
+                    columnStartY + (row + span) * step
                 )
                 if (isSidewaysAsciiText(token.text)) {
                     VerticalTextGlyphEngine.drawLatinRun(canvas, bodyTitlePaint, token.text, rect)
