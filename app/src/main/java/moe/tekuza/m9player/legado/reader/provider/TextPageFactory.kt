@@ -121,12 +121,25 @@ internal class TextPageFactory(
             sentenceStarts = sentenceStartsByChapter[index] ?: emptySet(),
             sentenceEnds = sentenceEndsByChapter[index] ?: emptySet()
         )
+        // 竖排：预留量的是**宽度**（标题占几列 × 列宽），不是高度。调用方按横排口径量出来的
+        // firstPageReservePx > 0 只表示"本章有章首标题"，这里换成竖排自己的量法（=0 仍表示不显示标题）。
+        val reserveForLayout = when (config.layoutMode) {
+            M9LayoutMode.VERTICAL ->
+                if (firstPageReservePx > 0f) {
+                    VerticalTextChapterLayout.titleColumnReserve(
+                        config, chapter.title, contentHeightPx
+                    ).toFloat()
+                } else {
+                    0f
+                }
+            M9LayoutMode.HORIZONTAL -> firstPageReservePx
+        }
         val laidOut = when (config.layoutMode) {
             M9LayoutMode.HORIZONTAL -> TextChapterLayout(
-                config, contentWidthPx, contentHeightPx, firstPageReservePx
+                config, contentWidthPx, contentHeightPx, reserveForLayout
             ).layout(textChapter)
             M9LayoutMode.VERTICAL -> VerticalTextChapterLayout(
-                config, contentWidthPx, contentHeightPx, firstPageReservePx
+                config, contentWidthPx, contentHeightPx, reserveForLayout
             ).layout(textChapter)
         }
         if (chapter.isVolume) {

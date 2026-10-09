@@ -28,6 +28,32 @@ internal class VerticalTextChapterLayout(
     private val visibleHeight: Int,
     private val firstPageReservePx: Float = 0f
 ) {
+    companion object {
+        /**
+         * 竖排章首标题要占的**宽度**（= 列数 × 列宽）。
+         *
+         * 为什么不能用横排那套"标题高度"：竖排的标题是一列（或多列）竖着的字，吃掉的是**宽度**。
+         * 这里的列宽/字步进与 [layout] 里排正文用的是**同一套 config 参数与同一支画笔**，
+         * 列数按"标题字数 ÷ 每列可容字数"算 ⇒ 预留值与实际画出来的标题不会互相打脸。
+         */
+        fun titleColumnReserve(config: M9ReadBookConfig, title: String, columnLengthPx: Int): Int {
+            if (title.isEmpty() || columnLengthPx <= 0) return 0
+            val paint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+                textSize = config.textSizePx * READER_TITLE_SCALE
+                typeface = Typeface.create(config.typeface ?: Typeface.DEFAULT, Typeface.BOLD)
+            }
+            val metrics = paint.fontMetrics
+            val glyphHeight = (metrics.descent - metrics.ascent + config.letterSpacingPx).coerceAtLeast(1f)
+            // 列宽必须与排版正文用的**同一个来源**（VerticalTextGlyphEngine.estimateCellWidth），
+            // 否则预留与实际列宽会差一点点，长标题就会多占/少占一列。
+            val glyphWidth = VerticalTextGlyphEngine.estimateCellWidth(paint)
+            val columnWidth = (glyphWidth + config.lineSpacingPx).coerceAtLeast(1f)
+            val perColumn = (columnLengthPx / glyphHeight).toInt().coerceAtLeast(1)
+            val columns = ((title.length + perColumn - 1) / perColumn).coerceAtLeast(1)
+            return (columns * columnWidth).toInt().coerceAtLeast(1)
+        }
+    }
+
     private val contentPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
         textSize = config.textSizePx
         color = config.textColor
