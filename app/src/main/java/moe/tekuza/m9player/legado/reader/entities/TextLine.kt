@@ -16,7 +16,6 @@ internal data class TextLine(
     var paragraphNum: Int = 0,
     var chapterPosition: Int = 0,
     var pagePosition: Int = 0,
-    var isTitle: Boolean = false,
     var isParagraphEnd: Boolean = false,
     var layoutMode: M9LayoutMode = M9LayoutMode.HORIZONTAL,
     var startX: Float = 0f,

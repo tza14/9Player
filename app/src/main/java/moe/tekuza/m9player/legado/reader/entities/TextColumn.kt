@@ -29,8 +29,9 @@ internal data class TextColumn(
     var isSearchResult: Boolean = false
 
     override fun draw(view: ContentTextView, canvas: Canvas, line: TextLine, selected: Boolean) {
-        // 卷/标题行用标题画笔（大一号 + 加粗）绘制
-        val paint = if (line.isTitle) view.titlePaint else view.contentPaint
+        // 正文一律用正文画笔：章首标题/卷页标题由 ContentTextView 的标题渲染器**自己画**
+        // （那一支用大字号画笔），排版这边不再为标题行生成行 ⇒ 这里没有第二支画笔的分支。
+        val paint = view.contentPaint
         paint.color = when {
             selected || this.selected || isSearchResult -> view.highlightTextColor
             line.isReadAloud -> view.highlightTextColor

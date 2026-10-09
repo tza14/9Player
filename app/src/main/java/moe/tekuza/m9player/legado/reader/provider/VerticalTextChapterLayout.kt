@@ -59,12 +59,6 @@ internal class VerticalTextChapterLayout(
         color = config.textColor
         applyM9TextWeight(config.textWeight, config.typeface)
     }
-    // 卷标题画笔：比正文大一号 + 加粗（与参考实现 legado 的 titlePaint 一致）
-    private val titlePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-        textSize = config.textSizePx * READER_TITLE_SCALE
-        color = config.textColor
-        typeface = Typeface.create(config.typeface ?: Typeface.DEFAULT, Typeface.BOLD)
-    }
     private val fontMetrics = contentPaint.fontMetrics
     private val glyphWidth = VerticalTextGlyphEngine.estimateCellWidth(contentPaint)
     private val baseColumnWidth = (glyphWidth + config.lineSpacingPx).coerceAtLeast(1f)
@@ -379,18 +373,15 @@ internal class VerticalTextChapterLayout(
     }
 
     /**
-     * 卷页（"第一部分 xxx"等）标题页（竖排）：标题单栏竖排，栏水平居中、
-     * 字符垂直居中，与参考实现 legado 的 emptyContent 标题排版一致。
+     * 卷页（"第一部分 xxx"等）标题页（竖排）：**只标记"这是一张标题页"**（title + isVolume），
+     * 一行都不生成 —— 标题由绘制端 `ContentTextView` 的标题渲染器画（走同一个竖排引擎、
+     * 居中对齐，见 `drawVerticalBodyTitle`）。
+     *
+     * 旧实现还在这里逐字排了一行 `isTitle` 行、自己算 x/y 居中：那套算术早就没人读了
+     * （绘制端按 `page.isVolume` 直接跳过所有行），留着就是"第二套近似"——字号/字距一改，
+     * 它和真正画出来的标题就对不上了。已删。
      */
     private fun buildVolumeTitlePage(chapter: TextChapter): TextPage {
-        val paint = titlePaint
-        val metrics = paint.fontMetrics
-        val titleGlyphHeight = (metrics.descent - metrics.ascent).coerceAtLeast(1f)
-        val title = chapter.title.ifBlank { " " }
-        val titleColumnWidth = (titleGlyphHeight + config.lineSpacingPx).coerceAtLeast(1f)
-        val totalHeight = title.length * titleGlyphHeight
-        val x = ((visibleWidth - titleColumnWidth) / 2f).coerceAtLeast(0f)
-        var y = ((visibleHeight - totalHeight) / 2f).coerceAtLeast(0f)
         val page = TextPage(
             index = 0,
             pageInChapter = 0,
@@ -402,34 +393,6 @@ internal class VerticalTextChapterLayout(
             charStart = 0,
             charEnd = 0
         )
-        val line = TextLine(
-            text = title,
-            lineTop = x,
-            lineBase = x + titleColumnWidth / 2f,
-            lineBottom = x + titleColumnWidth,
-            crossStart = y,
-            crossEnd = y + totalHeight,
-            paragraphNum = 1,
-            chapterPosition = 0,
-            pagePosition = 0,
-            isParagraphEnd = true,
-            layoutMode = M9LayoutMode.VERTICAL,
-            isTitle = true
-        )
-        title.forEach { ch ->
-            line.addColumn(
-                TextColumn(
-                    start = y,
-                    end = y + titleGlyphHeight,
-                    charData = ch.toString(),
-                    sourceStart = 0,
-                    sourceEnd = 0
-                )
-            )
-            y += titleGlyphHeight
-        }
-        line.crossEnd = y
-        page.addLine(line)
         page.height = visibleHeight.toFloat()
         page.width = visibleWidth.toFloat()
         return page

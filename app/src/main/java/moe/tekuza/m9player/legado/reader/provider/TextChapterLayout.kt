@@ -1,7 +1,6 @@
 package moe.tekuza.m9player.legado.reader.provider
 
 import android.graphics.Paint
-import android.graphics.Typeface
 import android.text.TextPaint
 import android.util.Log
 import moe.tekuza.m9player.EBOOK_IMAGE_MARKER
@@ -10,7 +9,6 @@ import moe.tekuza.m9player.decodeBitmapBounds
 import moe.tekuza.m9player.legado.reader.M9LayoutMode
 import moe.tekuza.m9player.logDebug
 import moe.tekuza.m9player.legado.reader.M9ReadBookConfig
-import moe.tekuza.m9player.legado.reader.READER_TITLE_SCALE
 import moe.tekuza.m9player.legado.reader.applyM9TextWeight
 import moe.tekuza.m9player.legado.reader.entities.ImageColumn
 import moe.tekuza.m9player.legado.reader.entities.RubyLayoutEngine
@@ -33,12 +31,6 @@ internal class TextChapterLayout(
         textSize = config.textSizePx
         color = config.textColor
         applyM9TextWeight(config.textWeight, config.typeface)
-    }
-    // 卷标题画笔：比正文大一号 + 加粗（与参考实现 legado 的 titlePaint 一致）
-    private val titlePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-        textSize = config.textSizePx * READER_TITLE_SCALE
-        color = config.textColor
-        typeface = Typeface.create(config.typeface ?: Typeface.DEFAULT, Typeface.BOLD)
     }
     private val fontMetrics = contentPaint.fontMetrics
     private val baseLineHeight = (fontMetrics.descent - fontMetrics.ascent + config.lineSpacingPx)
@@ -291,24 +283,15 @@ internal class TextChapterLayout(
     }
 
     /**
-     * 卷页（"第一部分 xxx"等）标题页：标题用卷标题画笔（大一号 + 加粗），
-     * 水平居中、垂直居中，正文区其余部分留空——与参考实现 legado 的
-     * emptyContent 标题排版（y = (visibleHeight - 标题高) / 2）一致。
+     * 卷页（"第一部分 xxx"等）标题页：**只标记"这是一张标题页"**（title + isVolume），
+     * 一行都不生成 —— 标题由绘制端 `ContentTextView` 按 `pageTitleStyle` 绘制
+     *（大一号 + 加粗、水平居中、正文区垂直居中）。
+     *
+     * 旧实现还在这里用 titlePaint 折行、算 `totalHeight`、逐字量宽度做居中：绘制端
+     * 按 `page.isVolume` 直接跳过所有行 ⇒ 那套算术一行都没人读，留着就是第二套近似（字号
+     * 或折行规则一改就与真正画出来的标题不一致）。已删。
      */
     private fun buildVolumeTitlePage(chapter: TextChapter): TextPage {
-        val paint = titlePaint
-        val metrics = paint.fontMetrics
-        val titleLineHeight = (metrics.descent - metrics.ascent).coerceAtLeast(1f)
-        val maxWidth = visibleWidth.toFloat().coerceAtLeast(1f)
-        val titleLines = mutableListOf<String>()
-        var remaining = chapter.title.ifBlank { " " }
-        while (remaining.isNotEmpty()) {
-            val count = paint.breakText(remaining, true, maxWidth, null).coerceAtLeast(1)
-            titleLines += remaining.substring(0, count)
-            remaining = remaining.substring(count)
-        }
-        val totalHeight = titleLines.size * titleLineHeight
-        var y = ((visibleHeight - totalHeight) / 2f).coerceAtLeast(0f)
         val page = TextPage(
             index = 0,
             pageInChapter = 0,
@@ -320,41 +303,6 @@ internal class TextChapterLayout(
             charStart = 0,
             charEnd = 0
         )
-        titleLines.forEach { lineText ->
-            val width = paint.measureText(lineText)
-            val startX = ((visibleWidth - width) / 2f).coerceAtLeast(0f)
-            val line = TextLine(
-                text = lineText,
-                lineTop = y,
-                lineBase = y + titleLineHeight - metrics.descent,
-                lineBottom = y + titleLineHeight,
-                crossStart = y,
-                crossEnd = y + titleLineHeight,
-                paragraphNum = 1,
-                chapterPosition = 0,
-                pagePosition = 0,
-                isParagraphEnd = true,
-                layoutMode = M9LayoutMode.HORIZONTAL,
-                startX = startX,
-                isTitle = true
-            )
-            var x = startX
-            lineText.forEach { ch ->
-                val w = paint.measureText(ch.toString())
-                line.addColumn(
-                    TextColumn(
-                        start = x,
-                        end = x + w,
-                        charData = ch.toString(),
-                        sourceStart = 0,
-                        sourceEnd = 0
-                    )
-                )
-                x += w
-            }
-            page.addLine(line)
-            y += titleLineHeight
-        }
         page.height = visibleHeight.toFloat()
         page.width = visibleWidth.toFloat()
         return page

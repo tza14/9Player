@@ -138,8 +138,6 @@ internal class ContentTextView @JvmOverloads constructor(
     )
 
     val contentPaint = TextPaint(Paint.ANTI_ALIAS_FLAG)
-    /** 卷/标题行画笔：比正文大一号 + 加粗（与布局层 READER_TITLE_SCALE 一致） */
-    val titlePaint = TextPaint(Paint.ANTI_ALIAS_FLAG)
     val selectionPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     val highlightPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     val searchPaint = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -238,8 +236,9 @@ internal class ContentTextView @JvmOverloads constructor(
         // 居中与否：章首标题跟随阅读设置（bodyTitleAlignCenter）；**纯标题页（卷页）恒定居中**，
         // 与设置解耦（照 legado：卷页标题就是居中的，旧注释也写着"卷页标题改由正文区居中渲染"）。
         val centered = forceCenter || bodyTitleAlignCenter
-        // 样式来源：章首标题用宿主下发的 bodyTitle 字号；纯标题页（卷名页）沿用旧的大字号 titlePaint
-        //（= 正文 × READER_TITLE_SCALE，加粗），这样删掉旧的 isTitle 行排版后观感不变。
+        // 样式来源：章首标题用宿主下发的 bodyTitle 字号；纯标题页（卷名页）用卷标题的大字号
+        //（= 正文 × READER_TITLE_SCALE，加粗）——这是卷页标题**唯一**的字号来源，
+        // 排版那边已经不再为它排任何行（删掉的那套逐字排版是第二套近似）。
         bodyTitleTextSizePx = if (pageTitleStyle) textSizePxValue * READER_TITLE_SCALE else bodyTitleTextSizePx
         // 颜色由宿主注入的正文色决定（夜间模式/主题）：不设就会退回 Paint 默认黑 ⇒ 黑底黑字。
         bodyTitlePaint.color = textColor
@@ -449,7 +448,6 @@ internal class ContentTextView @JvmOverloads constructor(
         searchPaint.color = 0xAAFFD54F.toInt()
         underlinePaint.style = Paint.Style.STROKE
         underlinePaint.strokeCap = Paint.Cap.SQUARE
-        applyTitlePaint()
     }
 
     fun setTextColor(color: Int) {
@@ -470,7 +468,6 @@ internal class ContentTextView @JvmOverloads constructor(
     fun setTextSizePx(sizePx: Float) {
         textSizePxValue = sizePx
         contentPaint.textSize = sizePx
-        applyTitlePaint()
         invalidate()
     }
 
@@ -493,14 +490,6 @@ internal class ContentTextView @JvmOverloads constructor(
 
     private fun applyTextTypeface() {
         contentPaint.applyM9TextWeight(textWeight, readerTypeface)
-        applyTitlePaint()
-    }
-
-    /** 标题画笔：跟随正文的字重/字体，字号放大 + 强制加粗。 */
-    private fun applyTitlePaint() {
-        titlePaint.set(contentPaint)
-        titlePaint.textSize = contentPaint.textSize * READER_TITLE_SCALE
-        titlePaint.typeface = Typeface.create(readerTypeface ?: Typeface.DEFAULT, Typeface.BOLD)
     }
 
     fun setPage(page: TextPage?, highlight: IntRange?, search: IntRange?) {
@@ -1210,8 +1199,10 @@ internal class ContentTextView @JvmOverloads constructor(
             (width - paddingLeft - paddingRight).coerceAtLeast(0).toFloat(),
             (height - paddingTop - paddingBottom).coerceAtLeast(0).toFloat()
         )
-        if (current.lines.isEmpty()) {
+        if (current.lines.isEmpty() && !current.isVolume) {
             // 占位页正是"没有 lines"这一支：提示必须在这里画，否则它永远不会出现。
+            // 卷页也是"没有 lines"，但它不是占位页：标题要交给标题渲染器画（见下），不能在这里兜底成
+            // "居中提示 + 横排 fallback 正文"，否则卷页标题会被画成横排小字。
             drawPlaceholderMessage(canvas, current)
             drawFallbackText(canvas, current.text)
             canvas.restore()
@@ -1220,7 +1211,7 @@ internal class ContentTextView @JvmOverloads constructor(
         if (scrollPages.isNotEmpty()) {
             drawScrollPages(canvas)
         } else {
-            val verticalText = current.lines.firstOrNull()?.layoutMode == M9LayoutMode.VERTICAL
+            val verticalText = current.isVerticalText()
             if (current.isVolume) {
                 drawBodyTitle(canvas, 0f, verticalText = verticalText, bodyRightEdge = paddingLeft.toFloat(), overrideText = current.title, pageTitleStyle = true, forceCenter = true, screenCentered = true)
             } else if (current.pageInChapter == 0) {
@@ -1232,6 +1223,17 @@ internal class ContentTextView @JvmOverloads constructor(
         canvas.restore()
     }
 
+    /**
+     * 这一页的文字是不是竖排。
+     *
+     * 有行时**由行说了算**（同一页的行只会是一种排版模式）；卷页一行都没有（标题由标题渲染器画）
+     * ⇒ 退回排版在页上盖的章 [TextPage.layoutMode]，否则竖排卷页的标题会被当成横排去排。
+     */
+    private fun TextPage.isVerticalText(): Boolean {
+        val lineMode = lines.firstOrNull()?.layoutMode ?: layoutMode
+        return lineMode == M9LayoutMode.VERTICAL
+    }
+
     private fun drawScrollPages(canvas: Canvas) {
         scrollPages.forEachIndexed { index, textPage ->
             if (textPage == null) return@forEachIndexed
@@ -1240,8 +1242,8 @@ internal class ContentTextView @JvmOverloads constructor(
             val offsetY = if (scrollHorizontal) 0f else offset
             // 章首标题由本视图绘制（跟着第 0 页滚动，不占额外布局高度）。
             // 纯标题页（卷名页 / 只有标题的章）整页交给标题渲染器：竖排时走竖排引擎 ⇒
-            // 西文整段旋转、不再一个字母一行（排版那边为这类页生成的是 isTitle 行）。
-            val verticalText = textPage.lines.firstOrNull()?.layoutMode == M9LayoutMode.VERTICAL
+            // 西文整段旋转、不再一个字母一行。
+            val verticalText = textPage.isVerticalText()
             val bodyRightEdge = textPage.lines.maxOfOrNull { it.lineBottom } ?: paddingLeft.toFloat()
             if (textPage.isVolume) {
                 drawBodyTitle(
@@ -1322,10 +1324,9 @@ internal class ContentTextView @JvmOverloads constructor(
         // 跨页选区：这一页只画"本页 ∩ 章节区间"那一段；交集为空 ⇒ 不画。
         // 端点制之后这里只有一个口径：按页求交（端点自带页身份，不需要任何回退分支）。
         val pageSelection = pageLocalSelectionSlice(selectionChapterRange, current)
-        // 纯标题页（卷页）的文字已由标题渲染器画过 ⇒ 这里不再画那些 isTitle 行，
-        // 否则同一段标题会被画两遍（真机截图上就是一列新版 + 一列旧版）。
-        // 判定用 page.isVolume（排版自己打的标记），不要用"行是否全是 isTitle"——
-        // 只要页里混进一行空行/其它行，那个条件就不成立，卷页会退回"章首标题"口径（顶对齐）。
+        // 纯标题页（卷页）：标题已由标题渲染器画过，而且排版本来就不再为它生成任何行
+        //（卷页没有 isTitle 行这回事了）⇒ 这里直接返回。
+        // 判定用 page.isVolume（排版自己打的标记），不要用"行是不是空的"——占位页也没有行。
         if (current.isVolume) {
             canvas.restore()
             return

@@ -142,8 +142,10 @@ internal class TextPageFactory(
                 config, contentWidthPx, contentHeightPx, reserveForLayout
             ).layout(textChapter)
         }
-        if (chapter.isVolume) {
-            laidOut.pages.forEach { it.isVolume = true }
+        // 每页都盖上"自己是怎么排出来的"：卷页没有行，绘制端只能靠这个标记决定标题走竖排还是横排。
+        laidOut.pages.forEach { page ->
+            page.layoutMode = config.layoutMode
+            if (chapter.isVolume) page.isVolume = true
         }
         return laidOut
     }
