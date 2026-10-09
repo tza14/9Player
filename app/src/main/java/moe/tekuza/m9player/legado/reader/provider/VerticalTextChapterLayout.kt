@@ -11,7 +11,6 @@ import moe.tekuza.m9player.decodeBitmapBounds
 import moe.tekuza.m9player.isAsciiRunSpaceChar
 import moe.tekuza.m9player.legado.reader.M9LayoutMode
 import moe.tekuza.m9player.legado.reader.M9ReadBookConfig
-import moe.tekuza.m9player.legado.reader.READER_TITLE_SCALE
 import moe.tekuza.m9player.legado.reader.applyM9TextWeight
 import moe.tekuza.m9player.legado.reader.entities.ImageColumn
 import moe.tekuza.m9player.legado.reader.entities.RubyLayoutEngine
@@ -35,17 +34,21 @@ internal class VerticalTextChapterLayout(
          * 为什么不能用横排那套"标题高度"：竖排的标题是一列（或多列）竖着的字，吃掉的是**宽度**。
          *
          * 列数与每列字数**必须和绘制侧同源**（`ContentTextView.drawVerticalBodyTitle`）：
+         * - 字号 = [M9ReadBookConfig.bodyTitleSizePx]，与绘制侧 `resolveBodyTitleTextSizePx` 的
+         *   非卷页分支**同一个值**（宿主 `contentTextSizeSp + bodyTitleSizeAddSp`）。
+         *   这份预留只服务**章首标题**（`chapterFirstPageReservePx` 对卷页返回 0、卷页标题也不占列），
+         *   所以不能再用 `textSizePx * READER_TITLE_SCALE`（那是卷页标题口径）。
          * - 步进 = `descent - ascent`，与绘制侧的 `step` 同一个定义，**不含 letterSpacing**
          *  （绘制侧下一个字就是往下挪这么多；这里多算一份字距会让每列少放一个字 ⇒ 多留一列
          *   ⇒ 正文右缘左移 ⇒ 长标题提前被省略）。
          * - 列长 = 调用方给的可用列长，调用方（`TextPageFactory`）已经从正文区高度里扣掉了
-         *   标题上留白 `bodyTitleTopSpacingPx`，与绘制侧 `columnTop = paddingTop + 上留白` 对齐。
+         *   标题上留白 `bodyTitleTopSpacingPx`，与绘制侧 `columnTop = 上留白`（已平移坐标系）对齐。
          * - 列数走 [VerticalTitleColumnPlan]，token 规则走 [verticalTitleTokens]，与绘制侧同一份。
          */
         fun titleColumnReserve(config: M9ReadBookConfig, title: String, columnLengthPx: Float): Int {
             if (title.isEmpty() || columnLengthPx <= 0f) return 0
             val paint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-                textSize = config.textSizePx * READER_TITLE_SCALE
+                textSize = config.bodyTitleSizePx
                 typeface = Typeface.create(config.typeface ?: Typeface.DEFAULT, Typeface.BOLD)
             }
             val metrics = paint.fontMetrics

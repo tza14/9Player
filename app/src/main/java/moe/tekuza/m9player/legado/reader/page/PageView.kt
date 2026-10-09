@@ -488,17 +488,30 @@ internal class PageView(context: Context) : LinearLayout(context) {
         // 折行与旧 TextView 同引擎）。这样标题不再占布局高度 ⇒ 正文区高度与标题显隐无关
         // ⇒ 分页基准只有一个来源（原来标题是 WRAP_CONTENT 子项、正文是 weight=1，两者会互推）。
         contentView.bodyTitleText = if (show) page?.title.orEmpty() else null
-        contentView.bodyTitleTextSizePx = TypedValue.applyDimension(
-            TypedValue.COMPLEX_UNIT_SP,
-            contentTextSizeSp + bodyTitleSizeAddSp,
-            resources.displayMetrics
-        )
+        contentView.bodyTitleTextSizePx = bodyTitleTextSizePx()
         contentView.bodyTitleAlignCenter = bodyTitleMode == ReaderBodyTitleMode.CENTER
         contentView.bodyTitleTopSpacingPx = dp(bodyTitleTopSpacingDp).toFloat()
         // 测量视图仍用于"这一章的标题要预留多少"（分页参数，按标题文本确定性计算）。
         titleMeasureView.typeface = Typeface.create(readerTitleTypeface ?: Typeface.DEFAULT, Typeface.BOLD)
         titleMeasureView.textSize = contentTextSizeSp + bodyTitleSizeAddSp
     }
+
+    /**
+     * 章首标题的字号（px）—— **绘制与分页测量共用的唯一一份**。
+     *
+     * 绘制端拿它当 `ContentTextView.bodyTitleTextSizePx`；竖排分页拿它当
+     * `M9ReadBookConfig.bodyTitleSizePx` 去量"标题要占几列宽"。两处各写一遍
+     * `contentTextSizeSp + bodyTitleSizeAddSp` 就有漂移风险（少一份字号 ⇒ 每列多塞一个字
+     * ⇒ 少留一列 ⇒ 长标题被提前省略），所以只在这里算。
+     */
+    private fun bodyTitleTextSizePx(): Float = TypedValue.applyDimension(
+        TypedValue.COMPLEX_UNIT_SP,
+        contentTextSizeSp + bodyTitleSizeAddSp,
+        resources.displayMetrics
+    )
+
+    /** 见 [bodyTitleTextSizePx]（分页侧要读同一个值）。 */
+    val bodyTitleSizePx: Float get() = bodyTitleTextSizePx()
 
     /**
      * 计算某章节标题占用的垂直空间（含上下边距），供分页时预留：

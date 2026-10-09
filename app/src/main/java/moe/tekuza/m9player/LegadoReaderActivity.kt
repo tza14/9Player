@@ -5440,13 +5440,17 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
                 paddingRightPx = dp(readerPaddingRightDp),
                 layoutMode = readerLayoutMode,
                 pageAnim = readerPageAnim,
-                showRubyText = showRubyText
+                showRubyText = showRubyText,
+                // 竖排章首标题的预留宽度按**章首标题自己的字号**量（= 宿主推给绘制端的那个值），
+                // 不是正文 × READER_TITLE_SCALE（那是卷标题口径，且卷页的预留恒为 0）。
+                bodyTitleSizePx = readView.bodyTitleSizePx
             ),
             emptyPageText = readerString(R.string.reader_no_text),
             sentenceStartsByChapter = sentenceBoundariesByChapter.mapValues { it.value.first },
             sentenceEndsByChapter = sentenceBoundariesByChapter.mapValues { it.value.second },
-            // 竖排标题的列长与绘制侧同源：绘制侧的列顶是 paddingTop + 这份上留白
-            //（ContentTextView.bodyTitleTopSpacingPx，同一个 reader 设置值），测量侧必须扣掉同一份。
+            // 竖排标题的列长与绘制侧同源：绘制侧的列顶就是这份上留白
+            //（ContentTextView.bodyTitleTopSpacingPx，同一个 reader 设置值；画布已按 paddingTop 平移），
+            // 测量侧必须扣掉同一份。
             titleTopSpacingPx = dp(bodyTitleTopSpacingDp).toFloat()
         )
     }

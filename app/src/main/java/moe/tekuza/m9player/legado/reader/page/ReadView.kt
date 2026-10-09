@@ -179,6 +179,12 @@ internal class ReadView @JvmOverloads constructor(
             ).coerceAtLeast(0)
     val textSizePx: Float get() = pageView.contentView.textSizePx
 
+    /**
+     * 章首标题的字号（px）：与绘制端用的是同一个值（见 `PageView.bodyTitleSizePx`）。
+     * 竖排分页量"标题占几列宽"必须用它，而不是正文/卷标题口径。
+     */
+    val bodyTitleSizePx: Float get() = pageView.bodyTitleSizePx
+
     /** 章节标题占用高度（含边距），供分页预留；标题隐藏时返回 0。 */
     fun bodyTitleReserveFor(title: String, contentWidthPx: Int): Int {
         return pageView.bodyTitleReserveFor(title, contentWidthPx)
