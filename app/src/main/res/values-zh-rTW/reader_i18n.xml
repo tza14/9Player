@@ -225,6 +225,8 @@
     <string name="reader_chapter_source">章節來源</string>
     <string name="reader_chapter_source_book">書的章節</string>
     <string name="reader_chapter_source_m4b">M4B 章節</string>
+    <string name="reader_chapter_detail_toc_only">依目錄</string>
+    <string name="reader_chapter_detail_body_headings">含正文標題</string>
     <string name="reader_chapter_source_m4b_unavailable">目前音訊沒有可用的 M4B 章節，已回退到書的章節</string>
     <string name="reader_ebook_not_ready">ebook 還沒載入完成</string>
     <string name="reader_match_title">Match</string>

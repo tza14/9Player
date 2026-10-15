@@ -225,6 +225,8 @@
     <string name="reader_chapter_source">章の参照元</string>
     <string name="reader_chapter_source_book">本の章</string>
     <string name="reader_chapter_source_m4b">M4B の章</string>
+    <string name="reader_chapter_detail_toc_only">目次どおり</string>
+    <string name="reader_chapter_detail_body_headings">本文の見出しも</string>
     <string name="reader_chapter_source_m4b_unavailable">現在の音声には利用できる M4B 章がないため、本の章に戻しました</string>
     <string name="reader_ebook_not_ready">ebook はまだ読み込み中です</string>
     <string name="reader_match_title">マッチ</string>

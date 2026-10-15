@@ -26,7 +26,7 @@ import java.nio.charset.StandardCharsets
  * 别指望 stamp 里的条目缓存版本兜住它 —— 那只在"重新解包"时才变；回读指纹也只自检
  * "缓存 vs 它自己的 manifest"，同样发现不了逻辑变化。这个常量是唯一的显式作废开关。
  */
-private const val EPUB_DOC_CACHE_VERSION = 1
+private const val EPUB_DOC_CACHE_VERSION = 3
 private const val EPUB_DOC_DIR = "reader_doc_v1"
 private const val EPUB_DOC_MANIFEST = "manifest.json"
 
@@ -34,16 +34,24 @@ private const val EPUB_DOC_MANIFEST = "manifest.json"
 private const val DOC_CACHE_LOG_TAG = "EbookReaderCore"
 
 /**
- * 解析缓存的失效键：条目缓存目录里 `reader_index.json` 的文本指纹 + charset + 版本。
+ * 解析缓存的失效键：条目缓存目录里 `reader_index.json` 的文本指纹 + charset + 章节详细度 + 版本。
  * 条目缓存因换书/换 charset 而重建时这个值就变 ⇒ 解析缓存自然失效（不必额外读源文件 mtime）。
  * 读不到 index 时返回 null ⇒ 完全不用解析缓存（宁可不省时间，也不能读错书）。
+ *
+ * **章节详细度必须在这个键里**：切档会改变分章结果（同一个文件从"一章"变成"六章"），
+ * 不带上它的话切了设置仍会命中旧解析，看起来就是"设置没生效"。
  */
-internal fun epubDocumentCacheStamp(root: File, preferredCharsetName: String?): String? {
+internal fun epubDocumentCacheStamp(
+    root: File,
+    preferredCharsetName: String?,
+    chapterDetailMode: ReaderChapterDetailMode
+): String? {
     val index = File(root, "reader_index.json")
     if (!index.isFile) return null
     return runCatching {
         val text = index.readText(StandardCharsets.UTF_8)
-        "$EPUB_DOC_CACHE_VERSION:${text.hashCode()}:${text.length}:${preferredCharsetName.orEmpty()}"
+        "$EPUB_DOC_CACHE_VERSION:${text.hashCode()}:${text.length}:${preferredCharsetName.orEmpty()}:" +
+            chapterDetailMode.name
     }.getOrNull()
 }
 
@@ -82,7 +90,8 @@ internal fun loadCachedEbookDocument(root: File, stamp: String): EbookDocument? 
                 isVolume = item.optBoolean("isVolume"),
                 level = item.optInt("level"),
                 isGroup = item.optBoolean("isGroup"),
-                titleFromMarkup = item.optBoolean("titleFromMarkup", true)
+                titleFromMarkup = item.optBoolean("titleFromMarkup", true),
+                mergesIntoPrevious = item.optBoolean("mergesIntoPrevious")
             )
         }
         val document = EbookDocument(
@@ -132,6 +141,7 @@ internal fun saveCachedEbookDocument(root: File, document: EbookDocument, stamp:
                         put("level", chapter.level)
                         put("isGroup", chapter.isGroup)
                         put("titleFromMarkup", chapter.titleFromMarkup)
+                        put("mergesIntoPrevious", chapter.mergesIntoPrevious)
                         put("textLength", chapter.text.length)
                         put("imageCount", chapter.images.size)
                         put("rubyCount", chapter.rubySpans.size)
@@ -170,6 +180,7 @@ private fun fingerprintMatches(document: EbookDocument, manifest: JSONObject): B
         if (item.optInt("level") != chapter.level) return false
         if (item.optBoolean("isGroup") != chapter.isGroup) return false
         if (item.optBoolean("titleFromMarkup", true) != chapter.titleFromMarkup) return false
+        if (item.optBoolean("mergesIntoPrevious") != chapter.mergesIntoPrevious) return false
     }
     return true
 }

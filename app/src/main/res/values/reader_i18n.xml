@@ -241,6 +241,8 @@
     <string name="reader_chapter_source">章节来源</string>
     <string name="reader_chapter_source_book">书的章节</string>
     <string name="reader_chapter_source_m4b">M4B章节</string>
+    <string name="reader_chapter_detail_toc_only">依目录</string>
+    <string name="reader_chapter_detail_body_headings">含正文标题</string>
     <string name="reader_chapter_source_m4b_unavailable">当前音频没有可用的 M4B 章节，已回退到书的章节</string>
     <string name="reader_ebook_not_ready">ebook 还没有加载完成</string>
     <string name="reader_match_title">Match</string>

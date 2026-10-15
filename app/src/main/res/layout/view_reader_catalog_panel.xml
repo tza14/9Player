@@ -65,6 +65,21 @@
             android:text="@string/bookmark"
             android:textColor="#2C241B"
             android:textSize="14sp" />
+
+        <!-- 章节详细度：目录为准 / 目录 + 正文标题。开关的后果就在这个列表上，所以放在这里，
+             而不是塞进满是排版项的"設定"对话框。只在"章"页可见（见 updateCatalogTabs）。 -->
+        <TextView
+            android:id="@+id/reader_catalog_detail_mode"
+            android:layout_width="wrap_content"
+            android:layout_height="34dp"
+            android:layout_marginStart="8dp"
+            android:background="@drawable/reader_menu_touch"
+            android:gravity="center"
+            android:paddingStart="10dp"
+            android:paddingEnd="10dp"
+            android:text="@string/reader_chapter_detail_toc_only"
+            android:textColor="#2C241B"
+            android:textSize="13sp" />
     </LinearLayout>
 
     <EditText

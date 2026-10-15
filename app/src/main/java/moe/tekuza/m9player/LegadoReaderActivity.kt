@@ -239,6 +239,8 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
     private lateinit var catalogSearchInputView: EditText
     private lateinit var catalogTabChaptersView: TextView
     private lateinit var catalogTabBookmarksView: TextView
+    /** 目次面板头部的"章节详细度"切换（只在"章"页可见）。 */
+    private lateinit var catalogDetailModeView: TextView
     private lateinit var searchPanel: View
     private lateinit var searchInputView: EditText
     private lateinit var searchResultInfoView: TextView
@@ -288,6 +290,16 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
     private var audioSeekSyncDisplayMs: Long? = null
     private var audioSeekSyncTargetUntilElapsedMs: Long = 0L
     private var audioSeekSyncGeneration: Long = 0L
+    /**
+     * "我正在为谁载入"的**单槽**登记。三个来路都写它 —— 小节标记跳转
+     * （[showSectionTitlePageForCue]）、cue 定位、遇图暂停的跨章载入（[requestImageChapterLoad]）；
+     * 消费方靠 `pendingAudioSyncLoadAnchor == <自己那个 anchor>` 认领（载入尾部清槽、失败补挂计时）。
+     *
+     * 所以它**不是**"遇图暂停在途"的标志：两个来路前后脚发生时后写的顶掉先写的，先前那次载入的
+     * 成功/失败分支就认不出自己，那份**补偿**静默失效（不崩、不报错）。遇图计时另有兜底：
+     * 画面切到插图章后 [resumeImagePauseIfPageLeft] 会补挂，所以被顶掉不会卡在暂停态。
+     * 真要在意就把图片暂停的载入拆成单独的槽。
+     */
     private var pendingAudioSyncLoadAnchor: ReaderPageAnchor? = null
     private var textSelectionActive: Boolean = false
     private var player: ExoPlayer? = null
@@ -462,6 +474,8 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
     private var chapterSeekBarTracking: Boolean = false
     private var confirmSkipToChapter: Boolean = false
     private var chapterSourceMode: ReaderChapterSourceMode = ReaderChapterSourceMode.BOOK
+    /** 章节详细度（目录为准 / 目录 + 正文标题）。改变它必须重新解析（分章结果不同）。 */
+    private var chapterDetailMode: ReaderChapterDetailMode = ReaderChapterDetailMode.TOC_ONLY
     private var m4bChapters: List<M4bChapter> = emptyList()
     private var m4bChapterLoadJob: Job? = null
     private var keepScreenOn: Boolean = false
@@ -479,7 +493,29 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
     private var lastSyncSkipLogAtMs: Long = 0L
     private var syncSkipLogCount: Int = 0
     private var imagePauseResumeJob: Job? = null
-    private var imagePausePageIndex: Int? = null
+
+    /**
+     * 遇图暂停要显示的那一页（章 + 章内偏移）；null = 当前没有图片暂停。
+     *
+     * 存锚点而不是页码：整页插图常常单独成一个章节，它不在当前分页（[pages] 只有正在显示的那
+     * 一章）里，切过去是异步载入的 —— 载入完成之前根本算不出页码。
+     */
+    private var imagePauseAnchor: ReaderPageAnchor? = null
+
+    /** 发起暂停时正在显示哪一章：用来区分"还在往插图页翻"与"用户自己翻走了" */
+    private var imagePauseFromChapterIndex: Int = -1
+
+    /** 插图页**已经显示出来**了吗（载入途中画面上还是旧章，不能当成用户翻走了） */
+    private var imagePausePageShown: Boolean = false
+
+    /**
+     * 这次图片暂停的 N 秒计时已经起过了吗。
+     *
+     * 计时从「插图真的出现在画面上」开始算（不是按下暂停的那一刻）：插图在别的章时要先载入，
+     * 若在暂停那一刻就开始计时，用户实际看图的时间就少了这一段载入耗时。
+     * 单独用旗标而不是看 `imagePauseResumeJob`：暂停秒数设成 0（只停不自动续播）时本来就不建 job。
+     */
+    private var imagePauseResumeArmed: Boolean = false
     private var currentChapterImageStops: List<ReaderChapterImageStop> = emptyList()
     private var currentChapterImageStopIndex: Int = 0
     private var currentChapterImageStopChapterIndex: Int = -1
@@ -488,6 +524,8 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
     private var pendingRestoreAnchor: ReaderPageAnchor? = null
     private var loadedDocumentBookUriText: String? = null
     private var loadedDocumentCharsetName: String? = null
+    /** 解析这份 document 时用的章节详细度；与当前设置不一致就必须重解析（分章结果不同）。 */
+    private var loadedDocumentChapterDetailMode: ReaderChapterDetailMode? = null
     private var floatingOverlayStartJob: Job? = null
     private var suppressFloatingOverlayOnStop: Boolean = false
     private var imageGalleryOverlay: View? = null
@@ -1642,6 +1680,10 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
                     bindCatalogList()
                 }
             }
+            findViewById<TextView>(R.id.reader_catalog_detail_mode).also {
+                catalogDetailModeView = it
+                it.setOnClickListener { toggleChapterDetailMode() }
+            }
             findViewById<EditText>(R.id.reader_catalog_search_input).also { input ->
                 catalogSearchInputView = input
                 input.addTextChangedListener(object : TextWatcher {
@@ -2117,6 +2159,7 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         selectionPrimaryActionKey = defaults.selectionPrimaryActionKey
         progressByChapter = defaults.progressByChapter
         chapterSourceMode = defaults.chapterSourceMode
+        chapterDetailMode = defaults.chapterDetailMode
         keepScreenOn = defaults.keepScreenOn
         noAnimScrollPage = defaults.noAnimScrollPage
         saveEbookImageSpoilerEnabled(this, false)
@@ -2600,6 +2643,7 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
                 document = null
                 loadedDocumentBookUriText = null
                 loadedDocumentCharsetName = null
+                loadedDocumentChapterDetailMode = null
                 cueMatchesByCueIndex = emptyMap()
                 matchData = null
                 audioCueIndex = -1
@@ -2623,6 +2667,21 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
             gravity = Gravity.CENTER_VERTICAL
             includeFontPadding = true
         }
+    }
+
+    /**
+     * 设置项里"一行文字 / 一个勾选项"的布局参数：高度**至少** [minHeightDp]，文字折行时跟着长高。
+     *
+     * 别写成固定高度：小屏（或大字号）下同一个标签会折成两三行，固定高度直接把下面的行切掉。
+     * 日文标签尤其容易折 —— 例如「画像で一時停止する秒数（0=ページ移動で再開）」在 28dp 的行里
+     * 第二行只露出半截。文字放得下时 [View.setMinimumHeight] 让它和原来一样高，观感不变。
+     */
+    private fun wrapRowParams(view: View, minHeightDp: Int): LinearLayout.LayoutParams {
+        view.minimumHeight = dp(minHeightDp)
+        return LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        )
     }
 
     private fun currentReaderTitle(): String {
@@ -3152,6 +3211,73 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
             } else {
                 readerString(R.string.reader_catalog_search_bookmarks)
             }
+        // 章节详细度只在"章"页有意义（书签页没有章节列表）
+        catalogDetailModeView.visibility =
+            if (catalogMode == CatalogMode.CHAPTERS) View.VISIBLE else View.GONE
+        applyChapterDetailModeChip()
+    }
+
+    /**
+     * "章节详细度"开关的样子：标签文字**就是当前档位**（"目次どおり" / "本文の見出しも"），
+     * 状态本身已经写在文字上；用强调色再加一层"这一档开着"。
+     *
+     * 别照抄上面两个 tab 的 `activeText`（白字 + 强调色底）：`reader_menu_touch` 的 tint 在
+     * 这块面板上铺不出实底，结果是奶油底上的白字 —— 实测最暗像素 luma 716/765，等于看不见。
+     * 强调色文字和"当前章"高亮用的是同一个色，这个面板上已证明两种主题下都读得清。
+     */
+    private fun applyChapterDetailModeChip() {
+        if (!::catalogDetailModeView.isInitialized) return
+        val isBodyHeadings = chapterDetailMode == ReaderChapterDetailMode.BODY_HEADINGS
+        catalogDetailModeView.text = readerString(
+            if (isBodyHeadings) {
+                R.string.reader_chapter_detail_body_headings
+            } else {
+                R.string.reader_chapter_detail_toc_only
+            }
+        )
+        catalogDetailModeView.setTextColor(
+            if (isBodyHeadings) accentColor() else currentMenuTextColor()
+        )
+        catalogDetailModeView.setTypeface(null, if (isBodyHeadings) Typeface.BOLD else Typeface.NORMAL)
+        catalogDetailModeView.backgroundTintList = null
+    }
+
+    /**
+     * 切换"章节详细度"并重新分章。
+     *
+     * 两档的分章结果不同（同一个文件从"一章"变成"六章"），所以必须丢掉已解析的 document 重新解析
+     * —— 与换 charset 同一套做法（见 [showEncodingMenu]）。档位进了解析缓存的失效键
+     * （见 `epubDocumentCacheStamp`），所以绝不会读到另一档的旧结果；缓存目录只有一份，
+     * 因此本次会重解析并覆盖它，切回来同样要重解析一次。
+     */
+    private fun toggleChapterDetailMode() {
+        chapterDetailMode = when (chapterDetailMode) {
+            ReaderChapterDetailMode.TOC_ONLY -> ReaderChapterDetailMode.BODY_HEADINGS
+            ReaderChapterDetailMode.BODY_HEADINGS -> ReaderChapterDetailMode.TOC_ONLY
+        }
+        persistReaderSettings()
+        document = null
+        loadedDocumentBookUriText = null
+        loadedDocumentCharsetName = null
+        loadedDocumentChapterDetailMode = null
+        cueMatchesByCueIndex = emptyMap()
+        matchData = null
+        audioCueIndex = -1
+        activeCueIndex = -1
+        // 先把开关自身的文字/颜色换掉（列表要等新 document 解析完才刷得动，
+        // 见 refreshChapterCatalogIfVisible）
+        applyChapterDetailModeChip()
+        loadDisplayedBook(anchor = currentPageAnchor(), forceDocumentReload = true)
+    }
+
+    /** 目次面板开着时跟着刷新（关着的话下次打开自然会重建）。 */
+    private fun refreshChapterCatalogIfVisible() {
+        if (::catalogPanel.isInitialized &&
+            catalogPanel.visibility == View.VISIBLE &&
+            catalogMode == CatalogMode.CHAPTERS
+        ) {
+            bindCatalogList()
+        }
     }
 
     private fun bindChapterCatalogList() {
@@ -5278,8 +5404,15 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
                 }
                 if (cueMatchesByCueIndex.isNotEmpty()) {
                     logDebug(LEGADO_READER_LOG_TAG) { "readerStartup syncToAudioPosition begin" }
+                    // 图片暂停在途时这次确认同步不抢画面：否则 pendingPlayerOpenAudioReveal
+                    // 会把刚画出来的插图页顶回音频句，那一帧的 renderCurrentPage 又会把这轮暂停
+                    // 当成"用户翻走了"直接恢复播放 —— 用户看到"停一下又自己播了"、插图没看成。
+                    // 只压这一帧的翻页权限，不动 pendingPlayerOpenAudioReveal（它下面照样被消费，
+                    // 免得更晚再由 revealPendingPlayerOpenAudioPositionIfNeeded 抢一次画面）；
+                    // 暂停结束时 resumeFromImagePause 自己会强制定位回 cue 句，开书定位不会丢。
                     syncToAudioPosition(
-                        allowPageJump = isAudioPlaybackRequested() || pendingPlayerOpenAudioReveal,
+                        allowPageJump = imagePauseAnchor == null &&
+                            (isAudioPlaybackRequested() || pendingPlayerOpenAudioReveal),
                         forceReveal = pendingPlayerOpenAudioReveal
                     )
                     pendingPlayerOpenAudioReveal = false
@@ -5300,8 +5433,15 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
                 logDebug(LEGADO_READER_LOG_TAG) {
                     "readerStartup done=${SystemClock.elapsedRealtime() - startupStartMs}ms pageIndex=$pageIndex"
                 }
+                // 切"章节详细度"时目次面板是开着的，而分章结果整个换了 —— 跟着刷新列表
+                refreshChapterCatalogIfVisible()
             }.onFailure { error ->
                 if (error is CancellationException) return@onFailure
+                // 这次载入如果是为遇图暂停服务的（插图章），失败了也不能把暂停吞掉：
+                // 画面留在旧页没关系，看图计时得照常起（否则会一直停在暂停态且不自动续播）。
+                if (imagePauseAnchor != null && pendingAudioSyncLoadAnchor == imagePauseAnchor) {
+                    armImagePauseResumeTimer()
+                }
                 Log.w(
                     LEGADO_READER_LOG_TAG,
                     "readerStartup failed after ${SystemClock.elapsedRealtime() - startupStartMs}ms",
@@ -5329,10 +5469,12 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         val canReuseDocument = !forceDocumentReload &&
             document != null &&
             loadedDocumentBookUriText == bookUriText &&
-            loadedDocumentCharsetName == preferredCharsetName
+            loadedDocumentCharsetName == preferredCharsetName &&
+            loadedDocumentChapterDetailMode == chapterDetailMode
         if (canReuseDocument) {
             logDebug(LEGADO_READER_LOG_TAG) {
-                "readerStartup loadOrReuseDocument reused bookUri=$bookUriText charset=$preferredCharsetName"
+                "readerStartup loadOrReuseDocument reused bookUri=$bookUriText charset=$preferredCharsetName " +
+                    "chapterDetail=$chapterDetailMode"
             }
             return document!!
         }
@@ -5342,7 +5484,8 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
                 loadEbookDocument(
                     context = this@LegadoReaderActivity,
                     book = book,
-                    preferredCharsetName = preferredCharsetName
+                    preferredCharsetName = preferredCharsetName,
+                    chapterDetailMode = chapterDetailMode
                 )
             }
         } else {
@@ -5364,6 +5507,7 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         clearChapterPageCache()
         loadedDocumentBookUriText = bookUriText
         loadedDocumentCharsetName = preferredCharsetName
+        loadedDocumentChapterDetailMode = chapterDetailMode
         if (forceDocumentReload) {
             logDebug(LEGADO_READER_LOG_TAG) {
                 "loadOrReuseDocument force reload resets in-memory match cache bookUri=$bookUriText charset=$preferredCharsetName"
@@ -8082,6 +8226,32 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
                 return true
             }
         }
+        // 停点表只能覆盖"本章内有匹配 cue"的图。整页插图单独成一个章节时（纯图片 spine 页，
+        // 见 EbookImageOrigin.ILLUSTRATION_PAGE）这一章一条 cue 都没有 → 表里两个触发点都是
+        // null，停点永远命中不了，播放会直接掠过那张图。这里按"上一句句尾 → 当前句句首"
+        // 的跨章区间补一次判定（v1.6.13 之前删掉的那条路），与布局、章节是否合并都无关。
+        if (cueChanged) {
+            val previousMatch = cueMatchesByCueIndex[previousCueIndex]
+            val crossing = previousMatch?.let { previous ->
+                findCrossedEbookImage(
+                    chapters = document?.chapters.orEmpty(),
+                    previousMatch = previous,
+                    currentMatch = match,
+                    isExcluded = { image ->
+                        ReaderImageStopTarget(image.chapterIndex, image.imagePosition).key ==
+                            lastImageStopKey
+                    }
+                )
+            }
+            if (crossing != null) {
+                logDebug(READER_PAUSED_SEEK_LOG_TAG) {
+                    "legado pauseAtImage(crossed) chapter=${crossing.chapterIndex} " +
+                        "position=${crossing.imagePosition} cue=$cueIndex actual=$currentPosition"
+                }
+                pausePlaybackAtImage(ReaderImageStopTarget(crossing.chapterIndex, crossing.imagePosition))
+                return true
+            }
+        }
         return false
     }
 
@@ -8664,6 +8834,7 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         verticalProgressDirectionReversed = state.verticalProgressDirectionReversed
         selectionPrimaryActionKey = state.selectionPrimaryActionKey
         chapterSourceMode = state.chapterSourceMode
+        chapterDetailMode = state.chapterDetailMode
         showRubyText = state.showRubyText
         preferredCharsetName = state.preferredCharsetName
         pendingRestoreAnchor = ReaderPageAnchor(
@@ -8822,6 +8993,7 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
                 verticalProgressDirectionReversed = verticalProgressDirectionReversed,
                 selectionPrimaryActionKey = selectionPrimaryActionKey,
                 chapterSourceMode = chapterSourceMode,
+                chapterDetailMode = chapterDetailMode,
                 showRubyText = showRubyText,
                 preferredCharsetName = preferredCharsetName,
                 currentBookUri = persistedBookUri,
@@ -9069,8 +9241,8 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
                 override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
             })
         }
-        container.addView(summaryText, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(46)))
-        container.addView(windowText, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(36)))
+        container.addView(summaryText, wrapRowParams(summaryText, 46))
+        container.addView(windowText, wrapRowParams(windowText, 36))
         container.addView(seekBar, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(52)))
         container.addView(cueHighlightButton, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,
@@ -9078,24 +9250,15 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         ).apply {
             topMargin = dp(8)
         })
-        container.addView(crossPageWindowCheck, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            dp(44)
-        ))
+        container.addView(crossPageWindowCheck, wrapRowParams(crossPageWindowCheck, 44))
         container.addView(crossPageWindowModeGroup, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,
             LinearLayout.LayoutParams.WRAP_CONTENT
         ).apply {
             topMargin = dp(4)
         })
-        container.addView(stopOnImageCheck, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            dp(44)
-        ))
-        imagePauseContainer.addView(imagePauseLabel, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            dp(28)
-        ))
+        container.addView(stopOnImageCheck, wrapRowParams(stopOnImageCheck, 44))
+        imagePauseContainer.addView(imagePauseLabel, wrapRowParams(imagePauseLabel, 28))
         imagePauseContainer.addView(imagePauseInput, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,
             dp(44)
@@ -9104,14 +9267,8 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
             LinearLayout.LayoutParams.MATCH_PARENT,
             LinearLayout.LayoutParams.WRAP_CONTENT
         ))
-        container.addView(reverseControlCheck, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            dp(44)
-        ))
-        container.addView(reverseProgressCheck, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            dp(44)
-        ))
+        container.addView(reverseControlCheck, wrapRowParams(reverseControlCheck, 44))
+        container.addView(reverseProgressCheck, wrapRowParams(reverseProgressCheck, 44))
         container.addView(chapterSourceRow, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,
             LinearLayout.LayoutParams.WRAP_CONTENT
@@ -9575,6 +9732,24 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         updateChapterTitleSurfaces()
     }
 
+    /**
+     * 遇图暂停。两段：**先把插图页弄到画面上，再停音频**（停的那一刻看到的就是插图），
+     * 以及**等插图真的显示出来才开始算 N 秒**（[armImagePauseResumeTimer]）。
+     *
+     * 为什么要分两段：整页插图常常单独成一个章节，它不在当前分页（[pages] 只装正在显示的那
+     * 一章）里，切过去只能异步载入。若按下暂停时先停在旧页、等载入完成再翻过去，用户看到的
+     * 就是"停一下 → 闪一下 → 才出现插图"；若 N 秒从按下暂停那一刻算，载入耗时还会白白吃掉
+     * 一段看图时间。所以：
+     * - 插图页能立刻画出来时（正文内的插图、或插图章已经有分页缓存 —— 邻章预排是常态），
+     *   先画再暂停，完全没有闪动；
+     * - 只能异步载入时，先把音频停住（不能在载入期间继续播），等画面切到插图页再开始计时。
+     *
+     * 从播放器打开阅读器的那一两拍里 `pendingPlayerOpenAudioReveal` 还是 true，[loadDisplayedBook]
+     * 尾部的确认同步本来会强制定位到音频句、把刚画出来的插图页顶掉（随后
+     * [resumeImagePauseIfPageLeft] 会把这轮暂停当成"用户翻走了"恢复播放）：那次同步因此加了
+     * `imagePauseAnchor == null` 守卫 —— 图片暂停在途时不抢画面，暂停结束时
+     * [resumeFromImagePause] 自己会强制定位回 cue 句。
+     */
     private fun pausePlaybackAtImage(target: ReaderImageStopTarget) {
         logDebug(READER_PAUSED_SEEK_LOG_TAG) {
             "legado pauseAtImage chapter=${target.chapterIndex} position=${target.imagePosition} " +
@@ -9582,8 +9757,6 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         }
         lastImageStopKey = target.key
         advanceCurrentChapterImageStopIndex(target.key)
-        player?.pause()
-        BookReaderFloatingBridge.notifyPlaybackState(false)
         activeCueIndex = -1
         // 遇图暂停会把画面切到图片页，但"读完此页暂停"的武装还停在**上一页**：它的终点
         // （上一页末句句尾）此刻已经被越过，恢复播放后要么被句尾监视的第一轮轮询立刻判到
@@ -9596,13 +9769,90 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
         logDebug(M9_SENTENCE_TAIL_LOG_TAG) {
             "imagePause: release page-end arming clip=$armedClip watchEnd=$armedWatchEnd page=$pageIndex"
         }
-        findImagePageIndex(target)?.let { imagePage ->
-            if (imagePage != pageIndex) pageIndex = imagePage
+        val imageAnchor = ReaderPageAnchor(target.chapterIndex, target.imagePosition)
+        imagePauseAnchor = imageAnchor
+        imagePauseFromChapterIndex = pages.getOrNull(pageIndex)?.chapterIndex ?: -1
+        imagePausePageShown = false
+        imagePauseResumeArmed = false
+        // ① 能立刻把插图页画出来（正文内插图 / 插图章的页已在 chapterPageCache 里）：
+        //    先画、再暂停 —— 暂停那一刻画面上就是插图，没有"停一下旧页再翻过去"的闪动。
+        if (showImagePageWithoutAsyncLoad(target)) {
+            pauseForImageHold()
+            armImagePauseResumeTimer()
+            // 跨章时照旧异步校正一次（与 showAnchorOrLoad 的跨章快速路径同一套路：先同步画
+            // 一帧，再让 loadDisplayedBook 确认/刷新）。这次校正不会把画面翻走：暂停之后
+            // isAudioPlaybackRequested() 为 false，而"从播放器打开"时留下的
+            // pendingPlayerOpenAudioReveal 也被尾部同步的 `imagePauseAnchor == null` 守卫挡住。
+            if (imagePauseFromChapterIndex != target.chapterIndex) {
+                requestImageChapterLoad(imageAnchor)
+            }
+            return
         }
-        imagePausePageIndex = pageIndex
+        // ② 只能异步载入：先把音频停住，画面切到插图页之后再开始计时
+        //    （见 [resumeImagePauseIfPageLeft] / [armImagePauseResumeTimer]）。
+        pauseForImageHold()
+        if (imagePauseFromChapterIndex != target.chapterIndex) {
+            requestImageChapterLoad(imageAnchor)
+        }
         renderCurrentPage()
+    }
+
+    /**
+     * 不异步载入就先把插图页放到画面上。两种能：
+     * - 图就在当前已分页的这一章里（正文章内插图）→ 直接翻到它那一页；
+     * - 图所在章已经在 [chapterPageCache] 里（邻章预排的常态）→ 同步装上再翻页，
+     *   与 [showAnchorOrLoad] 的跨章快速路径同一套路。
+     *
+     * @return true 表示画面已经切到插图页（调用方可以立刻暂停）
+     */
+    private fun showImagePageWithoutAsyncLoad(target: ReaderImageStopTarget): Boolean {
+        val imagePage = findImagePageIndex(target)
+        if (imagePage != null) {
+            if (imagePage != pageIndex) pageIndex = imagePage
+            renderCurrentPage()
+            return true
+        }
+        val cachedPages = chapterPageCache[currentChapterPageCacheKey(target.chapterIndex)]
+            ?.takeIf { it.isNotEmpty() }
+            ?: return false
+        pages = cachedPages
+        pageIndex = pageIndexForAnchor(
+            cachedPages,
+            ReaderPageAnchor(target.chapterIndex, target.imagePosition)
+        )
+        renderCurrentPage()
+        logDebug(READER_PAUSED_SEEK_LOG_TAG) {
+            "legado pauseAtImage cachedChapter chapter=${target.chapterIndex} " +
+                "pages=${cachedPages.size} index=$pageIndex"
+        }
+        return true
+    }
+
+    /** 载入插图所在章并把画面定位到那张图（与 [showSectionTitlePageForCue] 同一条路） */
+    private fun requestImageChapterLoad(imageAnchor: ReaderPageAnchor) {
+        if (pendingAudioSyncLoadAnchor == imageAnchor) return
+        logDebug(M9_SENTENCE_TAIL_LOG_TAG) {
+            "imagePause: load image chapter=${imageAnchor.chapterIndex} position=${imageAnchor.charPosition}"
+        }
+        pendingAudioSyncLoadAnchor = imageAnchor
+        loadDisplayedBook(anchor = imageAnchor, forceDocumentReload = false)
+    }
+
+    /** 遇图暂停真正停音频（两段式的第二段；先把插图页画出来的那条路在这一步之前就画好了） */
+    private fun pauseForImageHold() {
+        player?.pause()
+        BookReaderFloatingBridge.notifyPlaybackState(false)
         updateAudioControlLabels()
         persistAudioPlaybackSnapshot()
+    }
+
+    /** 开始算"看图 N 秒"：插图真的出现在画面上时才调用，且一次暂停只起一次 */
+    private fun armImagePauseResumeTimer() {
+        if (imagePauseAnchor == null || imagePauseResumeArmed) return
+        imagePauseResumeArmed = true
+        logDebug(M9_SENTENCE_TAIL_LOG_TAG) {
+            "imagePause: arm resume page=$pageIndex shown=$imagePausePageShown sec=$imagePauseSeconds"
+        }
         scheduleImagePauseResume()
     }
 
@@ -9618,11 +9868,25 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
     }
 
     private fun resumeImagePauseIfPageLeft() {
-        val pausedPageIndex = imagePausePageIndex ?: return
-        if (pageIndex != pausedPageIndex) {
-            // 用户自己翻页离开了图片页：不要把他拽回 cue 所在页
+        val anchor = imagePauseAnchor ?: return
+        val page = pages.getOrNull(pageIndex) ?: return
+        if (page.chapterIndex == anchor.chapterIndex) {
+            val onImagePage = page.containPos(anchor.charPosition)
+            if (onImagePage || !imagePausePageShown) {
+                // ① 插图页（或至少它所在的章）刚落定：算"露过面"，并把看图计时接上
+                //    （② 那条异步载入的路就是在这里开始计时的）。
+                imagePausePageShown = true
+                armImagePauseResumeTimer()
+                return
+            }
+            // ② 插图页露过面之后，用户在同一章里往后翻了（插图章通常只有一页，走不到这里）
             resumeFromImagePause(revealCuePage = false)
+            return
         }
+        // ③ 还在往插图页翻的路上（显示章没变、插图章也没露过面）时，不能当成"用户翻走了"
+        if (!imagePausePageShown && page.chapterIndex == imagePauseFromChapterIndex) return
+        // ④ 用户自己翻页离开了图片页（或翻到了别的章）：不要把他拽回 cue 所在页
+        resumeFromImagePause(revealCuePage = false)
     }
 
     /**
@@ -9634,7 +9898,7 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
      * 才翻到下一页"。所以恢复播放后强制按当前 cue 重新定位一次页面。
      */
     private fun resumeFromImagePause(revealCuePage: Boolean = true) {
-        val hadPendingPause = imagePausePageIndex != null
+        val hadPendingPause = imagePauseAnchor != null
         clearImagePauseResume()
         if (!hadPendingPause) return
         val currentPlayer = player ?: return
@@ -9655,7 +9919,10 @@ class LegadoReaderActivity : AppCompatActivity(), ColorPickerDialogListener {
     private fun clearImagePauseResume() {
         imagePauseResumeJob?.cancel()
         imagePauseResumeJob = null
-        imagePausePageIndex = null
+        imagePauseAnchor = null
+        imagePauseFromChapterIndex = -1
+        imagePausePageShown = false
+        imagePauseResumeArmed = false
     }
 
     private fun findImagePageIndex(target: ReaderImageStopTarget): Int? {

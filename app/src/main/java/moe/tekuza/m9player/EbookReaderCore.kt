@@ -68,7 +68,17 @@ internal data class EbookChapter(
      * false 表示只是 `<title>` 兜底 —— calibre 常常把它写成 part0012 这种文件名，
      * 这种页不是真正的章节，解析时会并入相邻章节（见 mergeSpinePartsIntoChapters）。
      */
-    val titleFromMarkup: Boolean = true
+    val titleFromMarkup: Boolean = true,
+    /**
+     * 这一章要并入**前一章**（只有"目录为准"档会产生）。
+     *
+     * 场景：整个 spine 文件在目录里一条条目都没有，而它的第一个标题是**章级**的
+     * （《心理學經典作品集》的 part0020_split_000 里其实压着第一~六章）—— 这种文件
+     * 当"独立一章"会把六章挤成一条、还挂着"第一章 生活的意義"这个假名字。标上来之后
+     * 由 [mergeSpinePartsIntoChapters] 并进上一章：正文一页不少，目录里不再出现假条目
+     * （legado 里 `譯者序` 那一章本来也就是这么一直延伸到全书结束的）。
+     */
+    val mergesIntoPrevious: Boolean = false
 )
 
 /**
@@ -83,6 +93,97 @@ private val volumeTitlePattern = Regex(
 )
 
 private fun String.isVolumeTitle(): Boolean = volumeTitlePattern.matches(trim())
+
+/**
+ * 正文标题元素的"形状"。
+ *
+ * 只按 h1-h3 的**级别**判断是不够的：kindle/calibre 制作的书里同一个
+ * `<h3 class="kindle-cn-heading2">` 既拿来排章（`第一章　生活的意義`）、也拿来排卷
+ * （`第一卷　群體心理`、`BOOK I  THE MIND OF CROWDS`）、还拿来排小节
+ * （`1.趨向感受的來源`）——《心理學經典作品集》一本书里三种全占，class 完全一样。
+ * 所以判据是标题**文本**的形状，不是标签级别。
+ */
+internal enum class EpubHeadingKind {
+    /** 卷 / 部分 / BOOK I 这类结构单位。 */
+    VOLUME,
+
+    /** 章 / 序 / 前言 这类正文章节。 */
+    CHAPTER,
+
+    /** 编号小节（`1.xxx`）或不像章节标题的文本 —— 不当切点。 */
+    OTHER
+}
+
+/** 章级标题：`第N章/節/回`，或常见的无编号章节名。 */
+private val chapterHeadingPattern = Regex(
+    pattern = "^第\\s*[0-9〇零一二三四五六七八九十百千万两]+\\s*[章節节回][\\s　]*.*$|" +
+        "^(序|序言|序章|自序|代序|前言|後記|后记|譯者序|译者序|導論|导论|引言|楔子|尾聲|尾声|結語|结语|終章|终章|附錄|附录)$"
+)
+
+/**
+ * 卷级标题里 [volumeTitlePattern] 没覆盖的形状：`BOOK I` / `Book Two`。
+ *
+ * 刻意不并进 [volumeTitlePattern]：那个模式还决定 `isVolumeChapter`（居中卷页排版），
+ * 往里加 BOOK 会让本来走正文排版的卷标题页突然变成卷页 —— 那是另一件事，别混进来。
+ * 这里只用于"能不能当切点 / 要不要并入上一章"。
+ */
+private val bookVolumeHeadingPattern = Regex(
+    pattern = "^book\\s+([ivxlc\\d]+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\\b.*$",
+    option = RegexOption.IGNORE_CASE
+)
+
+/** 编号小节：`1.趨向感受的來源` / `2、…` —— 形状上一眼是小节，不能当切点。 */
+private val numberedSectionHeadingPattern = Regex("^\\d+\\s*[.、)）]")
+
+/** 判断一个正文标题元素的文本是卷、是章、还是小节（或不像标题）。 */
+internal fun classifyEpubHeading(text: String): EpubHeadingKind {
+    val title = text.cleanTocTitle()
+    if (title.isEmpty()) return EpubHeadingKind.OTHER
+    // 编号小节先判：`1.第二章…` 这种也仍然是小节
+    if (numberedSectionHeadingPattern.containsMatchIn(title)) return EpubHeadingKind.OTHER
+    if (title.isVolumeTitle() || bookVolumeHeadingPattern.matches(title)) return EpubHeadingKind.VOLUME
+    if (chapterHeadingPattern.matches(title)) return EpubHeadingKind.CHAPTER
+    return EpubHeadingKind.OTHER
+}
+
+/** 正文标题元素切出来的一段：切点位置 + 标题。 */
+internal data class EpubHeadingCut(
+    val position: Int,
+    val title: String
+)
+
+/**
+ * "目录为准"档里，一个**目录完全没覆盖**的 spine 文件要不要并入上一章。
+ *
+ * 判据只看它**第一个标题的形状**：章级（`第一章 生活的意義`）说明文件里压着好几章，
+ * 当独立一条会名不副实 ⇒ 并入；卷级（`第一卷 群體心理`、`BOOK I …`）是它真正开始的地方
+ * ⇒ 保留成一条；没有标题（封面/书名页/题词）不在这里管，交给
+ * [mergeSpinePartsIntoChapters] 原有的"无标题页"规则。
+ */
+internal fun epubUncoveredFileMergesIntoPrevious(html: String): Boolean =
+    classifyEpubHeading(extractHtmlHeading(html).orEmpty()) == EpubHeadingKind.CHAPTER
+
+/**
+ * 正文里"形状像卷/章"的标题元素位置（切点候选），按出现顺序。
+ *
+ * [coveredTitles] = 这个文件的目录条目标题（已归一化）。**目录已经给过条目的标题不再切**
+ * —— 这一条是保护，不是优化：`第一部分 X` 和它的 `第一章 Y` 共用一个锚点的书
+ * （见 EbookTocAnchorSplitTest 的 sharedAnchorHtml）靠"锚点前面那个同标题块"定位部分标题页，
+ * 由 [precedingTitleBlockStart] 负责；在这里照着同一个 `<h2>` 再切一刀会把那段顶掉。
+ */
+private fun headingCutPositions(html: String, coveredTitles: Set<String>): List<EpubHeadingCut> {
+    val result = mutableListOf<EpubHeadingCut>()
+    Regex("(?is)<h([1-3])\\b[^>]*>(.*?)</h\\1>").findAll(html).forEach { match ->
+        val text = match.groupValues[2].replace(Regex("<[^>]+>"), "").cleanTocTitle()
+        val kind = classifyEpubHeading(text)
+        if (kind == EpubHeadingKind.OTHER) return@forEach
+        // 精确相等（两边都已过 cleanTocTitle）：标题里差一个内部空格就不算"目录已覆盖"，
+        // 结果是多切一刀、目录里多一条同名行。实测的真实书没踩到，所以只当"去重偏弱"。
+        if (coveredTitles.contains(text)) return@forEach
+        result += EpubHeadingCut(position = match.range.first, title = text)
+    }
+    return result
+}
 
 internal data class EbookRubySpan(
     val start: Int,
@@ -108,10 +209,10 @@ internal data class EbookRubySegment(
 /**
  * 一张图在电子书里是"怎么排的"，决定听读时是否要在它上面停下来：
  * - [INLINE]：写在有正文的章节里（可能是正文中段的插画，也可能是章节开头的题图）；
- * - [ILLUSTRATION_PAGE]：来自"纯图片 spine 页"（整页只有图、没有正文）且这页不被目录指向
- *   —— 出版方专门为这张插图排的一页，是最典型的"停下来看看"的对象；
- * - [SECTION_TITLE_PAGE]：来自"纯图片 spine 页"但该页被目录条目指向（= 章节题图页/表纸），
- *   它是章节的排版开头，不是插图，不该触发遇图暂停。
+ * - [ILLUSTRATION_PAGE]：来自"纯图片 spine 页"（整页只有图、没有正文）且这页不被目录条目、
+ *   也不被正文标题元素指向 —— 出版方专门为这张插图排的一页，是最典型的"停下来看看"的对象；
+ * - [SECTION_TITLE_PAGE]：来自"纯图片 spine 页"但该页被目录条目（或"目录 + 正文标题"档里的
+ *   正文标题元素）指向（= 章节题图页/表纸），它是章节的排版开头，不是插图，不该触发遇图暂停。
  */
 internal enum class EbookImageOrigin {
     INLINE,
@@ -177,16 +278,17 @@ private fun shouldSkipEbookCueForMatching(cue: EbookSrtCue, filteredText: List<I
 internal suspend fun loadEbookDocument(
     context: Context,
     book: LocalReaderBook,
-    preferredCharsetName: String? = null
+    preferredCharsetName: String? = null,
+    chapterDetailMode: ReaderChapterDetailMode
 ): EbookDocument = withContext(Dispatchers.IO) {
     val displayTitle = book.title.ifBlank { "Untitled Book" }
     when (book.format.uppercase(Locale.US)) {
-        "EPUB" -> loadEpubDocument(context, book.uri, displayTitle, preferredCharsetName)
+        "EPUB" -> loadEpubDocument(context, book.uri, displayTitle, preferredCharsetName, chapterDetailMode)
         "TXT" -> loadTxtDocument(context.contentResolver, book.uri, displayTitle, preferredCharsetName)
         else -> {
             val mimeFormat = inferLocalReaderBookFormat(displayTitle, context.contentResolver.getType(book.uri))
             if (mimeFormat == "EPUB") {
-                loadEpubDocument(context, book.uri, displayTitle, preferredCharsetName)
+                loadEpubDocument(context, book.uri, displayTitle, preferredCharsetName, chapterDetailMode)
             } else {
                 loadTxtDocument(context.contentResolver, book.uri, displayTitle, preferredCharsetName)
             }
@@ -356,7 +458,8 @@ private fun loadEpubDocument(
     context: Context,
     uri: Uri,
     fallbackTitle: String,
-    preferredCharsetName: String?
+    preferredCharsetName: String?,
+    chapterDetailMode: ReaderChapterDetailMode
 ): EbookDocument {
     val cacheRoot = runCatching {
         ensureEpubReaderCache(context, uri, fallbackTitle)
@@ -364,16 +467,17 @@ private fun loadEpubDocument(
         Log.w(EBOOK_READER_CORE_LOG_TAG, "loadEpubDocument cache unavailable, falling back to zip uri=$uri", error)
     }.getOrNull()
     if (cacheRoot != null) {
-        return loadEpubDocumentFromCache(cacheRoot, fallbackTitle, preferredCharsetName)
+        return loadEpubDocumentFromCache(cacheRoot, fallbackTitle, preferredCharsetName, chapterDetailMode)
     }
-    return loadEpubDocumentFromZip(context, uri, fallbackTitle, preferredCharsetName)
+    return loadEpubDocumentFromZip(context, uri, fallbackTitle, preferredCharsetName, chapterDetailMode)
 }
 
 private fun loadEpubDocumentFromZip(
     context: Context,
     uri: Uri,
     fallbackTitle: String,
-    preferredCharsetName: String?
+    preferredCharsetName: String?,
+    chapterDetailMode: ReaderChapterDetailMode
 ): EbookDocument {
     val startMs = SystemClock.elapsedRealtime()
     val entries = linkedMapOf<String, ByteArray>()
@@ -433,14 +537,18 @@ private fun loadEpubDocumentFromZip(
     val container = entries["META-INF/container.xml"]?.toString(StandardCharsets.UTF_8)
     val opfPath = container?.let(::parseContainerRootFile)
         ?: entries.keys.firstOrNull { it.endsWith(".opf", ignoreCase = true) }
-        ?: return fallbackHtmlEpub(entries, fallbackTitle, preferredCharsetName)
+        ?: return fallbackHtmlEpub(entries, fallbackTitle, preferredCharsetName, chapterDetailMode)
     val opfText = entries[opfPath]?.toString(StandardCharsets.UTF_8)
-        ?: return fallbackHtmlEpub(entries, fallbackTitle, preferredCharsetName)
+        ?: return fallbackHtmlEpub(entries, fallbackTitle, preferredCharsetName, chapterDetailMode)
     val opf = parseOpf(opfText)
     val basePath = opfPath.substringBeforeLast('/', missingDelimiterValue = "")
     val title = opf.title.ifBlank { fallbackTitle }
     val epubImages = buildEpubImageMap(entries, opf.manifest, basePath)
     val tocEntries = buildEpubTocEntries(entries, opf, basePath, preferredCharsetName)
+    val uncoveredLevels = inheritedUncoveredLevels(
+        spinePaths = opf.spineIds.mapNotNull { id -> opf.manifest[id]?.let { resolveEpubPath(basePath, it.href) } },
+        tocEntries = tocEntries
+    )
     val chapters = mergeSpinePartsIntoChapters(
         opf.spineIds.mapIndexedNotNull { index, id ->
             val item = opf.manifest[id] ?: return@mapIndexedNotNull null
@@ -452,7 +560,8 @@ private fun loadEpubDocumentFromZip(
                 path = path,
                 imageResources = epubImages,
                 tocEntriesForFile = tocEntries.filter { it.path == path },
-                isFirstSpineItem = index == 0
+                isFirstSpineItem = index == 0,
+                options = EpubChapterParseOptions(chapterDetailMode, uncoveredLevels[path] ?: 0)
             )
         }.flatten().ifEmpty {
             htmlEntries(entries).mapIndexed { index, (path, bytes) ->
@@ -462,7 +571,8 @@ private fun loadEpubDocumentFromZip(
                     path = path,
                     imageResources = epubImages,
                     tocEntriesForFile = emptyList(),
-                    isFirstSpineItem = index == 0
+                    isFirstSpineItem = index == 0,
+                    options = EpubChapterParseOptions(chapterDetailMode, 0)
                 )
             }.flatten().filter { it.text.isNotBlank() || it.isVolume }
         }
@@ -481,11 +591,12 @@ private fun loadEpubDocumentFromZip(
 private fun loadEpubDocumentFromCache(
     root: File,
     fallbackTitle: String,
-    preferredCharsetName: String?
+    preferredCharsetName: String?,
+    chapterDetailMode: ReaderChapterDetailMode
 ): EbookDocument {
     val startMs = SystemClock.elapsedRealtime()
     // 解析结果落盘缓存：命中就直接返回（实测这一步原本每次启动都要 ~571ms 重新把 HTML 转成正文）。
-    val docCacheStamp = epubDocumentCacheStamp(root, preferredCharsetName)
+    val docCacheStamp = epubDocumentCacheStamp(root, preferredCharsetName, chapterDetailMode)
     if (docCacheStamp != null) {
         loadCachedEbookDocument(root, docCacheStamp)?.let { cached ->
             logDebug(EBOOK_READER_CORE_LOG_TAG) {
@@ -512,13 +623,17 @@ private fun loadEpubDocumentFromCache(
             EBOOK_READER_CORE_LOG_TAG,
             "epub cache incomplete (no readable opf) root=${root.name}; falling back to html-only parse"
         )
-        return fallbackHtmlEpubFromCache(root, fallbackTitle, preferredCharsetName)
+        return fallbackHtmlEpubFromCache(root, fallbackTitle, preferredCharsetName, chapterDetailMode)
     }
     val opf = parseOpf(opfText)
     val basePath = opfPath.substringBeforeLast('/', missingDelimiterValue = "")
     val title = opf.title.ifBlank { fallbackTitle }
     val epubImages = buildEpubImageMapFromCache(root, opf.manifest, basePath)
     val tocEntries = buildEpubTocEntriesFromCache(root, opf, basePath, preferredCharsetName)
+    val uncoveredLevels = inheritedUncoveredLevels(
+        spinePaths = opf.spineIds.mapNotNull { id -> opf.manifest[id]?.let { resolveEpubPath(basePath, it.href) } },
+        tocEntries = tocEntries
+    )
     // 每个 spine 文件是独立的一次"HTML→正文"转换（实测这步占首屏的大头，且原本串行）⇒ 并行做，
     // 顺序由 invokeAll 保证（与串行结果一一对应）。共享的只有只读的 epubImages/tocEntries。
     val spineChapters: List<List<EbookChapter>> = run {
@@ -538,7 +653,8 @@ private fun loadEpubDocumentFromCache(
                         path = path,
                         imageResources = epubImages,
                         tocEntriesForFile = tocEntries.filter { it.path == path },
-                        isFirstSpineItem = index == 0
+                        isFirstSpineItem = index == 0,
+                        options = EpubChapterParseOptions(chapterDetailMode, uncoveredLevels[path] ?: 0)
                     )
                 }
             }
@@ -557,7 +673,8 @@ private fun loadEpubDocumentFromCache(
                     path = path,
                     imageResources = epubImages,
                     tocEntriesForFile = emptyList(),
-                    isFirstSpineItem = index == 0
+                    isFirstSpineItem = index == 0,
+                    options = EpubChapterParseOptions(chapterDetailMode, 0)
                 )
             }.flatten().filter { it.text.isNotBlank() || it.isVolume }
         }
@@ -579,7 +696,8 @@ private fun loadEpubDocumentFromCache(
 private fun fallbackHtmlEpub(
     entries: Map<String, ByteArray>,
     fallbackTitle: String,
-    preferredCharsetName: String?
+    preferredCharsetName: String?,
+    chapterDetailMode: ReaderChapterDetailMode
 ): EbookDocument {
     val epubImages = buildEpubImageMap(entries, emptyMap(), "")
     val chapters = mergeSpinePartsIntoChapters(
@@ -590,7 +708,10 @@ private fun fallbackHtmlEpub(
                 path = path,
                 imageResources = epubImages,
                 tocEntriesForFile = emptyList(),
-                isFirstSpineItem = index == 0
+                isFirstSpineItem = index == 0,
+                // 没有 opf/目录可依据的兜底路径：继承层级无从谈起（0），但"正文标题"档照样能
+                // 按标题切 —— 这类书（目录读不出来）恰恰是最需要它的一档。
+                options = EpubChapterParseOptions(chapterDetailMode, 0)
             )
         }.flatten().filter { it.text.isNotBlank() }
     )
@@ -600,7 +721,8 @@ private fun fallbackHtmlEpub(
 private fun fallbackHtmlEpubFromCache(
     root: File,
     fallbackTitle: String,
-    preferredCharsetName: String?
+    preferredCharsetName: String?,
+    chapterDetailMode: ReaderChapterDetailMode
 ): EbookDocument {
     val epubImages = buildEpubImageMapFromCache(root, emptyMap(), "")
     val chapters = mergeSpinePartsIntoChapters(
@@ -612,7 +734,8 @@ private fun fallbackHtmlEpubFromCache(
                 path = path,
                 imageResources = epubImages,
                 tocEntriesForFile = emptyList(),
-                isFirstSpineItem = index == 0
+                isFirstSpineItem = index == 0,
+                options = EpubChapterParseOptions(chapterDetailMode, 0)
             )
         }.flatten().filter { it.text.isNotBlank() }
     )
@@ -626,7 +749,8 @@ private fun buildEpubChapterFromHtml(
     imageResources: Map<String, EpubImageResource>,
     titleFromMarkup: Boolean,
     level: Int = 0,
-    isGroup: Boolean = false
+    isGroup: Boolean = false,
+    mergesIntoPrevious: Boolean = false
 ): EbookChapter {
     // "卷/大章节页"：目录结构上还有子条目的（isGroup）和标题形如"第三部分 …"的都算。
     // 两者必须用同一个判断，否则同样是"大章节"，一本书居中显示标题页、另一本
@@ -649,7 +773,8 @@ private fun buildEpubChapterFromHtml(
         isVolume = content.text.isBlank() && isVolumeChapter,
         level = level,
         isGroup = isGroup,
-        titleFromMarkup = titleFromMarkup
+        titleFromMarkup = titleFromMarkup,
+        mergesIntoPrevious = mergesIntoPrevious
     )
 }
 
@@ -673,7 +798,8 @@ private fun buildEpubChaptersFromHtml(
     path: String,
     imageResources: Map<String, EpubImageResource>,
     tocEntriesForFile: List<EpubTocEntry>,
-    isFirstSpineItem: Boolean
+    isFirstSpineItem: Boolean,
+    options: EpubChapterParseOptions
 ): List<EbookChapter> {
     // 只有**带锚点**的条目才对应一段；不带锚点的条目（例：part0007 的「第一章 幼年期」）
     // 是整文件的标题，用来给"锚点之前那一段"命名。
@@ -682,29 +808,58 @@ private fun buildEpubChaptersFromHtml(
     // 一条锚点都定位不到（或压根没有带锚点的条目）时整个文件就是一段，命名条目取"不带锚点"
     // 的那条 —— 很多书的"第二部分 X"就是直接指向整个文件的；没有整文件条目时退化成第一条目，
     // 标题与 level/isGroup 都取自它，保持一致。这样兜底不需要单独一条分支。
-    val segments = epubHtmlSegments(html, anchoredEntries).ifEmpty {
+    val segments = (
+        if (options.detailMode == ReaderChapterDetailMode.BODY_HEADINGS) {
+            // "目录 + 正文标题"档：除锚点外，再把正文里形状像卷/章的标题元素也当切点。
+            // coveredTitles 传**全部**目录条目标题（含文件级那条），免得对目录已命名的标题重复下刀。
+            // 这里必须 cleanTocTitle：判定点比较的是同样归一化过的标题文本（见 headingCutPositions）。
+            epubHtmlSegmentsWithHeadings(
+                html = html,
+                entries = anchoredEntries,
+                coveredTitles = tocEntriesForFile.map { it.title.cleanTocTitle() }.toSet()
+            )
+        } else {
+            epubHtmlSegments(html, anchoredEntries)
+        }
+        ).ifEmpty {
         listOf(EpubHtmlSegment(fileEntry ?: tocEntriesForFile.firstOrNull(), 0, html.length))
     }
+    // "目录为准"档：整个文件在目录里没有任何条目、而它的第一个标题是**章级**的 —— 说明这个文件
+    // 其实被压扁了（part0020_split_000 里压着第一~六章）。这种页自己独立成章会把六章挤成一条、
+    // 还挂上"第一章 生活的意義"这个假名字，所以标成"并入上一章"（见 EbookChapter.mergesIntoPrevious）。
+    // 首标题是**卷级**的（`第一卷 群體心理`、`BOOK I …`）不并：那是这个文件真正开始的地方。
+    val uncovered = tocEntriesForFile.isEmpty()
+    val mergesIntoPrevious = options.detailMode == ReaderChapterDetailMode.TOC_ONLY &&
+        uncovered &&
+        epubUncoveredFileMergesIntoPrevious(html)
 
     val chapters = mutableListOf<EbookChapter>()
     segments.forEach { segment ->
         val entry = segment.entry
+        val heading = segment.heading
         val segmentHtml = html.substring(segment.start, segment.end)
         val chapter = buildEpubChapterFromHtml(
             html = segmentHtml,
             path = path,
             title = entry?.title
+                ?: heading?.title
                 ?: fileEntry?.title
                 ?: fallbackEpubChapterTitle(segmentHtml, isFirstSpineItem = isFirstSpineItem),
             imageResources = imageResources,
-            // 带锚点的段由目录条目命名；"锚点之前"的续段没有条目，标题可信度看整文件条目/正文标题元素
-            titleFromMarkup = entry != null || fileEntry != null || extractHtmlHeading(segmentHtml) != null,
-            // 目录层级/大章节标记：带锚点的段用自己的条目，首段（锚点之前）用整文件条目
-            level = (entry ?: fileEntry)?.level ?: 0,
-            isGroup = (entry ?: fileEntry)?.isGroup == true
+            // 带锚点的段由目录条目命名，标题段由自己的标题元素命名；"锚点之前"的续段没有条目，
+            // 标题可信度看整文件条目/正文标题元素
+            titleFromMarkup = entry != null || heading != null || fileEntry != null ||
+                extractHtmlHeading(segmentHtml) != null,
+            // 目录层级/大章节标记：带锚点的段用自己的条目，首段（锚点之前）用整文件条目，
+            // 标题段没有条目 ⇒ 用它继承到的层级（目录没覆盖的文件才需要）
+            level = (entry ?: fileEntry)?.level ?: options.uncoveredLevel,
+            isGroup = (entry ?: fileEntry)?.isGroup == true,
+            mergesIntoPrevious = mergesIntoPrevious
         )
         if (chapter.text.isNotBlank() || chapter.isVolume) {
-            chapters += chapter.markImageOrigin(isSectionTitlePage = entry != null || fileEntry != null)
+            chapters += chapter.markImageOrigin(
+                isSectionTitlePage = entry != null || heading != null || fileEntry != null
+            )
         }
     }
     return chapters
@@ -717,7 +872,23 @@ private fun buildEpubChaptersFromHtml(
 internal data class EpubHtmlSegment(
     val entry: EpubTocEntry?,
     val start: Int,
-    val end: Int
+    val end: Int,
+    /**
+     * 这一段的切点来自**正文标题元素**（不是目录锚点）时带上它，见
+     * [epubHtmlSegmentsWithHeadings]。标题与层级由调用方按 [EpubHeadingCut] 取。
+     */
+    val heading: EpubHeadingCut? = null
+)
+
+/**
+ * 分章解析选项。
+ *
+ * [detailMode] 是用户设置（"目录为准" / "目录 + 正文标题"）；[uncoveredLevel] 是目录没覆盖的
+ * 文件该缩进到第几层（见 [inheritedUncoveredLevels]）—— 只影响目录缩进，不影响切分。
+ */
+internal data class EpubChapterParseOptions(
+    val detailMode: ReaderChapterDetailMode = ReaderChapterDetailMode.TOC_ONLY,
+    val uncoveredLevel: Int = 0
 )
 
 /**
@@ -738,6 +909,56 @@ internal fun epubHtmlSegments(html: String, entries: List<EpubTocEntry>): List<E
     boundaries += html.length to null
     return boundaries.zipWithNext { (start, entry), (next, _) ->
         EpubHtmlSegment(entry = entry, start = start, end = next)
+    }
+}
+
+/**
+ * [epubHtmlSegments] 的扩展：除目录锚点外，再按正文里"形状像卷/章"的标题元素切
+ * （"目录 + 正文标题"档）。
+ *
+ * [entries] 只传**带锚点**的目录条目（与 [epubHtmlSegments] 一致）；[coveredTitles] 传这个文件
+ * 全部目录条目的标题（含只在文件级、没有锚点的那种），用来避免对目录已经命名过的标题重复下刀。
+ * 一条切点都没有时返回空 —— 调用方据此退回"整文件一章"。
+ *
+ * 典型收益：《心理學經典作品集》的 part0020_split_000.html 在目录里一条条目都没有，里面却压着
+ * 六个 `<h3 class="kindle-cn-heading2">第一章…第六章`，原来整文件只算一章（标题取第一个标题元素），
+ * 于是目录里只有"第一章 生活的意義"、二~六章全丢；这里按标题切出来就都在了。
+ */
+internal fun epubHtmlSegmentsWithHeadings(
+    html: String,
+    entries: List<EpubTocEntry>,
+    coveredTitles: Set<String>
+): List<EpubHtmlSegment> {
+    val items = mutableListOf<Triple<Int, EpubTocEntry?, EpubHeadingCut?>>()
+    anchorCutPositions(html, entries).forEachIndexed { index, cut ->
+        if (cut != null) items += Triple(cut, entries[index], null)
+    }
+    headingCutPositions(html, coveredTitles).forEach { heading ->
+        items += Triple(heading.position, null, heading)
+    }
+    // 位置必须严格递增（否则 zipWithNext 会切出空段）；同一位置只留一个，**目录条目优先**
+    // ——标题更权威，而且"部分标题排在锚点之前"的那类书已由 precedingTitleBlockStart 处理过。
+    // 已知边界：`in 1 until` 会把**正好落在 index 0** 的标题切点丢掉，那一段因此没有 heading、
+    // 标题退回 <title>；真实 EPUB 的标题前必有 <head>，所以只是理论边界（别把它当"恒定成立"）。
+    val ordered = items
+        .filter { it.first in 1 until html.length }
+        .sortedBy { it.first }
+        .fold(mutableListOf<Triple<Int, EpubTocEntry?, EpubHeadingCut?>>()) { acc, item ->
+            val last = acc.lastOrNull()
+            when {
+                last == null -> acc += item
+                item.first > last.first -> acc += item
+                item.second != null -> acc[acc.lastIndex] = item
+            }
+            acc
+        }
+    if (ordered.isEmpty()) return emptyList()
+    val starts = mutableListOf<Triple<Int, EpubTocEntry?, EpubHeadingCut?>>(Triple(0, null, null))
+    starts += ordered
+    // 末尾压一个哨兵，zipWithNext 就不用再单独处理"最后一段到文末"这个边界情况
+    starts += Triple(html.length, null, null)
+    return starts.zipWithNext { (start, entry, heading), (next, _, _) ->
+        EpubHtmlSegment(entry = entry, start = start, end = next, heading = heading)
     }
 }
 
@@ -865,6 +1086,25 @@ private fun fallbackEpubChapterTitle(html: String, isFirstSpineItem: Boolean): S
 }
 
 /**
+ * 全书只有一个可信标题、却还有**排在它后面**的无标题正文页 —— 这时不许合并。
+ *
+ * 一个标题给后面的正文定不了界：合并等于把剩下的正文整本吞进那一章（"nav 只标了第一章、
+ * 后面全是 calibre 拆分文件"的书会从几十章缩成一章）。两种情况照旧允许合并：
+ * - 无标题页排在**第一个可信标题之前**（书名页/题献这类前置页，本来就该并进后面那一章）；
+ * - 纯图片页（扉絵/口絵）：它没有正文，并进去只是给章节加一张题图。
+ *
+ * 反过来，**两个以上**可信标题就够给无标题页定界了（每个都落在前后两个真章节之间，
+ * 或者归于最后一个真章节），这时整本合并 —— 《無職転生》正是这样：目录 12 条、spine 35 个
+ * 文件，只有 7 个文件带标题，合并前目录里塞满 `part0008` 这类文件名，合并后干净回到 12 条。
+ */
+private fun hasUntitledTextPageAfterFirstTitle(chapters: List<EbookChapter>): Boolean {
+    val firstTitledIndex = chapters.indexOfFirst { it.titleFromMarkup }
+    return chapters.withIndex().any { (index, chapter) ->
+        index > firstTitledIndex && !chapter.titleFromMarkup && !chapter.hasNoReaderText()
+    }
+}
+
+/**
  * 把「不是真正章节」的 spine 页并入相邻章节，避免目录里出现 part0012 这种条目。
  *
  * 两类这样的页：
@@ -874,24 +1114,28 @@ private fun fallbackEpubChapterTitle(html: String, isFirstSpineItem: Boolean): S
  *    没有 h1-h3 标题）：这类是书名页/题词/正文续篇/作者简介等，并入**前一章**末尾；
  *    前面还没有正文章节时并入后一章开头。
  * 3. 既没有正文也没有图片的空页（封面/书名页）直接丢掉。
+ * 4. "目录为准"档里标了 [EbookChapter.mergesIntoPrevious] 的页（目录完全没覆盖这个文件、
+ *    而它第一个标题是章级的 —— 一个文件里压着好几章）并入**前一章**末尾。这一条是
+ *    "章节详细度"设置的另一半：正文一页不少，但目录里不再出现"第一章 生活的意義"这种
+ *    名不副实的假条目；把设置切到"目录 + 正文标题"档时，同一个文件会被按标题切成真正的那几章。
  *
  * 图片与注音 span 的位置是按章节正文的字符偏移记录的，拼接时必须整体平移，
  * 否则插图会画到错误的行上。
  *
- * 守卫：如果这本书的"可信标题"覆盖率过低（例如 nav 只标了头几章、后面全是 calibre
- * 拆分文件的正文），说明标题信息不可信，此时**不做任何合并**，否则会把后面的正文
- * 全部并进最后一章，目录直接缩水。
+ * 守卫：如果全书**只有一个**可信标题、而它后面还排着无标题的正文页，就不做任何合并 ——
+ * 一个标题给后面的正文定不了界，合并会把剩下的正文整本吞成一章、目录直接缩水。
+ * 详见 [hasUntitledTextPageAfterFirstTitle]。
  */
 internal fun mergeSpinePartsIntoChapters(chapters: List<EbookChapter>): List<EbookChapter> {
     if (chapters.isEmpty()) return chapters
-    // 守卫要按**文件**算，不能按章节算：按目录锚点切章之后，每个文件都会多出若干
-    // "锚点之前的续段"（它们本来就没有目录条目），按章节算会把覆盖率压到半数以下，
-    // 于是整本书都不敢合并了。同一个 sourcePath 的段落归为一组。
+    // 守卫按**文件**算，不能按章节算：按目录锚点切章之后，每个文件都会多出若干
+    // "锚点之前的续段"（它们本来就没有目录条目），按章节算会把"带可信标题的文件数"算少，
+    // 守卫就会误判成"这本没有可信标题"而整本不合并。同一个 sourcePath 的段落归为一组。
     val textFileGroups = chapters
         .filterNot { it.hasNoReaderText() && it.images.isNotEmpty() }
         .groupBy { it.sourcePath ?: it.title }
     val titledFileCount = textFileGroups.count { (_, group) -> group.any { it.titleFromMarkup } }
-    if (titledFileCount * 2 < textFileGroups.size) return chapters
+    if (titledFileCount < 2 && hasUntitledTextPageAfterFirstTitle(chapters)) return chapters
 
     val result = mutableListOf<EbookChapter>()
     val pending = mutableListOf<EbookChapter>()
@@ -901,8 +1145,8 @@ internal fun mergeSpinePartsIntoChapters(chapters: List<EbookChapter>): List<Ebo
             chapter.hasNoReaderText() && chapter.images.isEmpty() && !chapter.isVolume -> Unit
             // 纯图片页：攒起来，并入后面第一个正文章节的开头
             chapter.hasNoReaderText() && chapter.images.isNotEmpty() -> pending += chapter
-            // 无标题页（partXXXX）：并入前一章末尾
-            chapter.hasGeneratedTitle() -> {
+            // 无标题页（partXXXX）、或"目录为准"档里被压扁的章节文件（mergesIntoPrevious）：并入前一章末尾
+            chapter.hasGeneratedTitle() || chapter.mergesIntoPrevious -> {
                 val previous = result.lastOrNull()
                 if (previous == null) {
                     pending += chapter
@@ -968,7 +1212,8 @@ internal fun EbookChapter.hasNoReaderText(): Boolean {
 
 /**
  * 给这一章的图打上来源标记（见 [EbookImageOrigin]）。
- * [isSectionTitlePage] = 该 spine 项被目录条目指向（这一页就是某个章节的开头，即题图页）。
+ * [isSectionTitlePage] = 这一页是某个章节的开头（目录条目指向它，或"目录 + 正文标题"档里由
+ * 正文标题元素切出来的），即题图页。
  *
  * 判定只看"这一页有没有正文"，与图片长什么样无关：
  * 有正文 → 图都是章节内部的图；没有正文 → 整页是出版方为图排的一页。
@@ -982,6 +1227,61 @@ internal fun EbookChapter.markImageOrigin(isSectionTitlePage: Boolean): EbookCha
     }
     if (images.values.all { it.origin == origin }) return this
     return copy(images = images.mapValues { (_, image) -> image.copy(origin = origin) })
+}
+
+/** 播放从句 [previousMatch] 走到句 [currentMatch] 时跨过的一张插图（[chapterIndex] + 章内偏移） */
+internal data class EbookImageCrossing(
+    val chapterIndex: Int,
+    val imagePosition: Int
+)
+
+/**
+ * 上一句到当前句之间**被跨过**的第一张插图。
+ *
+ * 为什么需要它：遇图暂停的停点表（[LegadoReaderActivity.rebuildCurrentChapterImageStops] 那条路）
+ * 只能给"本章内有匹配 cue"的图算出触发点。整页插图常常单独成一个章节（出版方给图排的纯图片
+ * spine 页，[EbookImageOrigin.ILLUSTRATION_PAGE]），这种章节里一条 cue 都没有 —— 表里
+ * triggerCueIndex 与 tailCueIndex 都是 null，那个停点**永远命中不了**（表现为"图片被掠过去了"）。
+ * 这里不看布局，只看"上一句句尾 → 当前句句首"这段区间里跨过了哪些章节的图，
+ * 所以独立成章的插图也能在播放跨过它时停下来。
+ *
+ * 口径与原实现（v1.6.13 之前删掉的那条路）一致，另加两点：
+ * - 章节题图页（[EbookImageOrigin.SECTION_TITLE_PAGE]）不算插图，不触发 —— 与停点表同一口径；
+ * - [isExcluded] 用来跳过"刚停过的那一张"（调用方按 lastImageStopKey 过滤）。与原来一样，
+ *   该章第一张图被排除时不再看这一章后面的图，直接看下一章，避免同一段区间里连着停好几次。
+ *
+ * @return 命中的图；两句乱序（回退、句内往前跳）时为 null
+ */
+internal fun findCrossedEbookImage(
+    chapters: List<EbookChapter>,
+    previousMatch: EbookCueMatch,
+    currentMatch: EbookCueMatch,
+    isExcluded: (EbookImageCrossing) -> Boolean = { false }
+): EbookImageCrossing? {
+    if (currentMatch.chapterIndex < previousMatch.chapterIndex) return null
+    if (
+        currentMatch.chapterIndex == previousMatch.chapterIndex &&
+        currentMatch.rawStart <= previousMatch.rawStart
+    ) {
+        return null
+    }
+    for (chapterIndex in previousMatch.chapterIndex..currentMatch.chapterIndex) {
+        val chapter = chapters.getOrNull(chapterIndex) ?: continue
+        // 上一句所在章从"句尾"算起（句子里前面的图不是被跨过的），当前句所在章算到"句首"为止；
+        // 夹在中间的整章都是被跨过的。
+        val start = if (chapterIndex == previousMatch.chapterIndex) previousMatch.rawEnd else 0
+        val end = if (chapterIndex == currentMatch.chapterIndex) currentMatch.rawStart else Int.MAX_VALUE
+        val imagePosition = chapter.images
+            .filterValues { image -> image.origin != EbookImageOrigin.SECTION_TITLE_PAGE }
+            .keys
+            .asSequence()
+            .filter { position -> position in start until end }
+            .minOrNull()
+            ?: continue
+        val crossing = EbookImageCrossing(chapterIndex, imagePosition)
+        if (!isExcluded(crossing)) return crossing
+    }
+    return null
 }
 
 /**
@@ -1126,6 +1426,33 @@ private fun parseOpf(xml: String): OpfData {
         type.contains("html", ignoreCase = true) || type.contains("xhtml", ignoreCase = true) || type.isBlank()
     }
     return OpfData(title = title, manifest = manifest, spineIds = readableSpine.ifEmpty { spine })
+}
+
+/**
+ * 目录没覆盖的 spine 文件该缩进到第几层。
+ *
+ * 取**它前面最近一条目录条目的层级**；那条是"大章节"（下面还有子条目）时 +1 —— 于是
+ * 《心理學經典作品集》里目录没列的自卑與超越各章（part0020_*）会缩进到「自卑與超越」下面，
+ * 而不是和四个卷平级。目录条目不参与切分，这里也只影响目录缩进。
+ *
+ * 返回的是每个 spine 文件"从前面继承到的层级"；有自己目录条目的文件用自己条目的层级
+ * （调用方如此取值），所以这份值只对没有条目的文件、以及"锚点之前那一段"这类没条目的段生效。
+ */
+internal fun inheritedUncoveredLevels(
+    spinePaths: List<String>,
+    tocEntries: List<EpubTocEntry>
+): Map<String, Int> {
+    if (spinePaths.isEmpty()) return emptyMap()
+    val entriesByPath = tocEntries.groupBy { it.path }
+    val result = HashMap<String, Int>()
+    var inherited = 0
+    spinePaths.forEach { path ->
+        // 先记"从前面继承到的层级"，再让这个文件自己的条目影响后面的文件
+        result[path] = inherited
+        val last = entriesByPath[path].orEmpty().lastOrNull() ?: return@forEach
+        inherited = if (last.isGroup) last.level + 1 else last.level
+    }
+    return result
 }
 
 private fun buildEpubTocEntries(

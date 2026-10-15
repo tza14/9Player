@@ -62,6 +62,28 @@ internal enum class ReaderChapterSourceMode {
     M4B
 }
 
+/**
+ * 章节详细度 —— "目录里出现哪些条目"。
+ *
+ * 参考实现里 legado 只认目录（NCX/nav），Hoshi 是"spine 文件为阅读单位 + 目录树做章名"，
+ * 两家目录里都不会出现正文标题推出来的条目。我们的 `EbookChapter` 同时是**阅读单位**
+ * （正文载体），所以不能像 legado 那样把目录没覆盖的文件直接丢掉 —— 那等于丢正文。
+ * 于是分成两档：
+ *
+ * - [TOC_ONLY]（默认）：目录条目 + 目录没覆盖的文件。后者要看第一个标题的**形状**：
+ *   卷级（`第一卷 群體心理`、`BOOK I …`）自己成条；章级（`第一章 生活的意義`）说明这个
+ *   文件里压着好几章，当独立一条会名不副实 ⇒ 并入上一章（正文不丢，目录里不出现假条目）。
+ * - [BODY_HEADINGS]（"显示更多"）：额外把正文里形状像卷/章的标题元素也当切点 ——
+ *   被压扁的文件按真正的章切开，目录条目就齐了。
+ *
+ * 判据是标题**文本**的形状而非 h1-h3 的级别：kindle/calibre 的书里同一个
+ * `<h3 class="…heading2">` 章、卷、小节三种都用（见 [classifyEpubHeading]）。
+ */
+internal enum class ReaderChapterDetailMode {
+    TOC_ONLY,
+    BODY_HEADINGS
+}
+
 internal enum class ReaderBodyTitleMode {
     LEFT,
     CENTER,
@@ -215,6 +237,7 @@ internal data class LegadoReaderPersistedState(
     val verticalProgressDirectionReversed: Boolean = false,
     val selectionPrimaryActionKey: String = "default",
     val chapterSourceMode: ReaderChapterSourceMode = ReaderChapterSourceMode.BOOK,
+    val chapterDetailMode: ReaderChapterDetailMode = ReaderChapterDetailMode.TOC_ONLY,
     val showRubyText: Boolean = true,
     val preferredCharsetName: String? = null,
     val currentBookUri: String? = null,
@@ -417,6 +440,10 @@ internal fun loadLegadoReaderPersistedState(context: Context): LegadoReaderPersi
             .takeIf { it.isNotBlank() }
             ?.let { runCatching { ReaderChapterSourceMode.valueOf(it) }.getOrNull() }
             ?: ReaderChapterSourceMode.BOOK,
+        chapterDetailMode = json.optString("chapterDetailMode")
+            .takeIf { it.isNotBlank() }
+            ?.let { runCatching { ReaderChapterDetailMode.valueOf(it) }.getOrNull() }
+            ?: ReaderChapterDetailMode.TOC_ONLY,
         showRubyText = json.optBoolean("showRubyText", true),
         preferredCharsetName = json.optString("preferredCharsetName").takeIf { it.isNotBlank() },
         currentBookUri = json.optString("currentBookUri").takeIf { it.isNotBlank() },
@@ -626,6 +653,7 @@ internal fun saveLegadoReaderPersistedState(
         put("verticalProgressDirectionReversed", state.verticalProgressDirectionReversed)
         put("selectionPrimaryActionKey", state.selectionPrimaryActionKey)
         put("chapterSourceMode", state.chapterSourceMode.name)
+        put("chapterDetailMode", state.chapterDetailMode.name)
         put("showRubyText", state.showRubyText)
         put("preferredCharsetName", state.preferredCharsetName)
         put("currentBookUri", state.currentBookUri)

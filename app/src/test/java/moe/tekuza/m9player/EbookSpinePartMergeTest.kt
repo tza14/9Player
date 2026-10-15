@@ -1,6 +1,7 @@
 package moe.tekuza.m9player
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -297,6 +298,35 @@ class EbookSpinePartMergeTest {
 
         assertEquals(listOf("第一話", "ch2"), merged.map { it.title })
         assertEquals("第一話の本文。\n\n続き。\n\nさらに続き。\n\nまだ続く。", merged[0].text)
+    }
+
+    @Test
+    fun mergeSpinePartsIntoChapters_foldsUntitledPagesWhenTitlesSpreadThroughTheBook() {
+        // 《無職転生》第2巻的真实形状：目录只有 12 条、锚点落在 7 个文件里，spine 却有 35 个文件，
+        // 其余每个文件都是上一章的续篇（`<title>` 只有 part0008 这种文件名）。
+        // 可信标题散在全书各处，够给无标题页定界 ⇒ 整本合并回 12 条；
+        // 改之前这里会被"覆盖率守卫"判成"目录不可信"而完全不合并，目录里塞满 part00xx。
+        fun untitled(n: Int) = untitledChapter("part%04d".format(n), "第${n}段的正文。")
+        val chapters = listOf(
+            textChapter("第一話", "第一話の本文。"),
+            untitled(8),
+            untitled(9),
+            untitled(10),
+            textChapter("第二話", "第二話の本文。"),
+            untitled(12),
+            textChapter("第三話", "第三話の本文。"),
+            untitled(14)
+        )
+
+        val merged = mergeSpinePartsIntoChapters(chapters)
+
+        assertEquals(listOf("第一話", "第二話", "第三話"), merged.map { it.title })
+        // 续篇正文按 spine 顺序接在各自的章节后面，一段不丢
+        assertTrue(merged[0].text.contains("第8段的正文"))
+        assertTrue(merged[0].text.contains("第10段的正文"))
+        assertFalse(merged[0].text.contains("第12段的正文"))
+        assertTrue(merged[1].text.contains("第12段的正文"))
+        assertTrue(merged[2].text.contains("第14段的正文"))
     }
 
     @Test

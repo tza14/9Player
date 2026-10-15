@@ -225,6 +225,8 @@
     <string name="reader_chapter_source">Chapter source</string>
     <string name="reader_chapter_source_book">Book chapters</string>
     <string name="reader_chapter_source_m4b">M4B chapters</string>
+    <string name="reader_chapter_detail_toc_only">TOC only</string>
+    <string name="reader_chapter_detail_body_headings">Body headings</string>
     <string name="reader_chapter_source_m4b_unavailable">No usable M4B chapters found for the current audio. Reverted to book chapters.</string>
     <string name="reader_ebook_not_ready">ebook is still loading</string>
     <string name="reader_match_title">Match</string>
